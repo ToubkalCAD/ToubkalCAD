@@ -1,0 +1,141 @@
+/* ============================================================
+   ToubkalCAD – global.css
+   Fusion 360-inspired light theme with CSS custom properties
+   ============================================================ */
+
+/* ─── CSS Custom Properties ──────────────────────────────── */
+:root {
+  /* Surfaces */
+  --bg:          #f0f2f5;
+  --surface-1:   #ffffff;
+  --surface-2:   #f8f9fb;
+  --surface-3:   #eef0f3;
+  --surface-4:   #e4e7eb;
+
+  /* Borders */
+  --border:      #d0d4db;
+  --border-soft: #e2e5ea;
+
+  /* Text */
+  --text-primary: #1a1d22;
+  --text-dim:     #4a5568;
+  --text-muted:   #8a96a8;
+
+  /* Accent — Autodesk blue */
+  --accent:       #0696d7;
+  --accent-hover: #0578b5;
+  --accent-dim:   rgba(6, 150, 215, 0.10);
+
+  /* State */
+  --success:      #1a7f37;
+  --warn:         #9a6700;
+  --error:        #cf222e;
+
+  /* Selection */
+  --sel-bg:       rgba(6, 150, 215, 0.08);
+  --sel-border:   #0696d7;
+
+  /* Misc */
+  --radius-sm:    3px;
+  --radius-md:    5px;
+  --shadow-sm:    0 1px 4px rgba(0,0,0,0.08);
+  --shadow-md:    0 3px 12px rgba(0,0,0,0.12);
+}
+
+/* ─── Reset ──────────────────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body, html, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--bg);
+  color: var(--text-primary);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+               'Helvetica Neue', Arial, sans-serif;
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── Scrollbars ─────────────────────────────────────────── */
+::-webkit-scrollbar          { width: 5px; height: 5px; }
+::-webkit-scrollbar-track    { background: transparent; }
+::-webkit-scrollbar-thumb    { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #b0b8c4; }
+*                             { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+
+/* ─── Animations ─────────────────────────────────────────── */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes progress-slide {
+  0%   { transform: translateX(-100%); }
+  50%  { transform: translateX(150%); }
+  100% { transform: translateX(350%); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Dockview light theme overrides ────────────────────── */
+.dockview-theme-light {
+  --dockview-background-color:           var(--bg)        !important;
+  --dockview-pane-background-color:      var(--surface-1) !important;
+  --dockview-tab-background-color:       var(--surface-3) !important;
+  --dockview-activeTab-background-color: var(--surface-1) !important;
+  --dockview-tab-color:                  var(--text-muted) !important;
+  --dockview-activeTab-color:            var(--text-primary) !important;
+  --dockview-separator-border:           1px solid var(--border) !important;
+  --dockview-tab-height:                 30px !important;
+}
+
+/* ─── Tweakpane light mode ───────────────────────────────── */
+.tp-dfwv {
+  width: 100% !important;
+}
+
+/* ─── Global focus / button ──────────────────────────────── */
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+button, input, select, textarea {
+  font-family: inherit;
+}
+
+/* ─── Modal overlay ──────────────────────────────────────── */
+.cad-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(3px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.12s ease-out;
+}
+.cad-modal {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  min-width: 300px;
+  max-width: 480px;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* ─── Utilities ──────────────────────────────────────────── */
+.no-select { user-select: none; -webkit-user-select: none; }
+.flex-center { display: flex; align-items: center; justify-content: center; }
+.fade-in { animation: fadeIn 0.18s ease-out; }
+.mono {
+  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+}

@@ -1,0 +1,38 @@
+{
+  "name": "atlascad",
+  "version": "1.0.0",
+  "description": "Application CAO 3D dans le navigateur - AtlasCAD",
+  "main": "src/index.tsx",
+  "scripts": {
+    "dev": "rspack serve --config rspack.config.ts",
+    "build": "tsc --noEmit && rspack build --config rspack.config.ts",
+    "preview": "rspack serve --config rspack.config.ts --mode production",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "dockview": "^1.11.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-draggable": "^4.6.0",
+    "three": "^0.170.0",
+    "tweakpane": "^4.0.5",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@rspack/cli": "^2.0.2",
+    "@rspack/core": "^2.0.0",
+    "@rspack/dev-server": "^2.0.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/three": "^0.170.0",
+    "file-loader": "^6.2.0",
+    "opencascade.js": "2.0.0-beta.b5ff984",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "private": true
+}

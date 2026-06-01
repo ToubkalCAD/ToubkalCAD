@@ -1,0 +1,267 @@
+// ============================================================
+// ToubkalCAD – CADHierarchyTree.tsx
+// Scene model tree with inline rename, visibility, lock,
+// duplicate, and delete (inline confirmation — no browser dialog).
+// ============================================================
+
+import React, { useState, useRef, useEffect } from 'react';
+import { useCADStore, CADNode, NodeType } from '../store/cadStore';
+
+const NODE_ICONS: Record<NodeType, string> = {
+  box:               '◻',
+  cylinder:          '⬡',
+  sphere:            '●',
+  extrusion:         '↑',
+  boolean_operation: '⊕',
+  compound:          '◈',
+  sketch_wire:       '/',
+  revolve:           '↻',
+  sweep:             '⟿',
+  loft:              '⊿',
+};
+
+const NODE_COLORS: Record<NodeType, string> = {
+  box:               '#5588cc',
+  cylinder:          '#44aa66',
+  sphere:            '#cc6644',
+  extrusion:         '#aa44cc',
+  boolean_operation: '#ccaa22',
+  compound:          '#888888',
+  sketch_wire:       '#ffcc00',
+  revolve:           '#cc4488',
+  sweep:             '#44bbcc',
+  loft:              '#cc8844',
+};
+
+// ─── Icon button ──────────────────────────────────────────────────────────────
+const IconBtn: React.FC<{
+  onClick:  (e: React.MouseEvent) => void;
+  title?:   string;
+  color?:   string;
+  children: React.ReactNode;
+}> = ({ onClick, title, color = 'var(--text-muted)', children }) => (
+  <button
+    onClick={onClick}
+    title={title}
+    style={{
+      background: 'none', border: 'none', color, cursor: 'pointer',
+      padding: '0 3px', fontSize: '11px', lineHeight: 1, opacity: 0.75,
+      transition: 'opacity 0.1s',
+    }}
+    onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '1'; }}
+    onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.opacity = '0.75'; }}
+  >
+    {children}
+  </button>
+);
+
+// ─── Single tree node ─────────────────────────────────────────────────────────
+const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }) => {
+  const node            = useCADStore((s) => s.nodes[nodeId]);
+  const selectedIds     = useCADStore((s) => s.selectedIds);
+  const setSelectedIds  = useCADStore((s) => s.setSelectedIds);
+  const deleteNode      = useCADStore((s) => s.deleteNode);
+  const renameNode      = useCADStore((s) => s.renameNode);
+  const duplicateNode   = useCADStore((s) => s.duplicateNode);
+  const toggleVisibility = useCADStore((s) => s.toggleVisibility);
+  const toggleLock      = useCADStore((s) => s.toggleLock);
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [editValue, setEditValue] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (isEditing) {
+      setEditValue(node?.name ?? '');
+      setTimeout(() => {
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }, 20);
+    }
+  }, [isEditing]);
+
+  if (!node) return null;
+
+  const isSelected = selectedIds.includes(nodeId);
+  const color      = NODE_COLORS[node.type] ?? 'var(--text-dim)';
+
+  const handleClick = (e: React.MouseEvent) => {
+    if (isEditing) return;
+    if (e.ctrlKey || e.metaKey) {
+      setSelectedIds(isSelected
+        ? selectedIds.filter((id) => id !== nodeId)
+        : [...selectedIds, nodeId]
+      );
+    } else {
+      setSelectedIds([nodeId]);
+    }
+  };
+
+  const commitRename = () => {
+    const trimmed = editValue.trim();
+    if (trimmed && trimmed !== node.name) renameNode(nodeId, trimmed);
+    setIsEditing(false);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter')  commitRename();
+    if (e.key === 'Escape') setIsEditing(false);
+    e.stopPropagation();
+  };
+
+  const handleDelete = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    deleteNode(nodeId); // store dispatches cad-remove-mesh for all deleted IDs
+  };
+
+  return (
+    <div>
+      <div
+        onClick={handleClick}
+        onDoubleClick={() => setIsEditing(true)}
+        title="Double-click to rename"
+        style={{
+          display: 'flex', alignItems: 'center', gap: '5px',
+          padding: '3px 6px',
+          paddingLeft: `${6 + depth * 14}px`,
+          cursor: 'pointer',
+          background: isSelected ? 'var(--sel-bg)' : 'transparent',
+          borderLeft: isSelected
+            ? `2px solid ${color}`
+            : '2px solid transparent',
+          borderRadius: '2px',
+          userSelect: 'none',
+          opacity: node.visible ? 1 : 0.4,
+          transition: 'background 0.1s',
+        }}
+        onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLElement).style.background = 'var(--surface-3)'; }}
+        onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+      >
+        {/* Type icon */}
+        <span style={{ fontSize: '11px', color, flexShrink: 0 }}>
+          {NODE_ICONS[node.type] ?? '▪'}
+        </span>
+
+        {/* Name / edit input */}
+        {isEditing ? (
+          <input
+            ref={inputRef}
+            value={editValue}
+            onChange={(e) => setEditValue(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={handleKeyDown}
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              flex: 1, fontSize: '11px',
+              background: 'var(--surface-4)',
+              color: 'var(--text-primary)',
+              border: '1px solid var(--accent)',
+              borderRadius: 'var(--radius-sm)',
+              padding: '1px 5px', outline: 'none',
+            }}
+          />
+        ) : (
+          <span style={{
+            flex: 1, fontSize: '11px', color: 'var(--text-primary)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {node.name}
+            {node.locked && (
+              <span style={{ color: 'var(--text-muted)', marginLeft: '4px', fontSize: '9px' }}>
+                🔒
+              </span>
+            )}
+          </span>
+        )}
+
+        {/* Action icons */}
+        <div style={{ display: 'flex', gap: '1px', flexShrink: 0 }}>
+          <IconBtn
+            onClick={(e) => { e.stopPropagation(); toggleVisibility(nodeId); }}
+            title={node.visible ? 'Hide' : 'Show'}
+          >
+            {node.visible ? '◉' : '○'}
+          </IconBtn>
+          <IconBtn
+            onClick={(e) => { e.stopPropagation(); toggleLock(nodeId); }}
+            title={node.locked ? 'Unlock' : 'Lock'}
+          >
+            {node.locked ? '🔒' : '🔓'}
+          </IconBtn>
+          <IconBtn
+            onClick={(e) => {
+              e.stopPropagation();
+              const newId = duplicateNode(nodeId);
+              window.dispatchEvent(new CustomEvent('cad-duplicate-mesh', { detail: { sourceId: nodeId, newId } }));
+            }}
+            title="Duplicate (Ctrl+D)"
+          >
+            ⧉
+          </IconBtn>
+          <IconBtn
+            color="var(--text-muted)"
+            onClick={handleDelete}
+            title="Delete (Ctrl+Z to undo)"
+          >
+            ✕
+          </IconBtn>
+        </div>
+      </div>
+
+      {/* Children */}
+      {node.children.map((cid) => (
+        <TreeNode key={cid} nodeId={cid} depth={depth + 1} />
+      ))}
+    </div>
+  );
+};
+
+// ─── Full tree ────────────────────────────────────────────────────────────────
+export const CADHierarchyTree: React.FC = () => {
+  const rootIds = useCADStore((s) => s.rootIds);
+  const nodes   = useCADStore((s) => s.nodes);
+  const count   = Object.keys(nodes).length;
+
+  return (
+    <div style={{
+      width: '100%', height: '100%',
+      background: 'var(--surface-1)',
+      display: 'flex', flexDirection: 'column',
+    }}>
+      {/* Header */}
+      <div style={{
+        padding: '5px 10px',
+        borderBottom: '1px solid var(--border)',
+        flexShrink: 0,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      }}>
+        <span style={{
+          fontSize: '9px', color: 'var(--text-muted)',
+          textTransform: 'uppercase', letterSpacing: '0.8px',
+        }}>
+          Model Tree
+        </span>
+        <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+          {count} object{count !== 1 ? 's' : ''}
+        </span>
+      </div>
+
+      {/* Scrollable tree */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '2px 0' }}>
+        {rootIds.length === 0 ? (
+          <div style={{
+            padding: '20px 12px',
+            color: 'var(--text-muted)',
+            fontSize: '11px', fontStyle: 'italic', lineHeight: '1.7',
+          }}>
+            Scene is empty.<br />
+            Create primitives via the toolbar<br />
+            or import a STEP/IGES file.
+          </div>
+        ) : (
+          rootIds.map((id) => <TreeNode key={id} nodeId={id} depth={0} />)
+        )}
+      </div>
+    </div>
+  );
+};

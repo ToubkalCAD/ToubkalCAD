@@ -1,0 +1,20 @@
+// ============================================================
+// AtlasCAD – src/types/index.ts
+// Déclarations TypeScript globales centralisées.
+// ============================================================
+
+// ─── Augmentation window ──────────────────────────────────────────────────────
+declare global {
+  interface Window {
+    /** Instance OpenCascade.js (WASM) chargée au démarrage */
+    oc: any;
+    /** Scène Three.js principale, exposée pour les panels */
+    cadScene: any | null;
+    /** Caméra principale Three.js */
+    cadCamera: any | null;
+    /** OrbitControls principal */
+    cadControls: any | null;
+  }
+}
+
+export {};

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(sed -n '147689,147700p' /home/jamal/Documents/projects/ToubkalCAD/node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(sed -n '147786,147800p' /home/jamal/Documents/projects/ToubkalCAD/node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(sed -n '148122,148133p' /home/jamal/Documents/projects/ToubkalCAD/node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(sed -n '2089,2102p' /home/jamal/Documents/projects/ToubkalCAD/node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(sed -n '2372,2380p' /home/jamal/Documents/projects/ToubkalCAD/node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(sed -n '119444,119465p' /home/jamal/Documents/projects/ToubkalCAD/node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(npm install *)",
+      "Bash(node *)",
+      "Bash(sed -n '11083,11095p' /home/jamal/Documents/projects/ToubkalCAD/node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(sed -n '11230,11270p' /home/jamal/Documents/projects/ToubkalCAD/node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(sed -n '176542,176555p' /home/jamal/Documents/projects/ToubkalCAD/node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(npm run *)"
+    ]
+  }
+}

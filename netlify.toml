@@ -1,0 +1,56 @@
+# ============================================================
+# AtlasCAD – netlify.toml  (v2 – Rspack 2.x + OCC beta)
+#
+# En-têtes HTTP OBLIGATOIRES pour le fonctionnement de WASM :
+#
+#  Cross-Origin-Opener-Policy: same-origin
+#  Cross-Origin-Embedder-Policy: require-corp
+#
+# Ces deux en-têtes activent l'isolation cross-origin (COOP+COEP).
+# Sans eux :
+#   • SharedArrayBuffer est bloqué par le navigateur
+#   • Les Web Workers Emscripten/WASM ne peuvent pas s'initialiser
+#   • OpenCascade.js échoue au démarrage avec une erreur cryptique
+#
+# Référence :
+#   https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/SharedArrayBuffer#security_requirements
+# ============================================================
+
+[build]
+  command   = "npm run build"
+  publish   = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+  NPM_VERSION  = "10"
+
+# ─── En-têtes sur toutes les routes ───────────────────────────
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Cross-Origin-Opener-Policy   = "same-origin"
+    Cross-Origin-Embedder-Policy = "require-corp"
+    X-Frame-Options              = "SAMEORIGIN"
+    X-Content-Type-Options       = "nosniff"
+    Referrer-Policy              = "strict-origin-when-cross-origin"
+
+# ─── Cache agressif pour les fichiers WASM (très lourds) ──────
+[[headers]]
+  for = "/wasm/*"
+  [headers.values]
+    Cache-Control                = "public, max-age=31536000, immutable"
+    Cross-Origin-Opener-Policy   = "same-origin"
+    Cross-Origin-Embedder-Policy = "require-corp"
+    Content-Type                 = "application/wasm"
+
+# ─── Cache pour les assets JS/CSS avec content-hash ──────────
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+
+# ─── SPA fallback (React single-page) ─────────────────────────
+[[redirects]]
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
