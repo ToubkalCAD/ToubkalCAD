@@ -21,6 +21,8 @@ import { useCADGizmoHotkeys }  from '../hooks/useCADGizmoHotkeys';
 import { useCADSketchTool }    from '../hooks/useCADSketchTool';
 import { CADCameraService }    from '../services/CADCameraService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
+import { SketchOverlay }       from './SketchOverlay';
+import { CursorAnnotation }   from './CursorAnnotation';
 
 interface Viewport3DProps {
   onReady?: (
@@ -31,18 +33,6 @@ interface Viewport3DProps {
   ) => void;
 }
 
-const SKETCH_HINTS: Partial<Record<string, string>> = {
-  SKETCH_LINE:          'Click start point · Click end point · Esc = cancel',
-  SKETCH_CIRCLE:        'Click center · Click edge point · Esc = cancel',
-  SKETCH_RECTANGLE:     'Click corner 1 · Click corner 2 · Esc = cancel',
-  SKETCH_ARC:           'Click center · Click start · Click end · Esc = cancel',
-  SKETCH_ARC_3P:        'Click P1 · Click P2 (mid) · Click P3 · Esc = cancel',
-  SKETCH_ELLIPSE:       'Click center · Click major end · Click minor end · Esc = cancel',
-  SKETCH_POLYGON:       'Click center · Click vertex · Esc = cancel',
-  SKETCH_ROUNDED_RECT:  'Click corner 1 · Click corner 2 · Click corner radius · Esc = cancel',
-  SKETCH_BEZIER:        'Click control points · Enter or double-click to finish · Esc = cancel',
-  SKETCH_SPLINE:        'Click through-points · Enter or double-click to finish · Esc = cancel',
-};
 
 export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const containerRef      = useRef<HTMLDivElement>(null);
@@ -64,6 +54,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const gizmoMode       = useCADStore((s) => s.gizmoMode);
   const interactionMode = useCADStore((s) => s.interactionMode);
   const activeWorkplane = useCADStore((s) => s.activeWorkplane);
+  const sketchSession   = useCADStore((s) => s.sketchSession);
   const updateTransform = useCADStore((s) => s.updateTransform);
   const setTransformLive = useCADStore((s) => s.setTransformLive);
 
@@ -87,17 +78,32 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
           camera, controls, activeWorkplane,
         );
       }
-    } else {
-      // Leaving sketch mode — animate back to the pre-sketch view
+    } else if (!sketchSession) {
+      // Leaving sketch entirely (no active session) — restore the pre-sketch camera
       if (restoreCameraRef.current) {
         restoreCameraRef.current();
         restoreCameraRef.current = null;
       }
     }
-  // Fires when sketch ↔ non-sketch boundary is crossed, or workplane changes while sketching.
-  // Switching between sketch tools (LINE→CIRCLE) on the same plane does NOT re-animate.
+    // While a session is active but no tool is selected (SELECT mode between shapes),
+    // we stay at the workplane-normal view so the user can keep drawing comfortably.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [interactionMode.startsWith('SKETCH_'), activeWorkplane]);
+  }, [interactionMode.startsWith('SKETCH_'), activeWorkplane, !!sketchSession]);
+
+  // ─── Camera: animate when a session is resumed from the tree panel ───────────
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const plane = (e as CustomEvent).detail.plane as import('../store/cadStore').Workplane;
+      const camera   = cameraRef.current;
+      const controls = orbitRef.current;
+      if (!camera || !controls) return;
+      // Cancel any existing restore so the session-end restore isn't stale
+      if (restoreCameraRef.current) { restoreCameraRef.current(); restoreCameraRef.current = null; }
+      restoreCameraRef.current = CADCameraService.animateToWorkplaneNormal(camera, controls, plane);
+    };
+    window.addEventListener('cad-session-resumed', handler);
+    return () => window.removeEventListener('cad-session-resumed', handler);
+  }, []);
 
   // ─── Workplane grid: shown when a sketch mode is active ──────────────────────
   useEffect(() => {
@@ -118,7 +124,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       }
     };
 
-    if (!interactionMode.startsWith('SKETCH_')) { removePrev(); return; }
+    // Show grid when using a sketch tool OR when a session is active
+    const inSketchContext = interactionMode.startsWith('SKETCH_') || !!useCADStore.getState().sketchSession;
+    if (!inSketchContext) { removePrev(); return; }
 
     removePrev();
 
@@ -161,7 +169,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     workplaneGridRef.current = group;
 
     return removePrev;
-  }, [interactionMode, activeWorkplane]);
+  // sketchSession dependency ensures grid appears/disappears with the session
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactionMode, activeWorkplane, !!sketchSession]);
 
   // ─── Hotkeys ────────────────────────────────────────────────────────────────
   useCADGizmoHotkeys({
@@ -376,9 +386,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       const { id } = (e as CustomEvent).detail;
       if (!sceneRef.current || !window.oc) return;
       const node = useCADStore.getState().nodes[id];
-      // Sketch wires have no triangulated faces — they're rendered as Three.Line
-      // objects by useCADSketchTool, so there's nothing to tessellate here.
-      if (node?.type === 'sketch_wire') return;
+      // Sketch nodes (session containers and wires) have no OCC shape to tessellate.
+      if (node?.type === 'sketch_wire' || node?.type === 'sketch') return;
       try {
         const mesh = ThreeMeshCache.getInstance().getOrCreateMesh(id, window.oc, 0.1, node?.material);
         sceneRef.current.add(mesh);
@@ -448,12 +457,27 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       }
     };
 
+    // Re-tessellate an existing node after its OCC shape was updated in-place
+    const onUpdate = (e: Event) => {
+      const { id, material } = (e as CustomEvent).detail;
+      const scene = sceneRef.current;
+      if (!scene || !window.oc) return;
+      try {
+        const node = useCADStore.getState().nodes[id];
+        ThreeMeshCache.getInstance().invalidateMesh(id, scene, window.oc, material ?? node?.material);
+      } catch (err: any) {
+        console.error('[Viewport] update mesh:', err);
+        useCADStore.getState().log(`Viewport update error: ${err?.message}`, 'error');
+      }
+    };
+
     window.addEventListener('cad-add-mesh',          onAdd);
     window.addEventListener('cad-remove-mesh',        onRemove);
     window.addEventListener('cad-duplicate-mesh',     onDuplicate);
     window.addEventListener('cad-material-changed',   onMaterial);
     window.addEventListener('cad-visibility-changed', onVisibility);
     window.addEventListener('cad-apply-transform',    onApplyTransform);
+    window.addEventListener('cad-update-mesh',        onUpdate);
     return () => {
       window.removeEventListener('cad-add-mesh',          onAdd);
       window.removeEventListener('cad-remove-mesh',        onRemove);
@@ -461,6 +485,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       window.removeEventListener('cad-material-changed',   onMaterial);
       window.removeEventListener('cad-visibility-changed', onVisibility);
       window.removeEventListener('cad-apply-transform',    onApplyTransform);
+      window.removeEventListener('cad-update-mesh',        onUpdate);
     };
   }, []);
 
@@ -562,20 +587,32 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     };
   }, [interactionMode, projectToWorkplane, clearMeasureObjs]);
 
-  const sketchHint = SKETCH_HINTS[interactionMode] ?? null;
+  // Session idle hint — shown only when in a session but no sketch tool active
+  // (the SketchOverlay handles hints while a tool is active)
+  const sessionIdleHint = !interactionMode.startsWith('SKETCH_') && sketchSession
+    ? `${sketchSession.name} · Pick a sketch tool or click Quit Sketch ✓`
+    : null;
 
   return (
     <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative' }}>
       <CADViewportGizmo />
-      {sketchHint && (
+
+      {/* Sketch coordinate input overlay — shown while a tool is drawing */}
+      <SketchOverlay />
+
+      {/* Live cursor dimension annotation — follows the mouse */}
+      <CursorAnnotation />
+
+      {/* Session idle hint — shown between shapes when no tool selected */}
+      {sessionIdleHint && (
         <div style={{
           position: 'absolute', bottom: 10, left: '50%', transform: 'translateX(-50%)',
-          background: 'rgba(0,20,60,0.82)', color: '#cce4ff',
+          background: 'rgba(60,30,0,0.88)', color: '#ffcc80',
           padding: '5px 14px', borderRadius: 4, fontSize: 11,
           pointerEvents: 'none', zIndex: 20, whiteSpace: 'nowrap',
-          border: '1px solid rgba(0,100,200,0.4)',
+          border: '1px solid rgba(255,153,0,0.4)',
         }}>
-          {sketchHint}
+          {sessionIdleHint}
         </div>
       )}
     </div>

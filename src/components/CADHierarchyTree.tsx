@@ -6,6 +6,12 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { useCADStore, CADNode, NodeType } from '../store/cadStore';
+import { show3DOpPanel } from './Op3DPanel';
+import type { Op3DType } from './Op3DPanel';
+
+// Node types that MAY be re-editable via Op3DPanel (confirmed by node.params?.opType)
+// Note: fillet/chamfer produce 'compound' nodes, so 'compound' is included.
+const REEDITABLE = new Set<NodeType>(['extrusion', 'revolve', 'loft', 'sweep', 'compound']);
 
 const NODE_ICONS: Record<NodeType, string> = {
   box:               '◻',
@@ -14,7 +20,8 @@ const NODE_ICONS: Record<NodeType, string> = {
   extrusion:         '↑',
   boolean_operation: '⊕',
   compound:          '◈',
-  sketch_wire:       '/',
+  sketch:            '✦',
+  sketch_wire:       '╱',
   revolve:           '↻',
   sweep:             '⟿',
   loft:              '⊿',
@@ -27,6 +34,7 @@ const NODE_COLORS: Record<NodeType, string> = {
   extrusion:         '#aa44cc',
   boolean_operation: '#ccaa22',
   compound:          '#888888',
+  sketch:            '#ff9900',
   sketch_wire:       '#ffcc00',
   revolve:           '#cc4488',
   sweep:             '#44bbcc',
@@ -57,17 +65,21 @@ const IconBtn: React.FC<{
 
 // ─── Single tree node ─────────────────────────────────────────────────────────
 const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }) => {
-  const node            = useCADStore((s) => s.nodes[nodeId]);
-  const selectedIds     = useCADStore((s) => s.selectedIds);
-  const setSelectedIds  = useCADStore((s) => s.setSelectedIds);
-  const deleteNode      = useCADStore((s) => s.deleteNode);
-  const renameNode      = useCADStore((s) => s.renameNode);
-  const duplicateNode   = useCADStore((s) => s.duplicateNode);
-  const toggleVisibility = useCADStore((s) => s.toggleVisibility);
-  const toggleLock      = useCADStore((s) => s.toggleLock);
+  const node               = useCADStore((s) => s.nodes[nodeId]);
+  const selectedIds        = useCADStore((s) => s.selectedIds);
+  const sketchSession      = useCADStore((s) => s.sketchSession);
+  const setSelectedIds     = useCADStore((s) => s.setSelectedIds);
+  const deleteNode         = useCADStore((s) => s.deleteNode);
+  const renameNode         = useCADStore((s) => s.renameNode);
+  const duplicateNode      = useCADStore((s) => s.duplicateNode);
+  const toggleVisibility   = useCADStore((s) => s.toggleVisibility);
+  const toggleLock         = useCADStore((s) => s.toggleLock);
+  const resumeSketch       = useCADStore((s) => s.resumeSketchSession);
+  const openContextMenu    = useCADStore((s) => s.openTreeContextMenu);
 
-  const [isEditing, setIsEditing] = useState(false);
-  const [editValue, setEditValue] = useState('');
+  const [isEditing,  setIsEditing]  = useState(false);
+  const [editValue,  setEditValue]  = useState('');
+  const [collapsed,  setCollapsed]  = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -82,11 +94,20 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
 
   if (!node) return null;
 
-  const isSelected = selectedIds.includes(nodeId);
-  const color      = NODE_COLORS[node.type] ?? 'var(--text-dim)';
+  const isSelected   = selectedIds.includes(nodeId);
+  const isActiveSketch = node.type === 'sketch' && sketchSession?.id === nodeId;
+  const color        = NODE_COLORS[node.type] ?? 'var(--text-dim)';
+  const hasChildren  = node.children.length > 0;
 
   const handleClick = (e: React.MouseEvent) => {
     if (isEditing) return;
+    if (node.type === 'sketch' && hasChildren) {
+      // Single-click on sketch container toggles collapse
+      if (!e.ctrlKey && !e.metaKey) {
+        setCollapsed((c) => !c);
+        return;
+      }
+    }
     if (e.ctrlKey || e.metaKey) {
       setSelectedIds(isSelected
         ? selectedIds.filter((id) => id !== nodeId)
@@ -118,25 +139,64 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
     <div>
       <div
         onClick={handleClick}
-        onDoubleClick={() => setIsEditing(true)}
-        title="Double-click to rename"
+        onDoubleClick={(e) => {
+          const opType = node.params?.opType as Op3DType | undefined;
+          const wireIds = node.params?.targetWireIds as string[] | undefined;
+          if (REEDITABLE.has(node.type) && opType && wireIds?.length) {
+            // Re-edit the 3D operation with the previously stored params
+            e.stopPropagation();
+            show3DOpPanel(opType, wireIds, nodeId);
+          } else if (node.type === 'sketch') {
+            e.stopPropagation();
+            resumeSketch(nodeId);
+          } else {
+            setIsEditing(true);
+          }
+        }}
+        onContextMenu={(e) => {
+          const isContextable = node.type === 'sketch'
+            || node.type === 'sketch_wire'
+            || (REEDITABLE.has(node.type) && !!node.params?.opType);
+          if (isContextable) {
+            e.preventDefault();
+            e.stopPropagation();
+            setSelectedIds([nodeId]);
+            openContextMenu(nodeId, e.clientX, e.clientY);
+          }
+        }}
+        title={
+          REEDITABLE.has(node.type) && node.params?.opType
+            ? 'Double-click to re-edit this operation'
+            : node.type === 'sketch'
+            ? 'Double-click to resume · Right-click for 3D ops'
+            : 'Double-click to rename'
+        }
         style={{
           display: 'flex', alignItems: 'center', gap: '5px',
           padding: '3px 6px',
           paddingLeft: `${6 + depth * 14}px`,
           cursor: 'pointer',
-          background: isSelected ? 'var(--sel-bg)' : 'transparent',
-          borderLeft: isSelected
-            ? `2px solid ${color}`
-            : '2px solid transparent',
+          background: isActiveSketch
+            ? 'rgba(255,153,0,0.12)'
+            : isSelected ? 'var(--sel-bg)' : 'transparent',
+          borderLeft: isActiveSketch
+            ? '2px solid #ff9900'
+            : isSelected ? `2px solid ${color}` : '2px solid transparent',
           borderRadius: '2px',
           userSelect: 'none',
           opacity: node.visible ? 1 : 0.4,
           transition: 'background 0.1s',
         }}
-        onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLElement).style.background = 'var(--surface-3)'; }}
-        onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+        onMouseEnter={(e) => { if (!isSelected && !isActiveSketch) (e.currentTarget as HTMLElement).style.background = 'var(--surface-3)'; }}
+        onMouseLeave={(e) => { if (!isSelected && !isActiveSketch) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
       >
+        {/* Collapse toggle for sketch containers */}
+        {node.type === 'sketch' ? (
+          <span style={{ fontSize: '8px', color: 'var(--text-muted)', flexShrink: 0, width: '10px' }}>
+            {hasChildren ? (collapsed ? '▶' : '▼') : ''}
+          </span>
+        ) : null}
+
         {/* Type icon */}
         <span style={{ fontSize: '11px', color, flexShrink: 0 }}>
           {NODE_ICONS[node.type] ?? '▪'}
@@ -167,10 +227,26 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
           }}>
             {node.name}
             {node.locked && (
-              <span style={{ color: 'var(--text-muted)', marginLeft: '4px', fontSize: '9px' }}>
-                🔒
-              </span>
+              <span style={{ color: 'var(--text-muted)', marginLeft: '4px', fontSize: '9px' }}>🔒</span>
             )}
+          </span>
+        )}
+
+        {/* Re-editable 3D op indicator */}
+        {REEDITABLE.has(node.type) && node.params?.opType && (
+          <span title="Double-click to re-edit" style={{
+            fontSize: '9px', color: 'var(--accent)', opacity: 0.6, flexShrink: 0,
+          }}>✎</span>
+        )}
+
+        {/* Active-session indicator pill */}
+        {isActiveSketch && (
+          <span style={{
+            fontSize: '8px', color: '#ff9900', background: 'rgba(255,153,0,0.18)',
+            border: '1px solid rgba(255,153,0,0.4)',
+            borderRadius: '3px', padding: '0 4px', flexShrink: 0, whiteSpace: 'nowrap',
+          }}>
+            ACTIVE
           </span>
         )}
 
@@ -209,7 +285,7 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
       </div>
 
       {/* Children */}
-      {node.children.map((cid) => (
+      {!collapsed && node.children.map((cid) => (
         <TreeNode key={cid} nodeId={cid} depth={depth + 1} />
       ))}
     </div>

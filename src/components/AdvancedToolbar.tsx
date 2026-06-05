@@ -302,11 +302,9 @@ export const AdvancedToolbar: React.FC = () => {
       setProc(true, 'Computing sweep…');
       try {
         const solid = OccSweepService.sweepProfile(window.oc, profile, spine);
-        const name  = `Sweep (${nodes[profileId]?.name ?? 'profile'} along ${nodes[spineId]?.name ?? 'spine'})`;
+        const name  = `Sweep(${nodes[profileId]?.name ?? 'profile'})`;
         registerResult(crypto.randomUUID(), name, 'sweep', solid, { profileId, spineId });
-      } finally {
-        setProc(false);
-      }
+      } finally { setProc(false); }
     });
   };
 
@@ -321,11 +319,9 @@ export const AdvancedToolbar: React.FC = () => {
       setProc(true, `Lofting ${wires.length} profiles…`);
       try {
         const solid = OccLoftService.loftProfiles(window.oc, wires);
-        const name  = `Loft (${wires.length} profiles)`;
+        const name  = `Loft(${wires.length})`;
         registerResult(crypto.randomUUID(), name, 'loft', solid, { profileIds: sketchSels });
-      } finally {
-        setProc(false);
-      }
+      } finally { setProc(false); }
     });
   };
 

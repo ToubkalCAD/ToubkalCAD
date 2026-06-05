@@ -1,12 +1,9 @@
 // ============================================================
-// ToubkalCAD – useCADSketchTool.ts  (v4 — any-plane sketching)
+// ToubkalCAD – useCADSketchTool.ts
 //
-// All clicks are projected onto the active workplane (stored in
-// Zustand).  Geometry is created in 3D world space directly via
-// OccSketchService (3D APIs) — no 2D-to-3D transforms required.
-//
-// Three.js preview lines are positioned in world space too,
-// so they are always on the chosen plane regardless of orientation.
+// Handles all SKETCH_* interaction modes.
+// Mouse clicks AND overlay-injected points both funnel through
+// processClick() so the step counter and store stay in sync.
 // ============================================================
 
 import { useEffect, useRef, useCallback } from 'react';
@@ -27,7 +24,6 @@ function mkLine(pts: THREE.Vector3[], color: number): THREE.Line {
   return new THREE.Line(geo, new THREE.LineBasicMaterial({ color, depthTest: false }));
 }
 
-/** Sample a circle on any plane (in world space). */
 function sampleCircle3D(center: THREE.Vector3, rim: THREE.Vector3, wp: Workplane, segs = 72): THREE.Vector3[] {
   const r   = center.distanceTo(rim);
   const { uAxis, vAxis } = workplaneBasis(wp);
@@ -37,7 +33,6 @@ function sampleCircle3D(center: THREE.Vector3, rim: THREE.Vector3, wp: Workplane
   });
 }
 
-/** Sample an arc on any plane from start to end (passing through a mid direction). */
 function sampleArc3D(
   center: THREE.Vector3, startPt: THREE.Vector3, endPt: THREE.Vector3,
   wp: Workplane, segs = 48,
@@ -62,7 +57,6 @@ function sampleArc3PPreview(p1: THREE.Vector3, p2: THREE.Vector3, p3: THREE.Vect
   if (Math.abs(D) < 1e-10) return null;
   const ux = ((lp1.u*lp1.u+lp1.v*lp1.v)*(lp2.v-lp3.v)+(lp2.u*lp2.u+lp2.v*lp2.v)*(lp3.v-lp1.v)+(lp3.u*lp3.u+lp3.v*lp3.v)*(lp1.v-lp2.v)) / D;
   const uy = ((lp1.u*lp1.u+lp1.v*lp1.v)*(lp3.u-lp2.u)+(lp2.u*lp2.u+lp2.v*lp2.v)*(lp1.u-lp3.u)+(lp3.u*lp3.u+lp3.v*lp3.v)*(lp2.u-lp1.u)) / D;
-  const r   = Math.hypot(lp1.u-ux, lp1.v-uy);
   const center = fromLocal2D(ux, uy, wp);
   return sampleArc3D(center, p1, p3, wp);
 }
@@ -164,15 +158,13 @@ export function useCADSketchTool(
     const ray  = new THREE.Raycaster();
     ray.setFromCamera(ndc, camera);
 
-    // Build Three.js plane from workplane definition
     const n    = new THREE.Vector3(...wp.normal).normalize();
     const o    = new THREE.Vector3(...wp.origin);
-    const d    = -n.dot(o);  // plane constant: n·x + d = 0
+    const d    = -n.dot(o);
     const pl   = new THREE.Plane(n, d);
     const hit  = new THREE.Vector3();
     if (!ray.ray.intersectPlane(pl, hit)) return null;
 
-    // Optional snap
     const { snapEnabled, snapStep } = useCADStore.getState();
     if (snapEnabled) {
       const lc  = toLocal2D(hit, wp);
@@ -218,7 +210,23 @@ export function useCADSketchTool(
     });
     committedRef.current = [];
     clicksRef.current    = [];
+    useCADStore.getState().resetSketchInput();
   }, [sceneRef, clearPreview]);
+
+  // ─── Cancel last registered point (Esc step-back) ────────────────────────────
+
+  const cancelLastPoint = useCallback(() => {
+    if (clicksRef.current.length === 0) return;
+    clicksRef.current.pop();
+    clearPreview(); // preview will refresh on next mousemove
+    const wp      = useCADStore.getState().activeWorkplane;
+    const localPts = clicksRef.current.map((c) => {
+      const loc = toLocal2D(c, wp);
+      return { x: loc.u, y: loc.v };
+    });
+    useCADStore.getState().setSketchInputStep(clicksRef.current.length);
+    useCADStore.getState().setSketchPoints(localPts);
+  }, [clearPreview]);
 
   // ─── Register finalized sketch ───────────────────────────────────────────────
 
@@ -233,17 +241,151 @@ export function useCADSketchTool(
     clearPreview();
     clicksRef.current = [];
 
+    useCADStore.getState().resetSketchInput();
+
+    const { sketchSession } = useCADStore.getState();
+
     useCADStore.getState().addNode({
       id, name: shapeLabel, type: 'sketch_wire',
-      visible: true, locked: false, parentId: null, notes: '',
+      visible: true, locked: false,
+      parentId: sketchSession?.id ?? null,
+      notes: '',
       transform: { position:[0,0,0], rotation:[0,0,0], scale:[1,1,1] },
       material:  { color:0x003388, roughness:0.5, metalness:0, wireframe:true, opacity:1, transparent:false },
       params: { workplane: wp },
     });
     useCADStore.getState().setSelectedIds([id]);
-    useCADStore.getState().log(`Sketch "${shapeLabel}" on ${wp.label} plane. Click Extrude to create solid.`, 'success');
+    useCADStore.getState().log(
+      sketchSession
+        ? `Added "${shapeLabel}" to ${sketchSession.name}.`
+        : `Sketch "${shapeLabel}" on ${wp.label} plane. Click Extrude to create solid.`,
+      'success',
+    );
     useCADStore.getState().setInteractionMode('SELECT');
   }, [clearPreview]);
+
+  // ─── Process a single confirmed click (mouse or overlay) ─────────────────────
+  // Reads mode/workplane from store at call-time to avoid stale closures.
+
+  const processClick = useCallback((pt: THREE.Vector3) => {
+    const oc = window.oc;
+    if (!oc) { useCADStore.getState().log('OCC kernel not ready.', 'error'); return; }
+
+    const { interactionMode: mode, activeWorkplane: wp, sketchPolygonSides: sides } = useCADStore.getState();
+    if (!mode.startsWith('SKETCH_')) return;
+
+    const clicks = clicksRef.current;
+    clicks.push(pt.clone());
+
+    // Sync step counter and local-2D points with store (for overlay)
+    const localPts = clicks.map((c) => { const l = toLocal2D(c, wp); return { x: l.u, y: l.v }; });
+    useCADStore.getState().setSketchInputStep(clicks.length);
+    useCADStore.getState().setSketchPoints(localPts);
+
+    try {
+      switch (mode) {
+
+        case 'SKETCH_LINE': {
+          if (clicks.length === 2) {
+            const [a, b] = clicks;
+            const edge = OccSketchService.createLineEdge(oc, a, b);
+            const wire = OccSketchService.createClosedWireFromEdges(oc, [edge]);
+            addCommitted([a.clone(), b.clone()]);
+            registerWire(oc, wire, 'Line', wp);
+          }
+          break;
+        }
+
+        case 'SKETCH_CIRCLE': {
+          if (clicks.length === 2) {
+            const [c, rim] = clicks;
+            const r = c.distanceTo(rim);
+            if (r < 0.01) { clicks.pop(); break; }
+            const wire = OccSketchService.createCircleWire(oc, c, rim, wp);
+            addCommitted(sampleCircle3D(c, rim, wp));
+            registerWire(oc, wire, `Circle-r${r.toFixed(1)}`, wp);
+          }
+          break;
+        }
+
+        case 'SKETCH_RECTANGLE': {
+          if (clicks.length === 2) {
+            const [c1, c2] = clicks;
+            const wire = OccSketchService.createRectangleWire(oc, c1, c2, wp);
+            addCommitted(sampleRect3D(c1, c2, wp));
+            registerWire(oc, wire, 'Rectangle', wp);
+          }
+          break;
+        }
+
+        case 'SKETCH_ARC': {
+          if (clicks.length === 3) {
+            const [center, startPt, endPt] = clicks;
+            const edge = OccSketchService.createArcEdge(oc, center, startPt, endPt, wp);
+            const wire = OccSketchService.createClosedWireFromEdges(oc, [edge]);
+            addCommitted(sampleArc3D(center, startPt, endPt, wp));
+            registerWire(oc, wire, 'Arc', wp);
+          }
+          break;
+        }
+
+        case 'SKETCH_ARC_3P': {
+          if (clicks.length === 3) {
+            const [p1, p2, p3] = clicks;
+            const edge = OccSketchService.createArcByThreePoints(oc, p1, p2, p3, wp);
+            const wire = OccSketchService.createClosedWireFromEdges(oc, [edge]);
+            const preview = sampleArc3PPreview(p1, p2, p3, wp);
+            addCommitted(preview ?? [p1.clone(), p2.clone(), p3.clone()]);
+            registerWire(oc, wire, 'Arc-3P', wp);
+          }
+          break;
+        }
+
+        case 'SKETCH_ELLIPSE': {
+          if (clicks.length === 3) {
+            const [c, majPt, minPt] = clicks;
+            const wire = OccSketchService.createEllipseWire(oc, c, majPt, minPt, wp);
+            addCommitted(sampleEllipse3D(c, majPt, minPt, wp));
+            registerWire(oc, wire, 'Ellipse', wp);
+          }
+          break;
+        }
+
+        case 'SKETCH_POLYGON': {
+          if (clicks.length === 2) {
+            const [c, rim] = clicks;
+            const wire  = OccSketchService.createPolygonWire(oc, c, rim, sides, wp);
+            addCommitted(samplePolygon3D(c, rim, sides, wp));
+            registerWire(oc, wire, `Polygon-${sides}`, wp);
+          }
+          break;
+        }
+
+        case 'SKETCH_ROUNDED_RECT': {
+          if (clicks.length === 3) {
+            const [c1, c2, rPt] = clicks;
+            const l1 = toLocal2D(c1, wp); const l2 = toLocal2D(c2, wp);
+            const cornerRadius = Math.max(0.1,
+              Math.min(rPt.distanceTo(c1), Math.min(Math.abs(l2.u-l1.u), Math.abs(l2.v-l1.v))/2 - 0.001));
+            const wire = OccSketchService.createRoundedRectangleWire(oc, c1, c2, cornerRadius, wp);
+            addCommitted(sampleRect3D(c1, c2, wp));
+            registerWire(oc, wire, `RndRect-r${cornerRadius.toFixed(1)}`, wp);
+          }
+          break;
+        }
+
+        case 'SKETCH_BEZIER':
+        case 'SKETCH_SPLINE':
+          // Accumulate; finish on Enter key or Finish button
+          break;
+
+        default: break;
+      }
+    } catch (err: any) {
+      useCADStore.getState().log(`Sketch error: ${err.message}`, 'error');
+      cancelAll();
+    }
+  }, [addCommitted, registerWire, cancelAll]);
 
   // ─── Cleanup wires when nodes are deleted ────────────────────────────────────
 
@@ -282,132 +424,21 @@ export function useCADSketchTool(
 
     const getWP = () => useCADStore.getState().activeWorkplane;
 
+    // Mouse click → project to plane → processClick
+    // IMPORTANT: skip if the click landed on an HTML overlay element
+    // (SketchOverlay inputs/buttons). Without this guard the capture listener
+    // fires BEFORE the button's onClick, producing a spurious extra click at
+    // the raw mouse position — doubling every overlay-submitted point.
     const onDown = (e: MouseEvent) => {
       if (e.button !== 0) return;
+      if ((e.target as HTMLElement).closest('[data-sketch-overlay]')) return;
       const mode = useCADStore.getState().interactionMode;
       if (!mode.startsWith('SKETCH_')) return;
       e.stopPropagation();
-
       const wp = getWP();
       const pt = project(e, wp);
       if (!pt) return;
-      const oc = window.oc;
-      if (!oc) { useCADStore.getState().log('OCC kernel not ready.', 'error'); return; }
-
-      const clicks = clicksRef.current;
-      clicks.push(pt.clone());
-
-      try {
-        switch (mode) {
-
-          case 'SKETCH_LINE': {
-            if (clicks.length === 2) {
-              const [a, b] = clicks;
-              const edge = OccSketchService.createLineEdge(oc, a, b);
-              const wire = OccSketchService.createClosedWireFromEdges(oc, [edge]);
-              addCommitted([a.clone(), b.clone()]);
-              registerWire(oc, wire, `Line`, wp);
-            }
-            break;
-          }
-
-          case 'SKETCH_CIRCLE': {
-            if (clicks.length === 2) {
-              const [c, rim] = clicks;
-              const r = c.distanceTo(rim);
-              if (r < 0.01) { clicks.pop(); break; }
-              const wire = OccSketchService.createCircleWire(oc, c, rim, wp);
-              addCommitted(sampleCircle3D(c, rim, wp));
-              registerWire(oc, wire, `Circle-r${r.toFixed(1)}`, wp);
-            }
-            break;
-          }
-
-          case 'SKETCH_RECTANGLE': {
-            if (clicks.length === 2) {
-              const [c1, c2] = clicks;
-              const wire = OccSketchService.createRectangleWire(oc, c1, c2, wp);
-              addCommitted(sampleRect3D(c1, c2, wp));
-              registerWire(oc, wire, `Rectangle`, wp);
-            }
-            break;
-          }
-
-          case 'SKETCH_ARC': {
-            // 3 clicks: center → start → end
-            if (clicks.length === 3) {
-              const [center, startPt, endPt] = clicks;
-              const edge = OccSketchService.createArcEdge(oc, center, startPt, endPt, wp);
-              const wire = OccSketchService.createClosedWireFromEdges(oc, [edge]);
-              addCommitted(sampleArc3D(center, startPt, endPt, wp));
-              registerWire(oc, wire, `Arc`, wp);
-            }
-            break;
-          }
-
-          case 'SKETCH_ARC_3P': {
-            if (clicks.length === 3) {
-              const [p1, p2, p3] = clicks;
-              const edge = OccSketchService.createArcByThreePoints(oc, p1, p2, p3, wp);
-              const wire = OccSketchService.createClosedWireFromEdges(oc, [edge]);
-              const preview = sampleArc3PPreview(p1, p2, p3, wp);
-              addCommitted(preview ?? [p1.clone(), p2.clone(), p3.clone()]);
-              registerWire(oc, wire, `Arc-3P`, wp);
-            }
-            break;
-          }
-
-          case 'SKETCH_ELLIPSE': {
-            if (clicks.length === 3) {
-              const [c, majPt, minPt] = clicks;
-              const wire = OccSketchService.createEllipseWire(oc, c, majPt, minPt, wp);
-              addCommitted(sampleEllipse3D(c, majPt, minPt, wp));
-              registerWire(oc, wire, `Ellipse`, wp);
-            }
-            break;
-          }
-
-          case 'SKETCH_POLYGON': {
-            if (clicks.length === 2) {
-              const [c, rim] = clicks;
-              const sides = useCADStore.getState().sketchPolygonSides;
-              const wire  = OccSketchService.createPolygonWire(oc, c, rim, sides, wp);
-              addCommitted(samplePolygon3D(c, rim, sides, wp));
-              registerWire(oc, wire, `Polygon-${sides}`, wp);
-            }
-            break;
-          }
-
-          case 'SKETCH_ROUNDED_RECT': {
-            if (clicks.length === 3) {
-              const [c1, c2, rPt] = clicks;
-              const l1 = toLocal2D(c1, wp); const l2 = toLocal2D(c2, wp);
-              const cx = Math.min(l1.u,l2.u); const cy = Math.min(l1.v,l2.v);
-              const r  = Math.max(0.1, Math.min(
-                c1.distanceTo(new THREE.Vector3(...wp.origin).add(
-                  new THREE.Vector3(...wp.uAxis).multiplyScalar(cx)
-                )), Math.min(Math.abs(l2.u-l1.u), Math.abs(l2.v-l1.v))/2 - 0.001,
-              ));
-              const cornerRadius = Math.max(0.1,
-                Math.min(rPt.distanceTo(c1), Math.min(Math.abs(l2.u-l1.u), Math.abs(l2.v-l1.v))/2 - 0.001));
-              const wire = OccSketchService.createRoundedRectangleWire(oc, c1, c2, cornerRadius, wp);
-              addCommitted(sampleRect3D(c1, c2, wp));
-              registerWire(oc, wire, `RndRect-r${cornerRadius.toFixed(1)}`, wp);
-            }
-            break;
-          }
-
-          case 'SKETCH_BEZIER':
-          case 'SKETCH_SPLINE':
-            // Accumulate; finish on Enter / double-click
-            break;
-
-          default: break;
-        }
-      } catch (err: any) {
-        useCADStore.getState().log(`Sketch error: ${err.message}`, 'error');
-        cancelAll();
-      }
+      processClick(pt);
     };
 
     const onDblClick = (e: MouseEvent) => {
@@ -438,10 +469,19 @@ export function useCADSketchTool(
 
     const onMove = (e: MouseEvent) => {
       const mode = useCADStore.getState().interactionMode;
-      if (!mode.startsWith('SKETCH_')) { clearPreview(); return; }
+      if (!mode.startsWith('SKETCH_')) {
+        clearPreview();
+        useCADStore.getState().setSketchPreviewPoint(null);
+        return;
+      }
       const wp = getWP();
       const pt = project(e, wp);
       if (!pt) return;
+
+      // Update the overlay's live coordinate display
+      const loc = toLocal2D(pt, wp);
+      useCADStore.getState().setSketchPreviewPoint({ x: loc.u, y: loc.v });
+
       const clicks = clicksRef.current;
 
       switch (mode) {
@@ -496,26 +536,59 @@ export function useCADSketchTool(
     const onKey = (e: KeyboardEvent) => {
       const mode = useCADStore.getState().interactionMode;
       if (!mode.startsWith('SKETCH_')) return;
+
       if (e.key === 'Escape') {
-        cancelAll();
-        useCADStore.getState().log('Sketch cancelled.', 'warn');
-        useCADStore.getState().setInteractionMode('SELECT');
+        const { sketchInputStep } = useCADStore.getState();
+        if (sketchInputStep > 0) {
+          // Roll back one step — the overlay Esc triggers this path too
+          cancelLastPoint();
+        } else {
+          cancelAll();
+          useCADStore.getState().log('Sketch cancelled.', 'warn');
+          useCADStore.getState().setInteractionMode('SELECT');
+        }
       } else if (e.key === 'Enter') {
         if (mode === 'SKETCH_BEZIER' || mode === 'SKETCH_SPLINE') finishCurve(mode);
       }
     };
 
+    // Overlay injects a local-2D point → convert to world 3D → processClick
+    const onInjectPoint = (e: Event) => {
+      const { localX, localY } = (e as CustomEvent).detail as { localX: number; localY: number };
+      const wp = useCADStore.getState().activeWorkplane;
+      const pt = fromLocal2D(localX, localY, wp);
+      processClick(pt);
+    };
+
+    // Overlay's Finish button (Bezier / Spline)
+    const onFinishCurve = () => {
+      const mode = useCADStore.getState().interactionMode;
+      finishCurve(mode);
+    };
+
+    // Hide the cursor annotation when the mouse leaves the viewport
+    const onLeave = () => useCADStore.getState().setSketchPreviewPoint(null);
+
     container.addEventListener('mousedown', onDown, true);
     container.addEventListener('dblclick',  onDblClick, true);
     container.addEventListener('mousemove', onMove);
+    container.addEventListener('mouseleave', onLeave);
     window.addEventListener('keydown', onKey);
+    window.addEventListener('cad-sketch-inject-point', onInjectPoint);
+    window.addEventListener('cad-sketch-finish-curve', onFinishCurve);
+
     return () => {
       container.removeEventListener('mousedown', onDown, true);
       container.removeEventListener('dblclick',  onDblClick, true);
       container.removeEventListener('mousemove', onMove);
+      container.removeEventListener('mouseleave', onLeave);
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('cad-sketch-inject-point', onInjectPoint);
+      window.removeEventListener('cad-sketch-finish-curve', onFinishCurve);
       clearPreview();
+      useCADStore.getState().setSketchPreviewPoint(null);
     };
   }, [interactionMode, activeWorkplane, sketchPolygonSides,
-      project, setPreview, clearPreview, addCommitted, cancelAll, registerWire]);
+      project, setPreview, clearPreview, addCommitted, cancelAll, cancelLastPoint,
+      processClick, registerWire]);
 }

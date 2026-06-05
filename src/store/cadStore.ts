@@ -11,7 +11,7 @@ import { create } from 'zustand';
 export type NodeType =
   | 'box' | 'cylinder' | 'sphere'
   | 'extrusion' | 'boolean_operation' | 'compound'
-  | 'sketch_wire'
+  | 'sketch' | 'sketch_wire'
   | 'revolve' | 'sweep' | 'loft';
 
 // ─── Workplane ────────────────────────────────────────────────────────────────
@@ -129,6 +129,17 @@ interface CADState {
   planeSelectorOpen:  boolean;
   pendingSketchMode:  InteractionMode | null;
 
+  /** Active sketch session — non-null while the user is inside a sketch session. */
+  sketchSession: { id: string; name: string; plane: Workplane } | null;
+  sketchSessionCount: number;
+
+  /** Sketch input overlay state — number of clicks already registered in this tool interaction. */
+  sketchInputStep: number;
+  /** Local-2D coordinates (u, v) of each registered click, exposed to the overlay. */
+  sketchPoints: { x: number; y: number }[];
+  /** Current mouse position in local-2D plane coordinates, updated on every mousemove. */
+  sketchPreviewPoint: { x: number; y: number } | null;
+
   // ── Actions ────────────────────────────────────────────────────────────────
 
   addNode:            (node: Omit<CADNode, 'children'>) => void;
@@ -150,6 +161,28 @@ interface CADState {
   setActiveWorkplane:    (wp: Workplane) => void;
   openPlaneSelector:     (pendingMode: InteractionMode) => void;
   closePlaneSelector:    () => void;
+  /** Create the parent Sketch node, set activeWorkplane, and open the session. */
+  startSketchSession:    (plane: Workplane) => void;
+  /** Finalize the session and return to SELECT mode. */
+  quitSketchSession:     () => void;
+
+  setSketchInputStep:    (n: number) => void;
+  setSketchPoints:       (pts: { x: number; y: number }[]) => void;
+  setSketchPreviewPoint: (pt: { x: number; y: number } | null) => void;
+  resetSketchInput:      () => void;
+
+  /** Re-enter an existing sketch session without creating a new parent node. */
+  resumeSketchSession:   (sketchId: string) => void;
+
+  /** Move a node to a new parent (or to root if newParentId is null). */
+  reparentNode: (nodeId: string, newParentId: string | null) => void;
+  /** Merge extra key/value pairs into a node's params without touching other fields. */
+  setNodeParams: (nodeId: string, params: Record<string, any>) => void;
+
+  /** Right-click context menu on tree sketch nodes. */
+  treeContextMenu: { nodeId: string; x: number; y: number } | null;
+  openTreeContextMenu:  (nodeId: string, x: number, y: number) => void;
+  closeTreeContextMenu: () => void;
 
   addMeasurement:    (m: Omit<CADMeasurement, 'id'>) => void;
   removeMeasurement: (id: string) => void;
@@ -178,6 +211,28 @@ export const DEFAULT_MATERIAL: CADMaterial = {
   transparent: false,
 };
 
+export function normalizeMaterial(material: Partial<CADMaterial>): CADMaterial {
+  const color = Number.isFinite(material.color) ? (((material.color as number) & 0xffffff)) : DEFAULT_MATERIAL.color;
+  const roughness = Number.isFinite(material.roughness)
+    ? Math.min(1, Math.max(0, material.roughness as number))
+    : DEFAULT_MATERIAL.roughness;
+  const metalness = Number.isFinite(material.metalness)
+    ? Math.min(1, Math.max(0, material.metalness as number))
+    : DEFAULT_MATERIAL.metalness;
+  const opacity = Number.isFinite(material.opacity)
+    ? Math.min(1, Math.max(0, material.opacity as number))
+    : DEFAULT_MATERIAL.opacity;
+
+  return {
+    color,
+    roughness,
+    metalness,
+    opacity,
+    transparent: typeof material.transparent === 'boolean' ? material.transparent : DEFAULT_MATERIAL.transparent,
+    wireframe:   typeof material.wireframe   === 'boolean' ? material.wireframe   : DEFAULT_MATERIAL.wireframe,
+  };
+}
+
 export const NODE_TYPE_COLORS: Record<NodeType, number> = {
   box:               0x5588cc,
   cylinder:          0x44aa66,
@@ -185,6 +240,7 @@ export const NODE_TYPE_COLORS: Record<NodeType, number> = {
   extrusion:         0xaa44cc,
   boolean_operation: 0xccaa22,
   compound:          0x888888,
+  sketch:            0xff9900,
   sketch_wire:       0xffcc00,
   revolve:           0xcc4488,
   sweep:             0x44bbcc,
@@ -219,6 +275,12 @@ export const useCADStore = create<CADState>((set, get) => ({
   activeWorkplane:    DEFAULT_WORKPLANE,
   planeSelectorOpen:  false,
   pendingSketchMode:  null,
+  sketchSession:      null,
+  sketchSessionCount: 0,
+  sketchInputStep:    0,
+  sketchPoints:       [],
+  sketchPreviewPoint: null,
+  treeContextMenu:    null,
 
   // ── Logging ────────────────────────────────────────────────────────────────
   log: (msg, level = 'info') =>
@@ -241,11 +303,99 @@ export const useCADStore = create<CADState>((set, get) => ({
   openPlaneSelector:     (mode) => set({ planeSelectorOpen: true, pendingSketchMode: mode }),
   closePlaneSelector:    ()     => set({ planeSelectorOpen: false, pendingSketchMode: null }),
 
+  startSketchSession: (plane) => {
+    const count = get().sketchSessionCount + 1;
+    const name  = `Sketch ${count} [${plane.label}]`;
+    const id    = crypto.randomUUID();
+    // Create the parent container node (no OCC shape — no cad-add-mesh dispatch)
+    get().addNode({
+      id, name, type: 'sketch',
+      visible: true, locked: false, parentId: null, notes: '',
+      transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
+      material:  { color: 0xff9900, roughness: 0.5, metalness: 0, wireframe: false, opacity: 1, transparent: false },
+      params: { workplane: plane },
+    });
+    set({ sketchSession: { id, name, plane }, sketchSessionCount: count, activeWorkplane: plane });
+    get().log(`Sketch session "${name}" started.`, 'info');
+  },
+
+  quitSketchSession: () => {
+    const { sketchSession } = get();
+    if (sketchSession) get().log(`Sketch "${sketchSession.name}" complete — select it and click Extrude/Revolve.`, 'success');
+    set({ sketchSession: null, interactionMode: 'SELECT' });
+  },
+
+  setSketchInputStep:    (n)   => set({ sketchInputStep: n }),
+  setSketchPoints:       (pts) => set({ sketchPoints: pts }),
+  setSketchPreviewPoint: (pt)  => set({ sketchPreviewPoint: pt }),
+  resetSketchInput:      ()    => set({ sketchInputStep: 0, sketchPoints: [], sketchPreviewPoint: null }),
+
+  resumeSketchSession: (sketchId) => {
+    const { nodes, sketchSession } = get();
+    if (sketchSession?.id === sketchId) return; // already active
+    const node = nodes[sketchId];
+    if (!node || node.type !== 'sketch') return;
+    const plane = node.params?.workplane as Workplane | undefined;
+    if (!plane) return;
+    if (sketchSession) get().log(`Switched from "${sketchSession.name}".`, 'info');
+    set({ sketchSession: { id: sketchId, name: node.name, plane }, activeWorkplane: plane, interactionMode: 'SELECT' });
+    get().log(`Resumed "${node.name}" — pick a sketch tool to continue.`, 'info');
+    // Signal viewport to animate camera to this plane
+    window.dispatchEvent(new CustomEvent('cad-session-resumed', { detail: { plane } }));
+  },
+
+  openTreeContextMenu:  (nodeId, x, y) => set({ treeContextMenu: { nodeId, x, y } }),
+  closeTreeContextMenu: ()             => set({ treeContextMenu: null }),
+
+  reparentNode: (nodeId, newParentId) => {
+    const { nodes, rootIds } = get();
+    const node = nodes[nodeId];
+    if (!node || node.parentId === newParentId) return;
+
+    const updated = { ...nodes };
+    // Detach from old parent
+    const oldParentId = node.parentId;
+    if (oldParentId && updated[oldParentId]) {
+      updated[oldParentId] = {
+        ...updated[oldParentId],
+        children: updated[oldParentId].children.filter((c) => c !== nodeId),
+      };
+    }
+    // Update parentId
+    updated[nodeId] = { ...node, parentId: newParentId };
+    // Attach to new parent or rootIds
+    let newRootIds = rootIds.filter((r) => r !== nodeId);
+    if (newParentId && updated[newParentId]) {
+      updated[newParentId] = {
+        ...updated[newParentId],
+        children: [...updated[newParentId].children, nodeId],
+      };
+    } else if (!newParentId) {
+      newRootIds = [...newRootIds, nodeId];
+    }
+    set({ nodes: updated, rootIds: newRootIds });
+  },
+
+  setNodeParams: (nodeId, params) => {
+    const { nodes } = get();
+    if (!nodes[nodeId]) return;
+    set({
+      nodes: {
+        ...nodes,
+        [nodeId]: { ...nodes[nodeId], params: { ...nodes[nodeId].params, ...params } },
+      },
+    });
+  },
+
   // ── Nodes ──────────────────────────────────────────────────────────────────
 
   addNode: (nodeData) => {
     const { nodes, rootIds } = get();
-    const newNode: CADNode = { ...nodeData, children: [] };
+    const newNode: CADNode = {
+      ...nodeData,
+      children: [],
+      material: normalizeMaterial(nodeData.material),
+    };
     const updatedNodes = { ...nodes, [newNode.id]: newNode };
     const updatedRootIds = [...rootIds];
 
@@ -395,7 +545,10 @@ export const useCADStore = create<CADState>((set, get) => ({
     const nodesBefore  = Object.values(nodes);
     const updatedNodes = {
       ...nodes,
-      [id]: { ...nodes[id], material: { ...nodes[id].material, ...partial } },
+      [id]: {
+        ...nodes[id],
+        material: normalizeMaterial({ ...nodes[id].material, ...partial }),
+      },
     };
     set({
       nodes: updatedNodes,

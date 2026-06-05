@@ -124,40 +124,78 @@ export class OccSketchService {
   }
 
   // ── Arc by center + start + end (3 clicks) ────────────────────────────────
-  // start/end are points ON the circle. Arc goes CCW from start to end.
+  // The arc goes CCW from startPt to endPt (as the preview shows).
+  // We use BRepBuilderAPI_MakeEdge_9 (angles) rather than _10 (points) because
+  // endPt is a raw mouse click that is NOT guaranteed to lie on the circle,
+  // causing _10 to fail with "Arc edge failed".
 
   static createArcEdge(oc: any, center: V3, startPt: V3, endPt: V3, wp: Workplane): any {
     const { normal, uAxis } = workplaneBasis(wp);
     const radius = center.distanceTo(startPt);
     if (radius < 1e-6) throw new Error('Arc radius too small');
+
+    // Compute start and end angles in the workplane's local 2D frame
+    const lc = toLocal2D(center, wp);
+    const ls = toLocal2D(startPt, wp);
+    const le = toLocal2D(endPt,   wp);
+    const a1 = Math.atan2(ls.v - lc.v, ls.u - lc.u);
+    let   a2 = Math.atan2(le.v - lc.v, le.u - lc.u);
+
+    // Ensure CCW: a2 must be strictly greater than a1
+    if (a2 <= a1) a2 += 2 * Math.PI;
+
     const ax2   = ax2WithX(oc, center, normal, uAxis);
     const circ  = new oc.gp_Circ_2(ax2, radius);
-    // Use start/end 3D points: BRepBuilderAPI_MakeEdge_10(circ, P1, P2)
-    const ps    = pnt(oc, startPt); const pe = pnt(oc, endPt);
-    const maker = new oc.BRepBuilderAPI_MakeEdge_10(circ, ps, pe);
-    ax2.delete(); circ.delete(); ps.delete(); pe.delete();
+    const maker = new oc.BRepBuilderAPI_MakeEdge_9(circ, a1, a2);
+    ax2.delete(); circ.delete();
     if (!maker.IsDone()) { maker.delete(); throw new Error('Arc edge failed'); }
     const edge = maker.Edge(); maker.delete();
     return edge;
   }
 
   // ── Arc through 3 points ──────────────────────────────────────────────────
+  // Uses angles rather than _10 (point-on-circle) to avoid OCC tolerance failures.
+  // The midpoint p2 determines which of the two arcs (CW / CCW from p1 to p3) to draw.
 
   static createArcByThreePoints(oc: any, p1: V3, p2: V3, p3: V3, wp: Workplane): any {
-    // Compute circumcircle in local 2D
     const lp1 = toLocal2D(p1, wp); const lp2 = toLocal2D(p2, wp); const lp3 = toLocal2D(p3, wp);
-    const cc   = circumcircle2D(lp1, lp2, lp3);
+    const cc  = circumcircle2D(lp1, lp2, lp3);
     if (!cc) throw new Error('Arc-3P: points are collinear');
     const { cu, cv, cr } = cc;
     const center3D = fromLocal2D(cu, cv, wp);
     const { normal, uAxis } = workplaneBasis(wp);
-    const ax2    = ax2WithX(oc, center3D, normal, uAxis);
-    const circ   = new oc.gp_Circ_2(ax2, cr);
-    const ps     = pnt(oc, p1); const pe = pnt(oc, p3);
-    // The arc goes from p1 to p3 in the direction that passes through p2
-    // BRepBuilderAPI_MakeEdge_10 creates the arc in the circle's orientation (CCW from p1 to p3)
-    const maker  = new oc.BRepBuilderAPI_MakeEdge_10(circ, ps, pe);
-    ax2.delete(); circ.delete(); ps.delete(); pe.delete();
+
+    // Angles of each point relative to the circumcircle centre
+    const a1 = Math.atan2(lp1.v - cv, lp1.u - cu);
+    const am = Math.atan2(lp2.v - cv, lp2.u - cu);
+    const a3 = Math.atan2(lp3.v - cv, lp3.u - cu);
+
+    // Normalize any angle to [0, 2π)
+    const n2 = (a: number) => ((a % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+    const a1n = n2(a1), amn = n2(am), a3n = n2(a3);
+
+    // Angular span CCW from a1n to a3n, and CCW from a1n to amn
+    const ccwSpan  = n2(a3n - a1n);   // 0 if a1==a3 (degenerate)
+    const ccwToMid = n2(amn - a1n);
+
+    // Is the midpoint on the CCW arc from a1 to a3?
+    const midOnCCW = ccwToMid > 1e-9 && ccwToMid < ccwSpan - 1e-9;
+
+    let arcStart: number, arcEnd: number;
+    if (midOnCCW) {
+      arcStart = a1n;
+      arcEnd   = a1n + ccwSpan;
+    } else {
+      // Midpoint is on the CW arc from a1 to a3 → draw CCW arc from a3 back to a1
+      const cwSpan = n2(a1n - a3n);
+      arcStart = a3n;
+      arcEnd   = a3n + cwSpan;
+    }
+
+    const ax2   = ax2WithX(oc, center3D, normal, uAxis);
+    const circ  = new oc.gp_Circ_2(ax2, cr);
+    const maker = new oc.BRepBuilderAPI_MakeEdge_9(circ, arcStart, arcEnd);
+    ax2.delete(); circ.delete();
     if (!maker.IsDone()) { maker.delete(); throw new Error('Arc-3P edge failed'); }
     const edge = maker.Edge(); maker.delete();
     return edge;

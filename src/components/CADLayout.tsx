@@ -20,6 +20,9 @@ import { CADViewCube }          from './CADViewCube';
 import { MenuBar }              from './MenuBar';
 import { ErrorBoundary }        from './ErrorBoundary';
 import { PlaneSelector }        from './PlaneSelector';
+import { TreeContextMenu }     from './TreeContextMenu';
+import { Op3DPanel, registerOp3DPanelOpener } from './Op3DPanel';
+import type { Op3DRequest }                  from './Op3DPanel';
 import { AdvancedToolbar }      from './AdvancedToolbar';
 import { CADConsolePanel }      from './panels/CADConsolePanel';
 import { CADProjectPanel }      from './panels/CADProjectPanel';
@@ -141,6 +144,15 @@ export const CADLayout: React.FC = () => {
   const sceneRef    = useRef<THREE.Scene | null>(null);
   const [viewReady, setViewReady] = useState(false);
 
+  // ── Op3D panel state ─────────────────────────────────────────────────────
+  const [op3DReq, setOp3DReq] = useState<Op3DRequest | null>(null);
+
+  // Register the opener DURING render (not in useEffect) so it is available
+  // before the first paint, with no timing window where _opener is null.
+  // setOp3DReq is a stable React setter — this assignment is a no-op after
+  // the first render, so calling it on every render is safe.
+  registerOp3DPanelOpener(setOp3DReq);
+
   useNumpadCamera(cameraRef, orbitRef);
   useViewPresetBus(cameraRef, orbitRef);
 
@@ -246,8 +258,15 @@ export const CADLayout: React.FC = () => {
       </div>
 
       <CADStatusBar />
-      {/* PlaneSelector rendered at root level so it can float over everything */}
+      {/* Floating overlays rendered at root level to appear above Dockview */}
       <PlaneSelector />
+      <TreeContextMenu />
+      {op3DReq && (
+        <Op3DPanel
+          req={op3DReq}
+          onClose={() => setOp3DReq(null)}
+        />
+      )}
     </div>
   );
 };

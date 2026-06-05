@@ -81,12 +81,12 @@ const PlaneCard: React.FC<{
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export const PlaneSelector: React.FC = () => {
-  const open             = useCADStore((s) => s.planeSelectorOpen);
-  const pendingMode      = useCADStore((s) => s.pendingSketchMode);
-  const activeWorkplane  = useCADStore((s) => s.activeWorkplane);
-  const setWorkplane     = useCADStore((s) => s.setActiveWorkplane);
-  const setMode          = useCADStore((s) => s.setInteractionMode);
-  const close            = useCADStore((s) => s.closePlaneSelector);
+  const open                = useCADStore((s) => s.planeSelectorOpen);
+  const pendingMode         = useCADStore((s) => s.pendingSketchMode);
+  const activeWorkplane     = useCADStore((s) => s.activeWorkplane);
+  const startSketchSession  = useCADStore((s) => s.startSketchSession);
+  const setMode             = useCADStore((s) => s.setInteractionMode);
+  const close               = useCADStore((s) => s.closePlaneSelector);
 
   // Local state for the custom plane inputs
   const [tab,       setTab]       = useState<'standard' | 'custom'>('standard');
@@ -115,7 +115,7 @@ export const PlaneSelector: React.FC = () => {
       setCustomErr('');
     }
 
-    setWorkplane(wp);
+    startSketchSession(wp);   // creates parent node, sets activeWorkplane + sketchSession
     if (pendingMode) setMode(pendingMode);
     close();
   };

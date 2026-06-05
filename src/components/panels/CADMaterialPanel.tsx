@@ -13,11 +13,16 @@ import { Pane } from 'tweakpane';
 import { useCADStore, CADMaterial } from '../../store/cadStore';
 
 // Number ↔ '#rrggbb' string conversion
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
 function numToHexStr(n: number): string {
-  return '#' + (n >>> 0).toString(16).padStart(6, '0');
+  const color = Number.isFinite(n) ? (n & 0xffffff) : 0x5588cc;
+  return '#' + color.toString(16).padStart(6, '0');
 }
 function hexStrToNum(s: string): number {
-  return parseInt(s.replace('#', ''), 16) || 0;
+  const parsed = parseInt(s.replace('#', ''), 16);
+  return Number.isFinite(parsed) ? (parsed & 0xffffff) : 0x5588cc;
 }
 
 const PRESETS: Array<{ label: string; color: number; roughness: number; metalness: number }> = [
@@ -57,19 +62,19 @@ export const CADMaterialPanel: React.FC = () => {
     // Use a hex string for colour — avoids Tweakpane float/int range ambiguity
     const params = {
       colorHex:    numToHexStr(mat.color),
-      roughness:   mat.roughness,
-      metalness:   mat.metalness,
-      opacity:     mat.opacity,
-      transparent: mat.transparent,
-      wireframe:   mat.wireframe,
+      roughness:   Number.isFinite(mat.roughness) ? clamp01(mat.roughness) : 0.4,
+      metalness:   Number.isFinite(mat.metalness) ? clamp01(mat.metalness) : 0.3,
+      opacity:     Number.isFinite(mat.opacity) ? clamp01(mat.opacity) : 1.0,
+      transparent: typeof mat.transparent === 'boolean' ? mat.transparent : false,
+      wireframe:   typeof mat.wireframe === 'boolean' ? mat.wireframe : false,
     };
 
     const apply = () => {
       const updated: Partial<CADMaterial> = {
         color:       hexStrToNum(params.colorHex),
-        roughness:   params.roughness,
-        metalness:   params.metalness,
-        opacity:     params.opacity,
+        roughness:   Number.isFinite(params.roughness) ? clamp01(params.roughness) : 0.4,
+        metalness:   Number.isFinite(params.metalness) ? clamp01(params.metalness) : 0.3,
+        opacity:     Number.isFinite(params.opacity) ? clamp01(params.opacity) : 1.0,
         transparent: params.transparent,
         wireframe:   params.wireframe,
       };
@@ -102,7 +107,7 @@ export const CADMaterialPanel: React.FC = () => {
     return () => {
       if (paneRef.current) { paneRef.current.dispose(); paneRef.current = null; }
     };
-  }, [selectedIds[0], activeNode?.material, updateMaterial]);
+  }, [selectedIds[0], updateMaterial]);
 
   return (
     <div style={{ width: '100%', height: '100%', background: 'var(--surface-1)', overflowY: 'auto' }}>

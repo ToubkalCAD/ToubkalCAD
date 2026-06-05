@@ -84,9 +84,17 @@ export const CADToolbar: React.FC = () => {
   const addNode         = useCADStore((s) => s.addNode);
   const setProc         = useCADStore((s) => s.setProcessing);
   const log             = useCADStore((s) => s.log);
+  const sketchSession   = useCADStore((s) => s.sketchSession);
+  const quitSketch      = useCADStore((s) => s.quitSketchSession);
 
-  // Open the plane selector then activate the sketch mode
-  const startSketch = (sketchMode: InteractionMode) => openPlaneSel(sketchMode);
+  // If already in a session: switch tool directly. Otherwise open plane selector.
+  const startSketch = (sketchMode: InteractionMode) => {
+    if (useCADStore.getState().sketchSession) {
+      setMode(sketchMode);
+    } else {
+      openPlaneSel(sketchMode);
+    }
+  };
 
   const reg = CADGeometryRegistry.getInstance();
 
@@ -227,12 +235,11 @@ export const CADToolbar: React.FC = () => {
       if (!v) return;
       const wire = reg.getShape(selIds[0]);
       if (!wire) { log('Sketch wire not found.', 'error'); return; }
-      // Retrieve extrusion direction from the sketch node's workplane
       const wp = node.params?.workplane;
       const direction: [number,number,number] = wp?.normal ?? activeWorkplane.normal;
       setProc(true, 'Extruding…');
       try {
-        create(crypto.randomUUID(), `Extrusion ${v.h}mm`, 'extrusion',
+        create(crypto.randomUUID(), `Extrusion${v.h.toFixed(0)}mm`, 'extrusion',
           OccExtrusionService.extrudeWire(window.oc, wire, v.h, direction));
       } finally { setProc(false); }
     });
@@ -246,7 +253,7 @@ export const CADToolbar: React.FC = () => {
     withOC(async () => {
       const v = await showParamModal('Revolve', [
         { key: 'axis',  label: 'Axis (0=X 1=Y 2=Z)', default: 1, min: 0, max: 2, step: 1 },
-        { key: 'angle', label: 'Angle',              default: 360, min: 1, max: 360, unit: '°' },
+        { key: 'angle', label: 'Angle', default: 360, min: 1, max: 360, unit: '°' },
       ]);
       if (!v) return;
       const wire = reg.getShape(selIds[0]);
@@ -256,7 +263,7 @@ export const CADToolbar: React.FC = () => {
       const idx = Math.round(Math.max(0, Math.min(2, v.axis)));
       setProc(true, 'Revolving…');
       try {
-        create(crypto.randomUUID(), `Revolve ${v.angle}° /${axisLabels[idx]}`, 'revolve',
+        create(crypto.randomUUID(), `Revolve${v.angle.toFixed(0)}°/${axisLabels[idx]}`, 'revolve',
           OccRevolutionService.revolveProfile(window.oc, wire, [0,0,0], axisVecs[idx], v.angle));
       } finally { setProc(false); }
     });
@@ -274,12 +281,10 @@ export const CADToolbar: React.FC = () => {
       if (!v) return;
       const wires = sketchIds.map((id) => reg.getShape(id)).filter(Boolean);
       if (wires.length < 2) { log('Could not retrieve all sketch shapes.', 'error'); return; }
-      const isSolid = v.solid >= 0.5;
-      const isRuled = v.ruled >= 0.5;
       setProc(true, 'Lofting…');
       try {
-        create(crypto.randomUUID(), `Loft (${sketchIds.length} sections)`, 'loft',
-          OccLoftService.loftProfiles(window.oc, wires, isSolid, isRuled));
+        create(crypto.randomUUID(), `Loft(${sketchIds.length})`, 'loft',
+          OccLoftService.loftProfiles(window.oc, wires, v.solid >= 0.5, v.ruled >= 0.5));
       } finally { setProc(false); }
     });
   };
@@ -414,6 +419,26 @@ export const CADToolbar: React.FC = () => {
       <Btn icon="↻" label="Revolve" onClick={revolve} disabled={!canRevolve} accent="#cc4488" />
       <Btn icon="⊓" label="Loft"    onClick={loft}    disabled={!canLoft}    accent="#cc8844" />
       <Btn icon="⌇" label="Sweep"   onClick={sweep}   disabled={!canSweep}   accent="#44bbcc" />
+
+      {/* ── Active sketch session badge + Quit button ─────────────────────── */}
+      {sketchSession && (
+        <>
+          <Sep />
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0,
+            background: 'rgba(255,153,0,0.12)',
+            border: '1px solid rgba(255,153,0,0.45)',
+            borderRadius: 'var(--radius-sm)',
+            padding: '2px 9px',
+          }}>
+            <span style={{ fontSize: '10px', color: '#ff9900' }}>✦</span>
+            <span style={{ fontSize: '10px', color: '#ffb340', fontWeight: 600, maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {sketchSession.name}
+            </span>
+          </div>
+          <Btn icon="✓" label="Quit Sketch" onClick={quitSketch} accent="#cc6600" />
+        </>
+      )}
 
       <Sep /><Grp label="Mode" />
       <Btn icon="↖" label="Select"  onClick={() => setMode('SELECT')}           isActive={mode === 'SELECT'}           accent="var(--accent)" />
