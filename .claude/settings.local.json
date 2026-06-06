@@ -18,7 +18,18 @@
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:5173)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000)",
       "Bash(echo \"exit: $?\")",
-      "Bash(echo \"exit:$?\")"
+      "Bash(echo \"exit:$?\")",
+      "Bash(echo \"PID: $!\")",
+      "Bash(npx rspack *)",
+      "Bash(git checkout *)",
+      "Bash(git clean *)",
+      "Bash(curl -s http://localhost:8080/)",
+      "Bash(curl -sI \"http://localhost:8080/wasm/opencascade.full.cb905367.wasm\")",
+      "Bash(curl -sI -H \"Accept-Encoding: br,gzip\" \"http://localhost:8080/wasm/opencascade.full.cb905367.wasm\")",
+      "Bash(echo \"tsc exit=$?\")",
+      "Bash(pkill -f \"rspack serve.*8091\")",
+      "Bash(curl -sI http://localhost:8080/)",
+      "Bash(git check-ignore *)"
     ]
   }
 }
