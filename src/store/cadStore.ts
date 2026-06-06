@@ -44,7 +44,11 @@ export type InteractionMode =
   | 'SKETCH_SPLINE'
   | 'SKETCH_ROUNDED_RECT'
   | 'SKETCH_POLYGON'
-  | 'MEASURE_DISTANCE';
+  | 'MEASURE_DISTANCE'
+  | 'BLEND_EDGE'
+  | 'BOOLEAN_PICK';
+
+export type BooleanOp = 'CUT' | 'FUSE' | 'COMMON';
 
 export type GizmoMode = 'translate' | 'rotate' | 'scale';
 
@@ -178,11 +182,46 @@ interface CADState {
   reparentNode: (nodeId: string, newParentId: string | null) => void;
   /** Merge extra key/value pairs into a node's params without touching other fields. */
   setNodeParams: (nodeId: string, params: Record<string, any>) => void;
+  /** Re-parent the sketch(es) that a 3D operation consumed UNDER the operation node,
+   *  giving e.g. Extrusion1 → Sketch1 → Circle1. Adopts the sketch container if the
+   *  wire has one, otherwise the wire itself. */
+  adoptSketchSources: (operationId: string, wireIds: string[]) => void;
 
   /** Right-click context menu on tree sketch nodes. */
   treeContextMenu: { nodeId: string; x: number; y: number } | null;
   openTreeContextMenu:  (nodeId: string, x: number, y: number) => void;
   closeTreeContextMenu: () => void;
+
+  /** Op3D panel request — non-null while the panel is open. */
+  op3DPanelReq: { op: string; targetIds: string[]; editNodeId?: string } | null;
+  openOp3DPanel:  (op: string, targetIds: string[], editNodeId?: string) => void;
+  closeOp3DPanel: () => void;
+
+  /** Per-edge blend (fillet/chamfer) request — non-null while the panel is open. */
+  blendReq: { targetId: string; op: 'fillet' | 'chamfer'; editNodeId?: string } | null;
+  /** Stable 0-based indices of edges the user has picked for the blend. */
+  selectedEdgeIndices: number[];
+  /** Open the per-edge blend panel and enter BLEND_EDGE interaction mode. */
+  openBlendPanel:  (targetId: string, op: 'fillet' | 'chamfer', editNodeId?: string, preEdges?: number[]) => void;
+  /** Close the blend panel and return to SELECT mode. */
+  closeBlendPanel: () => void;
+  /** Toggle a single edge index in/out of the selection. */
+  toggleEdgeIndex: (i: number) => void;
+  /** Replace the whole edge selection (used by Select-All / Clear). */
+  setSelectedEdgeIndices: (idx: number[]) => void;
+
+  /** Boolean op request — non-null while the guided boolean panel is open. */
+  booleanReq: { op: BooleanOp; editNodeId?: string } | null;
+  /** The base solid (the one kept / cut from). */
+  booleanBaseId: string | null;
+  /** Tool solids (added / subtracted / intersected with the base). */
+  booleanToolIds: string[];
+  openBooleanPanel:  (op: BooleanOp, editNodeId?: string, baseId?: string | null, toolIds?: string[]) => void;
+  closeBooleanPanel: () => void;
+  /** Viewport click handler: first pick = base, subsequent picks toggle tools. */
+  pickBooleanSolid:  (id: string) => void;
+  /** Reset base + tool selection (panel "Clear"). */
+  clearBooleanPick:  () => void;
 
   addMeasurement:    (m: Omit<CADMeasurement, 'id'>) => void;
   removeMeasurement: (id: string) => void;
@@ -281,6 +320,12 @@ export const useCADStore = create<CADState>((set, get) => ({
   sketchPoints:       [],
   sketchPreviewPoint: null,
   treeContextMenu:    null,
+  op3DPanelReq:       null,
+  blendReq:            null,
+  selectedEdgeIndices: [],
+  booleanReq:          null,
+  booleanBaseId:       null,
+  booleanToolIds:      [],
 
   // ── Logging ────────────────────────────────────────────────────────────────
   log: (msg, level = 'info') =>
@@ -347,6 +392,44 @@ export const useCADStore = create<CADState>((set, get) => ({
   openTreeContextMenu:  (nodeId, x, y) => set({ treeContextMenu: { nodeId, x, y } }),
   closeTreeContextMenu: ()             => set({ treeContextMenu: null }),
 
+  openOp3DPanel:  (op, targetIds, editNodeId) => set({ op3DPanelReq: { op, targetIds, editNodeId } }),
+  closeOp3DPanel: ()                          => set({ op3DPanelReq: null }),
+
+  openBlendPanel: (targetId, op, editNodeId, preEdges) => set({
+    blendReq: { targetId, op, editNodeId },
+    selectedEdgeIndices: preEdges ? [...preEdges] : [],
+    interactionMode: 'BLEND_EDGE',
+    selectedIds: [targetId],
+  }),
+  closeBlendPanel: () => set({ blendReq: null, selectedEdgeIndices: [], interactionMode: 'SELECT' }),
+  toggleEdgeIndex: (i) => set((s) => ({
+    selectedEdgeIndices: s.selectedEdgeIndices.includes(i)
+      ? s.selectedEdgeIndices.filter((x) => x !== i)
+      : [...s.selectedEdgeIndices, i],
+  })),
+  setSelectedEdgeIndices: (idx) => set({ selectedEdgeIndices: [...idx] }),
+
+  openBooleanPanel: (op, editNodeId, baseId, toolIds) => set({
+    booleanReq: { op, editNodeId },
+    booleanBaseId: baseId ?? null,
+    booleanToolIds: toolIds ? [...toolIds] : [],
+    interactionMode: 'BOOLEAN_PICK',
+    selectedIds: [],
+  }),
+  closeBooleanPanel: () => set({
+    booleanReq: null, booleanBaseId: null, booleanToolIds: [], interactionMode: 'SELECT',
+  }),
+  pickBooleanSolid: (id) => set((s) => {
+    if (!s.booleanBaseId) return { booleanBaseId: id };       // first pick = base
+    if (id === s.booleanBaseId) return {};                     // clicking the base: no-op
+    return {
+      booleanToolIds: s.booleanToolIds.includes(id)
+        ? s.booleanToolIds.filter((t) => t !== id)            // toggle off
+        : [...s.booleanToolIds, id],                          // add tool
+    };
+  }),
+  clearBooleanPick: () => set({ booleanBaseId: null, booleanToolIds: [] }),
+
   reparentNode: (nodeId, newParentId) => {
     const { nodes, rootIds } = get();
     const node = nodes[nodeId];
@@ -385,6 +468,27 @@ export const useCADStore = create<CADState>((set, get) => ({
         [nodeId]: { ...nodes[nodeId], params: { ...nodes[nodeId].params, ...params } },
       },
     });
+  },
+
+  adoptSketchSources: (operationId, wireIds) => {
+    const { nodes } = get();
+    if (!nodes[operationId]) return;
+    // Resolve each wire to the node we should re-parent: its sketch container if any.
+    const toAdopt = new Set<string>();
+    for (const wid of wireIds) {
+      const wire = nodes[wid];
+      if (!wire) continue;
+      const parent = wire.parentId ? nodes[wire.parentId] : null;
+      if (parent && parent.type === 'sketch') toAdopt.add(parent.id);
+      else toAdopt.add(wid);
+    }
+    // Don't adopt the operation itself or create a cycle.
+    toAdopt.delete(operationId);
+    for (const id of toAdopt) {
+      // Skip if already a descendant chain issue (operation can't be under its own source)
+      if (nodes[id]?.children?.includes(operationId)) continue;
+      get().reparentNode(id, operationId);
+    }
   },
 
   // ── Nodes ──────────────────────────────────────────────────────────────────

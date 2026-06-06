@@ -9,31 +9,20 @@
 // ============================================================
 
 import React, { useEffect, useRef } from 'react';
-import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS } from '../store/cadStore';
-import type { NodeType, Workplane } from '../store/cadStore';
-import { show3DOpPanel } from './Op3DPanel';
+import { useCADStore } from '../store/cadStore';
+import type { NodeType } from '../store/cadStore';
+import { show3DOpPanel, createAndEditOp } from './Op3DPanel';
 import type { Op3DType } from './Op3DPanel';
-import { showParamModal }        from './ParameterModal';
-import { CADGeometryRegistry }   from '../services/CADGeometryRegistry';
-import { OccExtrusionService }   from '../services/OccExtrusionService';
-import { OccRevolutionService }  from '../services/OccRevolutionService';
-import { OccLoftService }        from '../services/OccLoftService';
-
-declare global { interface Window { oc: any } }
-
-function createShape(id: string, name: string, type: NodeType, shape: any) {
-  CADGeometryRegistry.getInstance().registerShape(id, shape);
-  useCADStore.getState().addNode({
-    id, name, type, visible: true, locked: false, parentId: null, notes: '',
-    transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
-    material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS[type] ?? 0x5588cc },
-  });
-  window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }));
-  useCADStore.getState().log(`${name} created.`, 'success');
-}
+import { showBlendPanel }      from './BlendActionPanel';
+import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 
 // Node types whose right-click triggers re-edit
 const REEDITABLE_OP = new Set<NodeType>(['extrusion', 'revolve', 'loft', 'sweep', 'compound']);
+
+// Node types that are 3D solids — eligible for per-edge fillet/chamfer
+const SOLID_TYPES = new Set<NodeType>([
+  'box', 'cylinder', 'sphere', 'extrusion', 'revolve', 'sweep', 'loft', 'boolean_operation', 'compound',
+]);
 
 // ─── Context menu ─────────────────────────────────────────────────────────────
 
@@ -65,7 +54,11 @@ export const TreeContextMenu: React.FC = () => {
 
   const isSketchContainer = node.type === 'sketch';
   const isSketchWire      = node.type === 'sketch_wire';
-  const isOp3D            = REEDITABLE_OP.has(node.type) && !!node.params?.opType;
+  const isBlendResult     = node.type === 'compound' && !!node.params?.blendOp;
+  const isBooleanResult   = node.type === 'boolean_operation' && !!node.params?.boolOp;
+  const isOp3D            = !isBlendResult && REEDITABLE_OP.has(node.type) && !!node.params?.opType;
+  const hasShape          = SOLID_TYPES.has(node.type) && !!CADGeometryRegistry.getInstance().getShape(menu.nodeId);
+  const isSolid           = hasShape; // eligible for per-edge fillet/chamfer + boolean
 
   // Sketch wire IDs available for 3D operations (sketch container) or just this wire
   const wireIds: string[] = isSketchWire
@@ -75,78 +68,71 @@ export const TreeContextMenu: React.FC = () => {
       : [];
 
   // Nothing to show for unrecognised types
-  if (!isSketchContainer && !isSketchWire && !isOp3D) return null;
+  if (!isSketchContainer && !isSketchWire && !isOp3D && !isBlendResult && !isSolid) return null;
 
   const firstWireId = wireIds[0];
-  const reg = CADGeometryRegistry.getInstance();
-
-  function getDir(wireId: string): [number, number, number] {
-    const wp = useCADStore.getState().nodes[wireId]?.params?.workplane as Workplane | undefined;
-    return wp?.normal ?? [0, 1, 0];
-  }
 
   // ── Position clamped to viewport ──────────────────────────────────────────────
   const mW = 210;
-  const mH = isSketchContainer ? 220 : isOp3D ? 100 : 140;
+  const mH = isSketchContainer ? 260 : (isOp3D || isBlendResult || isBooleanResult ? 180 : 150);
   const x  = menu.x + mW > window.innerWidth  ? menu.x - mW : menu.x;
   const y  = menu.y + mH > window.innerHeight ? menu.y - mH : menu.y;
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
 
+  // Create solid immediately (appears in tree) then open panel in EDIT mode.
   const doExtrude = () => {
-    if (!firstWireId || !window.oc) return;
+    if (!firstWireId) return;
     closeMenu();
-    showParamModal('Extrude', [{ key: 'h', label: 'Height', default: 20, min: 0.01, unit: 'mm' }])
-      .then(v => {
-        if (!v) return;
-        const wire = reg.getShape(firstWireId);
-        if (!wire) { useCADStore.getState().log('Wire not found.', 'error'); return; }
-        useCADStore.getState().setProcessing(true, 'Extruding…');
-        try { createShape(crypto.randomUUID(), `Extrusion${v.h.toFixed(0)}mm`, 'extrusion', OccExtrusionService.extrudeWire(window.oc, wire, v.h, getDir(firstWireId))); }
-        catch (e: any) { useCADStore.getState().log(e.message, 'error'); }
-        finally { useCADStore.getState().setProcessing(false); }
-      });
+    createAndEditOp('extrude', [firstWireId]);
   };
 
   const doRevolve = () => {
-    if (!firstWireId || !window.oc) return;
+    if (!firstWireId) return;
     closeMenu();
-    showParamModal('Revolve', [
-      { key: 'axis',  label: 'Axis (0=X 1=Y 2=Z)', default: 1, min: 0, max: 2, step: 1 },
-      { key: 'angle', label: 'Angle', default: 360, min: 1, max: 360, unit: '°' },
-    ]).then(v => {
-      if (!v) return;
-      const wire = reg.getShape(firstWireId);
-      if (!wire) { useCADStore.getState().log('Wire not found.', 'error'); return; }
-      const axes: [number,number,number][] = [[1,0,0],[0,1,0],[0,0,1]];
-      const axLabels = ['X','Y','Z'];
-      const idx = Math.round(Math.max(0, Math.min(2, v.axis)));
-      useCADStore.getState().setProcessing(true, 'Revolving…');
-      try { createShape(crypto.randomUUID(), `Revolve${v.angle.toFixed(0)}°/${axLabels[idx]}`, 'revolve', OccRevolutionService.revolveProfile(window.oc, wire, [0,0,0], axes[idx], v.angle)); }
-      catch (e: any) { useCADStore.getState().log(e.message, 'error'); }
-      finally { useCADStore.getState().setProcessing(false); }
-    });
+    createAndEditOp('revolve', [firstWireId]);
   };
 
   const doLoft = () => {
-    if (wireIds.length < 2 || !window.oc) return;
+    if (wireIds.length < 2) return;
     closeMenu();
-    showParamModal('Loft', [{ key: 'solid', label: 'Solid (1) or Shell (0)', default: 1, min: 0, max: 1, step: 1 }])
-      .then(v => {
-        if (!v) return;
-        const wires = wireIds.map(id => reg.getShape(id)).filter(Boolean);
-        if (wires.length < 2) { useCADStore.getState().log('Wires not found.', 'error'); return; }
-        useCADStore.getState().setProcessing(true, 'Lofting…');
-        try { createShape(crypto.randomUUID(), `Loft(${wireIds.length})`, 'loft', OccLoftService.loftProfiles(window.oc, wires, v.solid >= 0.5, false)); }
-        catch (e: any) { useCADStore.getState().log(e.message, 'error'); }
-        finally { useCADStore.getState().setProcessing(false); }
-      });
+    createAndEditOp('loft', wireIds);
   };
   const doReEdit  = () => {
     closeMenu();
     const opType  = node.params?.opType as Op3DType;
     const wIds    = node.params?.targetWireIds as string[] | undefined ?? [];
     show3DOpPanel(opType, wIds, menu.nodeId);
+  };
+
+  // Per-edge fillet / chamfer on a solid → opens BlendActionPanel
+  const doFilletEdges  = () => { closeMenu(); showBlendPanel(menu.nodeId, 'fillet'); };
+  const doChamferEdges = () => { closeMenu(); showBlendPanel(menu.nodeId, 'chamfer'); };
+
+  // Boolean with this solid as the base → opens BooleanActionPanel (pick tools next)
+  const doBoolean = (op: 'CUT' | 'FUSE' | 'COMMON') => {
+    closeMenu();
+    useCADStore.getState().openBooleanPanel(op, undefined, menu.nodeId, []);
+  };
+
+  // Re-edit an existing boolean result (re-enters base/tool picking)
+  const doReEditBoolean = () => {
+    closeMenu();
+    const boolOp = node.params?.boolOp as 'CUT' | 'FUSE' | 'COMMON';
+    const base   = node.params?.baseId as string | undefined;
+    const tools  = node.params?.toolIds as string[] | undefined ?? [];
+    if (!base) { useCADStore.getState().log('Boolean inputs missing — cannot re-edit.', 'error'); return; }
+    useCADStore.getState().openBooleanPanel(boolOp, menu.nodeId, base, tools);
+  };
+
+  // Re-edit an existing blend result (re-enters edge selection with stored edges)
+  const doReEditBlend = () => {
+    closeMenu();
+    const blendOp = node.params?.blendOp as 'fillet' | 'chamfer';
+    const sourceId = node.params?.sourceId as string | undefined;
+    const edges    = node.params?.edgeIndices as number[] | undefined ?? [];
+    if (!sourceId) { useCADStore.getState().log('Blend source missing — cannot re-edit.', 'error'); return; }
+    useCADStore.getState().openBlendPanel(sourceId, blendOp, menu.nodeId, edges);
   };
 
   // ── Item component ────────────────────────────────────────────────────────────
@@ -225,6 +211,39 @@ export const TreeContextMenu: React.FC = () => {
         </div>
       )}
 
+      {/* ── Blend result: Re-edit fillet/chamfer ──────────────────────────── */}
+      {isBlendResult && (
+        <div style={{ padding: '3px 0 1px' }}>
+          <Item icon="✏️" label="Re-edit blend" accent="#cc6600" onClick={doReEditBlend} />
+        </div>
+      )}
+
+      {/* ── Boolean result: Re-edit ───────────────────────────────────────── */}
+      {isBooleanResult && (
+        <div style={{ padding: '3px 0 1px' }}>
+          <Item icon="✏️" label="Re-edit boolean" accent="#cc6600" onClick={doReEditBoolean} />
+        </div>
+      )}
+
+      {/* ── Solid: per-edge Fillet / Chamfer + Boolean ────────────────────── */}
+      {isSolid && (
+        <>
+          {(isOp3D || isBlendResult || isBooleanResult) && <Sep />}
+          <div style={{ padding: '2px 12px 3px', fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.6px' }}>
+            Modify Edges
+          </div>
+          <Item icon="⌒" label="Fillet edges…"  accent="#3399dd" onClick={doFilletEdges} />
+          <Item icon="⌐" label="Chamfer edges…" accent="#cc7733" onClick={doChamferEdges} />
+          <Sep />
+          <div style={{ padding: '2px 12px 3px', fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.6px' }}>
+            Boolean (this = base)
+          </div>
+          <Item icon="⊕" label="Union with…"     accent="#339944" onClick={() => doBoolean('FUSE')} />
+          <Item icon="⊖" label="Subtract tools…" accent="#993333" onClick={() => doBoolean('CUT')} />
+          <Item icon="⊗" label="Intersect with…" accent="#997733" onClick={() => doBoolean('COMMON')} />
+        </>
+      )}
+
       {/* ── Sketch container: Resume + 3D ops ────────────────────────────── */}
       {isSketchContainer && (
         <>
@@ -269,9 +288,11 @@ export const TreeContextMenu: React.FC = () => {
 const NODE_ICON: Partial<Record<NodeType, string>> = {
   sketch: '✦', sketch_wire: '╱',
   extrusion: '↑', revolve: '↻', loft: '⊿', sweep: '⌇', compound: '◈',
+  box: '◻', cylinder: '⬡', sphere: '●', boolean_operation: '⊕',
 };
 
 const NODE_COLOR: Partial<Record<NodeType, string>> = {
   sketch: '#ff9900', sketch_wire: '#ffcc00',
   extrusion: '#aa44cc', revolve: '#cc4488', loft: '#cc8844', sweep: '#44bbcc', compound: '#888888',
+  box: '#5588cc', cylinder: '#44aa66', sphere: '#cc6644', boolean_operation: '#ccaa22',
 };

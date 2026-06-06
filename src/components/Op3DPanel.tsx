@@ -4,8 +4,8 @@
 // Controlled component — rendered by CADLayout when it has an
 // op3DRequest state. No internal "open" logic; props drive it.
 //
-// show3DOpPanel() writes to window.__openOp3DPanel which is
-// set once by CADLayout (root component, never unmounts).
+// show3DOpPanel() writes op3DPanelReq to the Zustand store.
+// CADLayout subscribes to that field and renders Op3DPanel when non-null.
 // ============================================================
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -20,6 +20,7 @@ import { OccRevolutionService } from '../services/OccRevolutionService';
 import { OccLoftService }       from '../services/OccLoftService';
 import { OccSweepService }      from '../services/OccSweepService';
 import { OccFilletService }     from '../services/OccFilletService';
+import { useDragPanel }         from '../hooks/useDragPanel';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -34,23 +35,58 @@ export interface Op3DRequest {
 // Module-level opener — set by CADLayout during render (before any useEffect).
 // CADLayout is the root and re-renders before any user interaction, so this
 // is always set by the time the user can click a toolbar button.
-let _opener: ((req: Op3DRequest | null) => void) | null = null;
-
-/** Called by CADLayout on every render to keep the reference fresh. */
-export function registerOp3DPanelOpener(fn: (req: Op3DRequest | null) => void): void {
-  _opener = fn;
-}
-
-/** Open the 3D-operation panel. Fire-and-forget. */
+/** Open the 3D-operation panel by writing directly to the Zustand store. */
 export function show3DOpPanel(
   op:          Op3DType,
   targetIds:   string[],
   editNodeId?: string,
 ): void {
-  if (_opener) {
-    _opener({ op, targetIds, editNodeId });
-  } else {
-    useCADStore.getState().log('Op3DPanel opener not registered yet — try again.', 'warn');
+  useCADStore.getState().openOp3DPanel(op, targetIds, editNodeId);
+}
+
+/**
+ * Create a 3D op with default params immediately (node appears in tree at once),
+ * then open the Op3DPanel in EDIT mode so the user can adjust.
+ * This avoids the "preview-only, no Apply" confusion.
+ */
+export function createAndEditOp(op: Op3DType, targetIds: string[]): void {
+  const oc = window.oc;
+  const store = useCADStore.getState();
+
+  if (!oc) { store.log('OCC kernel not ready.', 'error'); return; }
+
+  for (const wId of targetIds) {
+    if (!reg.getShape(wId)) {
+      store.log(`Shape not in WASM registry — re-draw the sketch.`, 'error');
+      return;
+    }
+  }
+
+  try {
+    const defaults = { ...OP_DEFAULTS[op] };
+    const shape    = computeShape(op, targetIds, defaults);
+    const type     = OP_NTYPE[op];
+    const idx      = nextIdx(type);
+    const name     = `${OP_LABEL[op]}${idx}`;
+    const id       = crypto.randomUUID();
+
+    reg.registerShape(id, shape);
+    store.addNode({
+      id, name, type,
+      visible: true, locked: false, parentId: null, notes: '',
+      transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
+      material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS[type] ?? 0x5588cc },
+      params:    { opType: op, targetWireIds: targetIds, opParams: defaults },
+    });
+    window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }));
+    // Nest the consumed sketch(es) under the operation: Extrusion1 → Sketch1 → Circle1
+    if (['extrude', 'revolve', 'loft', 'sweep'].includes(op)) store.adoptSketchSources(id, targetIds);
+    store.log(`${name} created — adjust in the panel.`, 'success');
+
+    // Open panel in EDIT mode
+    show3DOpPanel(op, targetIds, id);
+  } catch (err: any) {
+    store.log(`${OP_TITLE[op]} failed: ${err?.message ?? String(err)}`, 'error');
   }
 }
 
@@ -141,8 +177,6 @@ const ToggleRow: React.FC<{label:string;k:string;opts:{label:string;v:number}[];
 
 // ─── Main panel (controlled) ─────────────────────────────────────────────────
 
-const Draggable = (require('react-draggable').default ?? require('react-draggable')) as any;
-
 export interface Op3DPanelProps {
   req:     Op3DRequest;
   onClose: () => void;
@@ -163,8 +197,13 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
 
   const [params, setParams]       = useState<Record<string, number>>(buildInit);
   const [applyErr, setApplyErr]   = useState<string | null>(null);
-  const previewRef  = useRef<THREE.Mesh | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const previewRef    = useRef<THREE.Mesh | null>(null);
+  const debounceRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // In EDIT mode, the original committed mesh is hidden while the preview is live.
+  const hiddenMeshRef = useRef<THREE.Object3D | null>(null);
+  const { pos, onHandleMouseDown } = useDragPanel(
+    Math.max(260, Math.round(window.innerWidth / 2 - 136)), 120,
+  );
 
   // Reinitialise params when req changes (e.g. different op opened while panel mounted)
   useEffect(() => {
@@ -175,6 +214,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
   // ── Preview ─────────────────────────────────────────────────────────────────
 
   const clearPreview = useCallback(() => {
+    // Remove the preview mesh
     const m = previewRef.current;
     if (m) {
       const sc = (window as any).cadScene as THREE.Scene | null;
@@ -183,6 +223,12 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
       try { (m.material as THREE.Material).dispose(); } catch {}
     }
     previewRef.current = null;
+
+    // Restore the original committed mesh that was hidden during preview
+    if (hiddenMeshRef.current) {
+      hiddenMeshRef.current.visible = true;
+      hiddenMeshRef.current = null;
+    }
   }, []);
 
   // Clear preview on any node deletion (prevents ghost meshes after tree delete)
@@ -196,6 +242,16 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     const sc = (window as any).cadScene as THREE.Scene | null;
     if (!window.oc || !sc) return;
     clearPreview();
+
+    // In EDIT mode hide the committed solid so the preview doesn't overlap it
+    if (liveReq.editNodeId) {
+      const original = sc.children.find(c => c.userData?.cadNodeId === liveReq.editNodeId);
+      if (original) {
+        original.visible = false;
+        hiddenMeshRef.current = original;
+      }
+    }
+
     try {
       const shape = computeShape(liveReq.op, liveReq.targetIds, liveParams);
       const geo   = OccConverter.shapeToThreeGeometry(window.oc, shape, 0.2);
@@ -204,7 +260,13 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
       mesh.castShadow = mesh.receiveShadow = true;
       sc.add(mesh);
       previewRef.current = mesh;
-    } catch { /* silent */ }
+    } catch {
+      // Preview failed — restore hidden mesh so user can still see the solid
+      if (hiddenMeshRef.current) {
+        hiddenMeshRef.current.visible = true;
+        hiddenMeshRef.current = null;
+      }
+    }
   }, [clearPreview]);
 
   // Debounce preview on param change
@@ -223,9 +285,10 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
   // ── Keyboard ────────────────────────────────────────────────────────────────
   // Use refs so the one-time listener always reads fresh values.
 
-  const paramsRef  = useRef(params);
-  const onCloseRef = useRef(onClose);
-  const reqRef     = useRef(req);
+  const paramsRef   = useRef(params);
+  const onCloseRef  = useRef(onClose);
+  const reqRef      = useRef(req);
+  const doApplyRef  = useRef<() => void>(() => {});
   useEffect(() => { paramsRef.current  = params;  }, [params]);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => { reqRef.current     = req;     }, [req]);
@@ -239,11 +302,14 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     const h = (e: KeyboardEvent) => {
       if (!armed) return;
       if (e.key === 'Escape') { e.preventDefault(); clearPreview(); onCloseRef.current(); }
+      else if (e.key === 'Enter') { e.preventDefault(); doApplyRef.current(); }
     };
-    window.addEventListener('keydown', h);
+    // capture:true → fires before the number-input's onKeyDown stopPropagation,
+    // so Enter/Esc work even while a field is focused.
+    window.addEventListener('keydown', h, true);
     return () => {
       clearTimeout(armTimer);
-      window.removeEventListener('keydown', h);
+      window.removeEventListener('keydown', h, true);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -317,6 +383,10 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         store.log(`Op3D: addNode done — in rootIds=${inTree}, rootIds count=${afterNodes.rootIds.length}`, inTree ? 'success' : 'error');
 
         window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }));
+        // Nest the consumed sketch(es) under the operation: Extrusion1 → Sketch1 → Circle1
+        if (['extrude', 'revolve', 'loft', 'sweep'].includes(req.op)) {
+          store.adoptSketchSources(id, req.targetIds);
+        }
         store.log(`${name} created ✓`, 'success');
       }
 
@@ -332,27 +402,22 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
   };
 
   const doCancel = () => { clearPreview(); onClose(); };
+  doApplyRef.current = doApply; // keep Enter-key handler pointed at the latest closure
 
   const set = (k: string, v: number) => setParams(p => ({ ...p, [k]: v }));
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
-  // Position: centred horizontally, safely below the toolbar stack
-  // (title 28px + toolbar 40px + advanced toolbar 36px = 104px).
-  const defX = Math.max(260, Math.round(window.innerWidth / 2 - 136));
-  const defY = 120;
-
   return createPortal(
-    <Draggable handle=".op3d-handle" defaultPosition={{ x: defX, y: defY }}>
-      <div style={{
-        position:'fixed', zIndex:9000, width:272,
-        background:'var(--surface-2)',
-        border:`1px solid ${isEdit ? 'rgba(255,153,0,0.5)' : 'var(--border)'}`,
-        borderRadius:'var(--radius-md)',
-        boxShadow:'0 8px 32px rgba(0,0,0,0.45)',
-        overflow:'hidden', userSelect:'none',
-      }}>
-        <div className="op3d-handle" style={{
+    <div style={{
+      position:'fixed', top: pos.y, left: pos.x, zIndex:9000, width:272,
+      background:'var(--surface-2)',
+      border:`1px solid ${isEdit ? 'rgba(255,153,0,0.5)' : 'var(--border)'}`,
+      borderRadius:'var(--radius-md)',
+      boxShadow:'0 8px 32px rgba(0,0,0,0.45)',
+      overflow:'hidden', userSelect:'none',
+    }}>
+        <div onMouseDown={onHandleMouseDown} style={{
           padding:'8px 12px', cursor:'move',
           borderBottom:'1px solid var(--border)',
           background: isEdit ? 'rgba(255,153,0,0.08)' : 'var(--surface-1)',
@@ -394,14 +459,13 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         )}
 
         <div style={{ padding:'8px 14px 10px', borderTop:'1px solid var(--border-soft)', display:'flex', gap:8, justifyContent:'flex-end', alignItems:'center' }}>
-          <span style={{ fontSize:9, color:'var(--text-muted)', marginRight:'auto' }}>Esc Cancel · Drag header to move</span>
+          <span style={{ fontSize:9, color:'var(--text-muted)', marginRight:'auto' }}>⏎ Apply · Esc Cancel · Drag header</span>
           <button onClick={doCancel} style={{ padding:'4px 14px', background:'none', border:'1px solid var(--border)', borderRadius:'var(--radius-sm)', color:'var(--text-dim)', cursor:'pointer', fontSize:11 }}>Cancel</button>
           <button onClick={doApply}  style={{ padding:'4px 16px', background:'var(--accent)', border:'none', borderRadius:'var(--radius-sm)', color:'#fff', cursor:'pointer', fontSize:11, fontWeight:700 }}>
             {isEdit ? 'Update ✓' : 'Apply ✓'}
           </button>
         </div>
-      </div>
-    </Draggable>,
+      </div>,
     document.body,
   );
 };

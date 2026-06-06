@@ -19,6 +19,8 @@ import { OccSelectionService } from '../services/OccSelectionService';
 import { ThreeMeshCache }      from '../services/ThreeMeshCache';
 import { useCADGizmoHotkeys }  from '../hooks/useCADGizmoHotkeys';
 import { useCADSketchTool }    from '../hooks/useCADSketchTool';
+import { useCADEdgeSelect }    from '../hooks/useCADEdgeSelect';
+import { useCADBooleanPick }   from '../hooks/useCADBooleanPick';
 import { CADCameraService }    from '../services/CADCameraService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
 import { SketchOverlay }       from './SketchOverlay';
@@ -61,22 +63,29 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   // ─── Sketch tool hook (handles all SKETCH_* modes) ───────────────────────────
   useCADSketchTool(containerRef, sceneRef, cameraRef);
 
+  // ─── Edge-select hook (handles BLEND_EDGE mode for per-edge fillet/chamfer) ──
+  useCADEdgeSelect(containerRef, sceneRef, cameraRef);
+
+  // ─── Boolean-pick hook (handles BOOLEAN_PICK mode for base/tool selection) ───
+  useCADBooleanPick(containerRef, sceneRef, cameraRef);
+
   // ─── Camera: animate to view normal to workplane when sketch starts ──────────
   useEffect(() => {
     const isSketch = interactionMode.startsWith('SKETCH_');
 
     if (isSketch) {
-      // Cancel any in-progress restore first
-      if (restoreCameraRef.current) {
-        restoreCameraRef.current();
-        restoreCameraRef.current = null;
-      }
-      const camera   = cameraRef.current;
-      const controls = orbitRef.current;
-      if (camera && controls) {
-        restoreCameraRef.current = CADCameraService.animateToWorkplaneNormal(
-          camera, controls, activeWorkplane,
-        );
+      // Animate to the workplane-normal view ONCE per session. Re-animating on
+      // every tool switch would call the old restore() and re-snapshot the
+      // (already-rotated) pose as the new "saved" view — corrupting it so Quit
+      // never returns to the original perspective. Only save if not yet saved.
+      if (!restoreCameraRef.current) {
+        const camera   = cameraRef.current;
+        const controls = orbitRef.current;
+        if (camera && controls) {
+          restoreCameraRef.current = CADCameraService.animateToWorkplaneNormal(
+            camera, controls, activeWorkplane,
+          );
+        }
       }
     } else if (!sketchSession) {
       // Leaving sketch entirely (no active session) — restore the pre-sketch camera
@@ -319,6 +328,61 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     const grid = new THREE.GridHelper(200, 200, 0xa8b4c0, 0xc8d0d8);
     scene.add(grid);
 
+    // ── Zoom-to-cursor (immediate) ───────────────────────────────────────────
+    // Registered on window with capture:true so it fires BEFORE Dockview (and
+    // anything else) can swallow the wheel event. We own zoom; OrbitControls'
+    // built-in dolly is disabled to avoid double handling.
+    orbit.enableZoom = false;
+
+    const _zrc  = new THREE.Raycaster();
+    const _zFoc = new THREE.Vector3();
+    const _zPl  = new THREE.Plane();
+    const _zN   = new THREE.Vector3();
+
+    const onWheelZoom = (e: WheelEvent) => {
+      const rect = container.getBoundingClientRect();
+      if (e.clientX < rect.left || e.clientX > rect.right ||
+          e.clientY < rect.top  || e.clientY > rect.bottom) return;
+      e.preventDefault();
+
+      // During a sketch session, zoom is a PURE DOLLY toward the orbit target
+      // (focus = target) so the camera stays on its axis and the view remains
+      // normal to the active workplane. Outside sketching we zoom to the cursor.
+      const st = useCADStore.getState();
+      const inSketch = !!st.sketchSession || st.interactionMode.startsWith('SKETCH_');
+      if (inSketch) {
+        _zFoc.copy(orbit.target);
+      } else {
+        const ndcX =  ((e.clientX - rect.left) / rect.width)  * 2 - 1;
+        const ndcY = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
+        _zrc.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+        const pickable = scene.children.filter(
+          (c) => c instanceof THREE.Mesh && !c.userData.isWorkplaneHelper,
+        );
+        const hits = _zrc.intersectObjects(pickable, true);
+        if (hits.length) {
+          _zFoc.copy(hits[0].point);
+        } else {
+          _zN.copy(camera.position).sub(orbit.target).normalize();
+          _zPl.setFromNormalAndCoplanarPoint(_zN, orbit.target);
+          if (!_zrc.ray.intersectPlane(_zPl, _zFoc)) _zFoc.copy(orbit.target);
+        }
+      }
+
+      // Normalise wheel delta across mouse/trackpad: deltaMode 1 = lines (~16px).
+      const px = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      // Proportional factor: <1 zoom in (wheel up), >1 zoom out (wheel down).
+      const factor = Math.pow(0.999, px);
+      const newDist = camera.position.distanceTo(orbit.target) * factor;
+      if (newDist < orbit.minDistance || newDist > orbit.maxDistance) { orbit.update(); return; }
+
+      // Scale camera AND target from the focus point → real dolly toward cursor.
+      camera.position.sub(_zFoc).multiplyScalar(factor).add(_zFoc);
+      orbit.target  .sub(_zFoc).multiplyScalar(factor).add(_zFoc);
+      orbit.update();
+    };
+    window.addEventListener('wheel', onWheelZoom, { passive: false, capture: true });
+
     // Render loop
     let rafId: number;
     const animate = () => {
@@ -367,6 +431,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     return () => {
       cancelAnimationFrame(rafId);
       if (mousePosRafRef.current) cancelAnimationFrame(mousePosRafRef.current);
+      window.removeEventListener('wheel', onWheelZoom, { capture: true });
       tc.dispose();
       orbit.dispose();
       renderer.dispose();

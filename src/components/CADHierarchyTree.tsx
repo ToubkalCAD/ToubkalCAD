@@ -13,6 +13,11 @@ import type { Op3DType } from './Op3DPanel';
 // Note: fillet/chamfer produce 'compound' nodes, so 'compound' is included.
 const REEDITABLE = new Set<NodeType>(['extrusion', 'revolve', 'loft', 'sweep', 'compound']);
 
+// 3D solids eligible for the right-click context menu (fillet/chamfer + re-edit)
+const SOLID_TYPES = new Set<NodeType>([
+  'box', 'cylinder', 'sphere', 'extrusion', 'revolve', 'sweep', 'loft', 'boolean_operation', 'compound',
+]);
+
 const NODE_ICONS: Record<NodeType, string> = {
   box:               '◻',
   cylinder:          '⬡',
@@ -140,9 +145,21 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
       <div
         onClick={handleClick}
         onDoubleClick={(e) => {
-          const opType = node.params?.opType as Op3DType | undefined;
-          const wireIds = node.params?.targetWireIds as string[] | undefined;
-          if (REEDITABLE.has(node.type) && opType && wireIds?.length) {
+          const opType   = node.params?.opType as Op3DType | undefined;
+          const wireIds  = node.params?.targetWireIds as string[] | undefined;
+          const blendOp  = node.params?.blendOp as 'fillet' | 'chamfer' | undefined;
+          const sourceId = node.params?.sourceId as string | undefined;
+          const boolOp   = node.params?.boolOp as import('../store/cadStore').BooleanOp | undefined;
+          if (blendOp && sourceId) {
+            // Re-edit a fillet/chamfer with its stored edge selection
+            e.stopPropagation();
+            const edges = (node.params?.edgeIndices as number[] | undefined) ?? [];
+            useCADStore.getState().openBlendPanel(sourceId, blendOp, nodeId, edges);
+          } else if (boolOp && node.params?.baseId) {
+            // Re-edit a boolean with its stored base/tools
+            e.stopPropagation();
+            useCADStore.getState().openBooleanPanel(boolOp, nodeId, node.params.baseId as string, (node.params?.toolIds as string[]) ?? []);
+          } else if (REEDITABLE.has(node.type) && opType && wireIds?.length) {
             // Re-edit the 3D operation with the previously stored params
             e.stopPropagation();
             show3DOpPanel(opType, wireIds, nodeId);
@@ -154,9 +171,11 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
           }
         }}
         onContextMenu={(e) => {
+          // Sketches, wires, and any 3D solid (for fillet/chamfer + re-edit) get a menu.
+          const isSolidType = SOLID_TYPES.has(node.type);
           const isContextable = node.type === 'sketch'
             || node.type === 'sketch_wire'
-            || (REEDITABLE.has(node.type) && !!node.params?.opType);
+            || isSolidType;
           if (isContextable) {
             e.preventDefault();
             e.stopPropagation();

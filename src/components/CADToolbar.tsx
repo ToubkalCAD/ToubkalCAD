@@ -7,14 +7,14 @@ import React from 'react';
 import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS, InteractionMode } from '../store/cadStore';
 import { showParamModal }           from './ParameterModal';
 import { OccPrimitivesService }     from '../services/OccPrimitivesService';
-import { OccBooleanService }        from '../services/OccBooleanService';
 import { OccExtrusionService }      from '../services/OccExtrusionService';
 import { OccExchangeService }       from '../services/OccExchangeService';
-import { OccFilletService }         from '../services/OccFilletService';
 import { OccRevolutionService }     from '../services/OccRevolutionService';
 import { OccLoftService }           from '../services/OccLoftService';
 import { OccSweepService }          from '../services/OccSweepService';
 import { CADGeometryRegistry }      from '../services/CADGeometryRegistry';
+import { showBlendPanel }           from './BlendActionPanel';
+import { showBooleanPanel }         from './BooleanActionPanel';
 
 declare global { interface Window { oc: any; } }
 
@@ -169,58 +169,30 @@ export const CADToolbar: React.FC = () => {
       OccRevolutionService.createCone(window.oc, v.r1, v.r2, v.h));
   });
 
-  // ─── Modifications ─────────────────────────────────────────────────────────
-  const mkFillet = () => {
-    if (!selIds.length) { log('Select an object first.', 'warn'); return; }
-    withOC(async () => {
-      const v = await showParamModal('Fillet Edges', [
-        { key: 'r', label: 'Radius', default: 1, min: 0.001, unit: 'mm' },
-      ]);
-      if (!v) return;
-      const shape = reg.getShape(selIds[0]);
-      if (!shape) { log('Shape not found.', 'error'); return; }
-      setProc(true, 'Computing fillet…');
-      try {
-        create(crypto.randomUUID(), `Fillet r${v.r}`, 'compound',
-          OccFilletService.filletAllEdges(window.oc, shape, v.r));
-      } finally { setProc(false); }
-    });
+  // ─── Modifications (Phase 6 – per-edge blend panel) ──────────────────────────
+  const openBlend = (op: 'fillet' | 'chamfer') => {
+    if (!selIds.length) { log('Select a solid first.', 'warn'); return; }
+    const node = nodes[selIds[0]];
+    if (!node || node.type === 'sketch' || node.type === 'sketch_wire') {
+      log('Select a 3D solid (not a sketch) to fillet/chamfer.', 'warn'); return;
+    }
+    if (!reg.getShape(selIds[0])) { log('Shape not found in registry.', 'error'); return; }
+    showBlendPanel(selIds[0], op);
   };
+  const mkFillet  = () => openBlend('fillet');
+  const mkChamfer = () => openBlend('chamfer');
 
-  const mkChamfer = () => {
-    if (!selIds.length) { log('Select an object first.', 'warn'); return; }
-    withOC(async () => {
-      const v = await showParamModal('Chamfer Edges', [
-        { key: 'd', label: 'Distance', default: 1, min: 0.001, unit: 'mm' },
-      ]);
-      if (!v) return;
-      const shape = reg.getShape(selIds[0]);
-      if (!shape) { log('Shape not found.', 'error'); return; }
-      setProc(true, 'Computing chamfer…');
-      try {
-        create(crypto.randomUUID(), `Chamfer ${v.d}mm`, 'compound',
-          OccFilletService.chamferAllEdges(window.oc, shape, v.d));
-      } finally { setProc(false); }
-    });
-  };
-
-  // ─── Boolean operations ────────────────────────────────────────────────────
+  // ─── Boolean operations (Phase 7 – guided panel) ─────────────────────────────
+  // Opens BooleanActionPanel. If 2+ solids are already selected they pre-fill the
+  // base (first) and tool(s) (rest); otherwise the user picks them in the viewport.
   const boolOp = (op: 'CUT' | 'FUSE' | 'COMMON') => {
-    if (selIds.length < 2) { log('Select 2 objects (Ctrl+click).', 'warn'); return; }
-    withOC(async () => {
-      const sA = reg.getShape(selIds[0]);
-      const sB = reg.getShape(selIds[1]);
-      if (!sA || !sB) { log('Shapes not found.', 'error'); return; }
-      setProc(true, 'Boolean operation…');
-      try {
-        const NAMES = { CUT: 'Subtract A−B', FUSE: 'Union A+B', COMMON: 'Intersect A∩B' };
-        let res: any;
-        if (op === 'CUT')    res = OccBooleanService.subtract(window.oc, sA, sB);
-        if (op === 'FUSE')   res = OccBooleanService.fuse(window.oc, sA, sB);
-        if (op === 'COMMON') res = OccBooleanService.intersect(window.oc, sA, sB);
-        create(crypto.randomUUID(), NAMES[op], 'boolean_operation', res);
-      } finally { setProc(false); }
+    const solids = selIds.filter((id) => {
+      const t = nodes[id]?.type;
+      return t && t !== 'sketch' && t !== 'sketch_wire' && reg.getShape(id);
     });
+    const base  = solids[0] ?? null;
+    const tools = solids.slice(1);
+    showBooleanPanel(op, base, tools);
   };
 
   // ─── Extrusion ─────────────────────────────────────────────────────────────
@@ -239,8 +211,10 @@ export const CADToolbar: React.FC = () => {
       const direction: [number,number,number] = wp?.normal ?? activeWorkplane.normal;
       setProc(true, 'Extruding…');
       try {
-        create(crypto.randomUUID(), `Extrusion${v.h.toFixed(0)}mm`, 'extrusion',
+        const id = crypto.randomUUID();
+        create(id, `Extrusion${v.h.toFixed(0)}mm`, 'extrusion',
           OccExtrusionService.extrudeWire(window.oc, wire, v.h, direction));
+        useCADStore.getState().adoptSketchSources(id, [selIds[0]]);
       } finally { setProc(false); }
     });
   };
@@ -263,8 +237,10 @@ export const CADToolbar: React.FC = () => {
       const idx = Math.round(Math.max(0, Math.min(2, v.axis)));
       setProc(true, 'Revolving…');
       try {
-        create(crypto.randomUUID(), `Revolve${v.angle.toFixed(0)}°/${axisLabels[idx]}`, 'revolve',
+        const id = crypto.randomUUID();
+        create(id, `Revolve${v.angle.toFixed(0)}°/${axisLabels[idx]}`, 'revolve',
           OccRevolutionService.revolveProfile(window.oc, wire, [0,0,0], axisVecs[idx], v.angle));
+        useCADStore.getState().adoptSketchSources(id, [selIds[0]]);
       } finally { setProc(false); }
     });
   };
@@ -283,8 +259,10 @@ export const CADToolbar: React.FC = () => {
       if (wires.length < 2) { log('Could not retrieve all sketch shapes.', 'error'); return; }
       setProc(true, 'Lofting…');
       try {
-        create(crypto.randomUUID(), `Loft(${sketchIds.length})`, 'loft',
+        const id = crypto.randomUUID();
+        create(id, `Loft(${sketchIds.length})`, 'loft',
           OccLoftService.loftProfiles(window.oc, wires, v.solid >= 0.5, v.ruled >= 0.5));
+        useCADStore.getState().adoptSketchSources(id, sketchIds);
       } finally { setProc(false); }
     });
   };
@@ -299,8 +277,10 @@ export const CADToolbar: React.FC = () => {
       if (!profile || !spine) { log('Could not retrieve sketch shapes.', 'error'); return; }
       setProc(true, 'Sweeping…');
       try {
-        create(crypto.randomUUID(), 'Sweep', 'sweep',
+        const id = crypto.randomUUID();
+        create(id, 'Sweep', 'sweep',
           OccSweepService.sweepProfile(window.oc, profile, spine));
+        useCADStore.getState().adoptSketchSources(id, [sketchIds[0], sketchIds[1]]);
       } finally { setProc(false); }
     });
   };
@@ -342,7 +322,6 @@ export const CADToolbar: React.FC = () => {
   };
 
   const hasSel       = selIds.length > 0;
-  const hasSel2      = selIds.length >= 2;
   const hasSketch    = hasSel && nodes[selIds[0]]?.type === 'sketch_wire';
   const sketchCount  = selIds.filter((id) => nodes[id]?.type === 'sketch_wire').length;
   const canRevolve   = sketchCount >= 1;
@@ -364,9 +343,9 @@ export const CADToolbar: React.FC = () => {
       <Btn icon="⌐" label="Chamfer"  onClick={mkChamfer} disabled={!hasSel} />
 
       <Sep /><Grp label="Boolean" />
-      <Btn icon="⊖" label="A−B"  onClick={() => boolOp('CUT')}    disabled={!hasSel2} accent="#993333" />
-      <Btn icon="⊕" label="A+B"  onClick={() => boolOp('FUSE')}   disabled={!hasSel2} accent="#339944" />
-      <Btn icon="⊗" label="A∩B"  onClick={() => boolOp('COMMON')} disabled={!hasSel2} accent="#997733" />
+      <Btn icon="⊖" label="Subtract"  onClick={() => boolOp('CUT')}    accent="#993333" />
+      <Btn icon="⊕" label="Union"     onClick={() => boolOp('FUSE')}   accent="#339944" />
+      <Btn icon="⊗" label="Intersect" onClick={() => boolOp('COMMON')} accent="#997733" />
 
       {/* ── Plane indicator + change button ───────────────────────────────── */}
       <Sep />

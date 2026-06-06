@@ -21,12 +21,15 @@ import { MenuBar }              from './MenuBar';
 import { ErrorBoundary }        from './ErrorBoundary';
 import { PlaneSelector }        from './PlaneSelector';
 import { TreeContextMenu }     from './TreeContextMenu';
-import { Op3DPanel, registerOp3DPanelOpener } from './Op3DPanel';
-import type { Op3DRequest }                  from './Op3DPanel';
+import { Op3DPanel, show3DOpPanel } from './Op3DPanel';
+import type { Op3DRequest, Op3DType } from './Op3DPanel';
+import { BlendActionPanel }    from './BlendActionPanel';
+import { BooleanActionPanel }  from './BooleanActionPanel';
 import { AdvancedToolbar }      from './AdvancedToolbar';
 import { CADConsolePanel }      from './panels/CADConsolePanel';
 import { CADProjectPanel }      from './panels/CADProjectPanel';
 import { CADCameraService, CADViewPreset } from '../services/CADCameraService';
+import { useCADStore } from '../store/cadStore';
 import 'dockview/dist/styles/dockview.css';
 
 // ─── Numpad camera shortcuts ──────────────────────────────────────────────────
@@ -144,19 +147,47 @@ export const CADLayout: React.FC = () => {
   const sceneRef    = useRef<THREE.Scene | null>(null);
   const [viewReady, setViewReady] = useState(false);
 
-  // ── Op3D panel state ─────────────────────────────────────────────────────
-  const [op3DReq, setOp3DReq] = useState<Op3DRequest | null>(null);
-
-  // Register the opener DURING render (not in useEffect) so it is available
-  // before the first paint, with no timing window where _opener is null.
-  // setOp3DReq is a stable React setter — this assignment is a no-op after
-  // the first render, so calling it on every render is safe.
-  registerOp3DPanelOpener(setOp3DReq);
+  // ── Op3D panel state — driven by Zustand so show3DOpPanel() always works ────
+  const op3DReq    = useCADStore((s) => s.op3DPanelReq);
+  const closeOp3D  = useCADStore((s) => s.closeOp3DPanel);
 
   useNumpadCamera(cameraRef, orbitRef);
   useViewPresetBus(cameraRef, orbitRef);
 
-  // Mesh removal is handled by Viewport3D (which has access to sketch-wire lines too)
+  // Viewport double-click → re-edit the selected 3D op node.
+  // Registered on window so Viewport3D.tsx is not modified.
+  useEffect(() => {
+    const REEDITABLE_TYPES = new Set(['extrusion', 'revolve', 'loft', 'sweep', 'compound']);
+    const onDblClick = () => {
+      const state   = useCADStore.getState();
+      const sel     = state.selectedIds;
+      if (!sel.length) return;
+      const node    = state.nodes[sel[0]];
+      if (!node) return;
+      // Blend result (fillet/chamfer) → re-open BlendActionPanel
+      const blendOp  = node.params?.blendOp as 'fillet' | 'chamfer' | undefined;
+      const sourceId = node.params?.sourceId as string | undefined;
+      if (blendOp && sourceId) {
+        const edges = (node.params?.edgeIndices as number[] | undefined) ?? [];
+        state.openBlendPanel(sourceId, blendOp, sel[0], edges);
+        return;
+      }
+      // Boolean result → re-open BooleanActionPanel
+      const boolOp = node.params?.boolOp as import('../store/cadStore').BooleanOp | undefined;
+      if (boolOp && node.params?.baseId) {
+        state.openBooleanPanel(boolOp, sel[0], node.params.baseId as string, (node.params?.toolIds as string[]) ?? []);
+        return;
+      }
+      // 3D op (extrude/revolve/loft/sweep) → re-open Op3DPanel
+      const opType  = node.params?.opType as Op3DType | undefined;
+      const wireIds = node.params?.targetWireIds as string[] | undefined;
+      if (opType && wireIds?.length && REEDITABLE_TYPES.has(node.type)) {
+        show3DOpPanel(opType, wireIds, sel[0]);
+      }
+    };
+    window.addEventListener('dblclick', onDblClick);
+    return () => window.removeEventListener('dblclick', onDblClick);
+  }, []);
 
   // STABLE callback — must be wrapped in useCallback to avoid Viewport3D re-init
   const handleViewportReady = useCallback((
@@ -263,10 +294,12 @@ export const CADLayout: React.FC = () => {
       <TreeContextMenu />
       {op3DReq && (
         <Op3DPanel
-          req={op3DReq}
-          onClose={() => setOp3DReq(null)}
+          req={op3DReq as Op3DRequest}
+          onClose={closeOp3D}
         />
       )}
+      <BlendActionPanel />
+      <BooleanActionPanel />
     </div>
   );
 };

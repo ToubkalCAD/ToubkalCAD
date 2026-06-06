@@ -4,11 +4,9 @@
 // Opens automatically when a 2D sketch tool is activated.
 // ============================================================
 
-import React, { useState } from 'react';
-// react-draggable ships its own types; use default export
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const Draggable = (require('react-draggable').default ?? require('react-draggable')) as any;
+import React, { useState, useEffect } from 'react';
 import { useCADStore, Workplane, STANDARD_WORKPLANES } from '../store/cadStore';
+import { useDragPanel } from '../hooks/useDragPanel';
 
 // ─── Helper: compute basis from a custom normal ───────────────────────────────
 
@@ -94,8 +92,7 @@ export const PlaneSelector: React.FC = () => {
   const [origin,    setOrigin]    = useState<[string,string,string]>(['0','0','0']);
   const [normalIn,  setNormalIn]  = useState<[string,string,string]>(['0','1','0']);
   const [customErr, setCustomErr] = useState<string>('');
-
-  if (!open) return null;
+  const { pos, onHandleMouseDown } = useDragPanel(200, 120);
 
   const confirm = () => {
     let wp: Workplane;
@@ -123,6 +120,20 @@ export const PlaneSelector: React.FC = () => {
   const cancel = () => {
     close();
   };
+
+  // Enter = confirm · Esc = cancel (global while open)
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Enter')  { e.preventDefault(); confirm(); }
+      if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, tab, selected, origin, normalIn]);
+
+  if (!open) return null;
 
   // Number input helper
   const numInput = (
@@ -152,10 +163,11 @@ export const PlaneSelector: React.FC = () => {
   );
 
   return (
-    <Draggable handle=".plane-sel-handle" bounds="parent" defaultPosition={{ x: 200, y: 120 }}>
       <div
         style={{
           position:    'fixed',
+          top:         pos.y,
+          left:        pos.x,
           zIndex:      1000,
           width:       320,
           background:  'var(--surface-2)',
@@ -165,11 +177,10 @@ export const PlaneSelector: React.FC = () => {
           overflow:    'hidden',
           userSelect:  'none',
         }}
-        onMouseDown={(e) => e.stopPropagation()}
       >
         {/* ── Header (drag handle) ─────────────────────────────────────────── */}
         <div
-          className="plane-sel-handle"
+          onMouseDown={onHandleMouseDown}
           style={{
             padding:    '10px 14px',
             borderBottom: '1px solid var(--border)',
@@ -303,6 +314,5 @@ export const PlaneSelector: React.FC = () => {
           >Sketch on Plane</button>
         </div>
       </div>
-    </Draggable>
   );
 };

@@ -159,5 +159,31 @@ export default defineConfig({
       'Cross-Origin-Embedder-Policy': 'require-corp',
     },
     static: true,
+
+    // ── Cache the 48 MB content-hashed WASM kernel "forever" ──────────────
+    // The filename carries a content hash, so the URL only changes when the
+    // wasm itself changes — making it safe to cache immutably. After the FIRST
+    // load the browser serves it from disk cache (and V8 reuses its compiled
+    // code cache), so normal reloads (F5) become near-instant instead of
+    // re-downloading + re-compiling 48 MB. NB: a hard reload (Ctrl+Shift+R)
+    // intentionally bypasses the cache, so use a normal reload to benefit.
+    // Only *.wasm gets this header — index.html / JS bundles are untouched,
+    // and the critical COOP/COEP headers above are left exactly as they were.
+    setupMiddlewares: (middlewares) => {
+      middlewares.unshift({
+        name: 'wasm-immutable-cache',
+        middleware: (
+          req:  import('http').IncomingMessage,
+          res:  import('http').ServerResponse,
+          next: (err?: unknown) => void,
+        ) => {
+          if (req.url && req.url.includes('.wasm')) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+          next();
+        },
+      });
+      return middlewares;
+    },
   },
 });

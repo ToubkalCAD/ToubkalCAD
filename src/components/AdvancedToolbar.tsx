@@ -249,7 +249,7 @@ export const AdvancedToolbar: React.FC = () => {
     Promise.resolve().then(fn).catch((e: any) => { log(e.message ?? String(e), 'error'); });
   }, [log]);
 
-  const registerResult = useCallback((id: string, name: string, type: any, shape: any, params: Record<string, any>) => {
+  const registerResult = useCallback((id: string, name: string, type: any, shape: any, params: Record<string, any>, sourceWireIds: string[] = []) => {
     reg.registerShape(id, shape);
     addNode({
       id, name, type, visible:true, locked:false, parentId:null, notes:'',
@@ -258,6 +258,8 @@ export const AdvancedToolbar: React.FC = () => {
       params,
     });
     window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }));
+    // Nest the consumed sketch(es) under the operation node in the tree
+    if (sourceWireIds.length) useCADStore.getState().adoptSketchSources(id, sourceWireIds);
     useCADStore.getState().setSelectedIds([id]);
     log(`${name} created.`, 'success');
   }, [reg, addNode, log]);
@@ -282,7 +284,7 @@ export const AdvancedToolbar: React.FC = () => {
         const name  = `Revolve-${angleDeg}° (${nodes[profileId]?.name ?? profileId.slice(0,6)})`;
         registerResult(crypto.randomUUID(), name, 'revolve', solid, {
           profileId, axisOrigin, axisDir, angleDeg,
-        });
+        }, [profileId]);
       } finally {
         setProc(false);
       }
@@ -303,7 +305,7 @@ export const AdvancedToolbar: React.FC = () => {
       try {
         const solid = OccSweepService.sweepProfile(window.oc, profile, spine);
         const name  = `Sweep(${nodes[profileId]?.name ?? 'profile'})`;
-        registerResult(crypto.randomUUID(), name, 'sweep', solid, { profileId, spineId });
+        registerResult(crypto.randomUUID(), name, 'sweep', solid, { profileId, spineId }, [profileId, spineId]);
       } finally { setProc(false); }
     });
   };
@@ -320,7 +322,7 @@ export const AdvancedToolbar: React.FC = () => {
       try {
         const solid = OccLoftService.loftProfiles(window.oc, wires);
         const name  = `Loft(${wires.length})`;
-        registerResult(crypto.randomUUID(), name, 'loft', solid, { profileIds: sketchSels });
+        registerResult(crypto.randomUUID(), name, 'loft', solid, { profileIds: sketchSels }, sketchSels);
       } finally { setProc(false); }
     });
   };
