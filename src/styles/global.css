@@ -1,141 +1,262 @@
 /* ============================================================
    ToubkalCAD – global.css
-   Fusion 360-inspired light theme with CSS custom properties
+   Phase 9 – Professional UI polish.
+   A cohesive Fusion-360-flavoured design system with a refined
+   light theme and a first-class dark theme (variable overrides
+   on [data-theme="dark"]). Most chrome is var-driven, so the
+   theme flips cleanly.
    ============================================================ */
 
-/* ─── CSS Custom Properties ──────────────────────────────── */
+/* ─── Light theme (default) ──────────────────────────────── */
 :root {
-  /* Surfaces */
-  --bg:          #f0f2f5;
+  /* Surfaces — soft, neutral, low-chroma */
+  --bg:          #eceef2;
   --surface-1:   #ffffff;
-  --surface-2:   #f8f9fb;
-  --surface-3:   #eef0f3;
-  --surface-4:   #e4e7eb;
+  --surface-2:   #f6f8fa;
+  --surface-3:   #eef1f5;
+  --surface-4:   #e3e7ed;
 
   /* Borders */
-  --border:      #d0d4db;
-  --border-soft: #e2e5ea;
+  --border:      #d6dae1;
+  --border-soft: #e6e9ee;
 
   /* Text */
-  --text-primary: #1a1d22;
-  --text-dim:     #4a5568;
-  --text-muted:   #8a96a8;
+  --text-primary: #161a20;
+  --text-dim:     #475063;
+  --text-muted:   #8590a0;
 
-  /* Accent — Autodesk blue */
-  --accent:       #0696d7;
-  --accent-hover: #0578b5;
-  --accent-dim:   rgba(6, 150, 215, 0.10);
+  /* Accent — Autodesk-blue, tuned */
+  --accent:       #0a92d4;
+  --accent-hover: #0b7fbb;
+  --accent-soft:  rgba(10, 146, 212, 0.12);
+  --accent-dim:   rgba(10, 146, 212, 0.12); /* legacy alias of --accent-soft */
+  --accent-line:  rgba(10, 146, 212, 0.45);
 
   /* State */
-  --success:      #1a7f37;
-  --warn:         #9a6700;
-  --error:        #cf222e;
+  --success:      #1a8a44;
+  --success-soft: rgba(26, 138, 68, 0.13);
+  --warn:         #b5790a;
+  --warn-soft:    rgba(181, 121, 10, 0.14);
+  --error:        #d23a3a;
+  --error-soft:   rgba(210, 58, 58, 0.13);
 
   /* Selection */
-  --sel-bg:       rgba(6, 150, 215, 0.08);
-  --sel-border:   #0696d7;
+  --sel-bg:       rgba(10, 146, 212, 0.09);
+  --sel-border:   #0a92d4;
 
-  /* Misc */
-  --radius-sm:    3px;
-  --radius-md:    5px;
-  --shadow-sm:    0 1px 4px rgba(0,0,0,0.08);
-  --shadow-md:    0 3px 12px rgba(0,0,0,0.12);
+  /* Sketch / constraint accent (warm) */
+  --sketch:       #e6920a;
+
+  /* Radii + elevation */
+  --radius-sm:    4px;
+  --radius-md:    7px;
+  --radius-lg:    11px;
+  --shadow-sm:    0 1px 3px rgba(20,28,40,0.08);
+  --shadow-md:    0 4px 16px rgba(20,28,40,0.13);
+  --shadow-lg:    0 12px 40px rgba(16,22,34,0.22);
+
+  /* Motion */
+  --ease:         cubic-bezier(0.2, 0.6, 0.25, 1);
+  --t-fast:       0.12s var(--ease);
+  --t-med:        0.2s  var(--ease);
+
+  --viewport-bg:  #e3e8ee;
+}
+
+/* ─── Dark theme ─────────────────────────────────────────── */
+:root[data-theme="dark"] {
+  --bg:          #15171b;
+  --surface-1:   #20242a;
+  --surface-2:   #1a1d22;
+  --surface-3:   #262b32;
+  --surface-4:   #313841;
+
+  --border:      #343b44;
+  --border-soft: #272c33;
+
+  --text-primary: #e8ecf2;
+  --text-dim:     #aab4c2;
+  --text-muted:   #707b8a;
+
+  --accent:       #2eaee6;
+  --accent-hover: #56c0ef;
+  --accent-soft:  rgba(46, 174, 230, 0.16);
+  --accent-dim:   rgba(46, 174, 230, 0.16); /* legacy alias of --accent-soft */
+  --accent-line:  rgba(46, 174, 230, 0.5);
+
+  --success:      #34b863;
+  --success-soft: rgba(52, 184, 99, 0.16);
+  --warn:         #d39a2b;
+  --warn-soft:    rgba(211, 154, 43, 0.16);
+  --error:        #e25555;
+  --error-soft:   rgba(226, 85, 85, 0.16);
+
+  --sel-bg:       rgba(46, 174, 230, 0.16);
+  --sel-border:   #2eaee6;
+
+  --sketch:       #f0a93a;
+
+  --shadow-sm:    0 1px 3px rgba(0,0,0,0.4);
+  --shadow-md:    0 6px 20px rgba(0,0,0,0.5);
+  --shadow-lg:    0 16px 48px rgba(0,0,0,0.6);
+
+  --viewport-bg:  #15181d;
 }
 
 /* ─── Reset ──────────────────────────────────────────────── */
-*, *::before, *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body, html, #root {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
+  width: 100%; height: 100%; overflow: hidden;
   background-color: var(--bg);
   color: var(--text-primary);
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
                'Helvetica Neue', Arial, sans-serif;
   font-size: 12px;
+  font-feature-settings: 'cv05' 1, 'ss01' 1, 'tnum' 1;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
+body { transition: background-color var(--t-med), color var(--t-med); }
+
 /* ─── Scrollbars ─────────────────────────────────────────── */
-::-webkit-scrollbar          { width: 5px; height: 5px; }
+::-webkit-scrollbar          { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track    { background: transparent; }
-::-webkit-scrollbar-thumb    { background: var(--border); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #b0b8c4; }
-*                             { scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+::-webkit-scrollbar-thumb    { background: var(--surface-4); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); background-clip: padding-box; border: 2px solid transparent; }
+* { scrollbar-width: thin; scrollbar-color: var(--surface-4) transparent; }
 
 /* ─── Animations ─────────────────────────────────────────── */
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
+@keyframes spin { to { transform: rotate(360deg); } }
 @keyframes progress-slide {
-  0%   { transform: translateX(-100%); }
-  50%  { transform: translateX(150%); }
-  100% { transform: translateX(350%); }
+  0% { transform: translateX(-100%); } 50% { transform: translateX(150%); } 100% { transform: translateX(350%); }
 }
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(3px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
+@keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes popIn  { from { opacity: 0; transform: scale(0.97) translateY(4px); } to { opacity: 1; transform: scale(1) translateY(0); } }
 
-/* ─── Dockview light theme overrides ────────────────────── */
-.dockview-theme-light {
+/* ─── Dockview theming ───────────────────────────────────── */
+.dockview-theme-light, .dockview-theme-dark {
   --dockview-background-color:           var(--bg)        !important;
+  --dockview-group-view-background-color: var(--surface-1) !important;
   --dockview-pane-background-color:      var(--surface-1) !important;
-  --dockview-tab-background-color:       var(--surface-3) !important;
+  --dockview-tab-background-color:       transparent      !important;
   --dockview-activeTab-background-color: var(--surface-1) !important;
+  --dockview-inactiveTab-background-color: transparent    !important;
   --dockview-tab-color:                  var(--text-muted) !important;
   --dockview-activeTab-color:            var(--text-primary) !important;
   --dockview-separator-border:           1px solid var(--border) !important;
-  --dockview-tab-height:                 30px !important;
+  --dockview-tabs-and-actions-container-background-color: var(--surface-2) !important;
+  --dockview-tab-height:                 32px !important;
+}
+.dockview-theme-light .dv-tab.dv-active-tab,
+.dockview-theme-dark  .dv-tab.dv-active-tab {
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
-/* ─── Tweakpane light mode ───────────────────────────────── */
-.tp-dfwv {
-  width: 100% !important;
+/* ─── Tweakpane ──────────────────────────────────────────── */
+.tp-dfwv { width: 100% !important; }
+
+/* ─── Focus / form ───────────────────────────────────────── */
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+button, input, select, textarea { font-family: inherit; }
+
+/* ─── Reusable chrome ────────────────────────────────────── */
+/* Toolbar / chrome bars share a subtle vertical sheen */
+.cad-chrome {
+  background:
+    linear-gradient(var(--surface-2), var(--surface-1));
 }
 
-/* ─── Global focus / button ──────────────────────────────── */
-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+/* Tool button */
+.cad-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 28px; padding: 0 9px;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+  font-size: 11px; font-weight: 500; letter-spacing: 0.1px;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast), box-shadow var(--t-fast);
 }
-button, input, select, textarea {
-  font-family: inherit;
+.cad-btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--text-primary);
+}
+.cad-btn:active:not(:disabled) { transform: translateY(0.5px); }
+.cad-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.cad-btn[data-active="true"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent-line);
+}
+.cad-btn--icon { width: 28px; padding: 0; justify-content: center; }
+
+/* ─── Ribbon ─────────────────────────────────────────────── */
+.ribbon-tabstrip {
+  display: flex; align-items: stretch;
+  height: 34px; padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.ribbon-tab {
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-top-left-radius: var(--radius-sm);
+  border-top-right-radius: var(--radius-sm);
+  padding: 0 16px; margin-bottom: -1px;
+  font-size: 11.5px; font-weight: 600; letter-spacing: 0.3px;
+  cursor: pointer; white-space: nowrap;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.ribbon-tab:hover { color: var(--text-primary); background: var(--surface-3); }
+.ribbon-tab[data-active="true"] {
+  color: var(--accent);
+  background: var(--surface-1);
+  border-color: var(--border);
+  border-bottom: 1px solid var(--surface-1);
+}
+.ribbon-row {
+  display: flex; align-items: center;
+  height: 46px; padding: 0 10px; gap: 3px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  overflow-x: auto; overflow-y: hidden;
 }
 
-/* ─── Modal overlay ──────────────────────────────────────── */
+/* Group label pill */
+.cad-grp {
+  font-size: 8.5px; font-weight: 700; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.8px;
+  user-select: none; flex-shrink: 0; padding: 0 2px;
+}
+.cad-sep {
+  width: 1px; height: 20px; flex-shrink: 0;
+  background: var(--border); margin: 0 4px;
+}
+
+/* ─── Modal ──────────────────────────────────────────────── */
 .cad-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(3px);
-  z-index: 9999;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(8, 12, 20, 0.42); backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center;
   animation: fadeIn 0.12s ease-out;
 }
 .cad-modal {
-  background: var(--surface-1);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md);
-  min-width: 300px;
-  max-width: 480px;
-  width: 100%;
-  overflow: hidden;
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+  min-width: 300px; max-width: 480px; width: 100%; overflow: hidden;
+  animation: popIn 0.14s var(--ease);
 }
 
 /* ─── Utilities ──────────────────────────────────────────── */
 .no-select { user-select: none; -webkit-user-select: none; }
 .flex-center { display: flex; align-items: center; justify-content: center; }
 .fade-in { animation: fadeIn 0.18s ease-out; }
-.mono {
-  font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-}
+.pop-in  { animation: popIn 0.14s var(--ease); }
+.mono { font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace; font-feature-settings: 'tnum' 1; }

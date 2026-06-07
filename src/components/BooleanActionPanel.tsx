@@ -22,6 +22,7 @@ import type { BooleanOp } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccConverter }        from '../services/OccConverter';
 import { OccBooleanService }   from '../services/OccBooleanService';
+import { getPlacedShape }      from '../utils/placedShape';
 import { useDragPanel }        from '../hooks/useDragPanel';
 
 const reg = CADGeometryRegistry.getInstance();
@@ -118,8 +119,10 @@ export const BooleanActionPanel: React.FC = () => {
     if (!window.oc || !sc) return;
     clearPreview();
     if (!base || !tools.length) return;
-    const baseShape = reg.getShape(base);
-    const toolShapes = tools.map((t) => reg.getShape(t)).filter(Boolean);
+    // Bake each input's gizmo placement so the boolean is computed where the
+    // solids actually sit, not at their registry origin pose.
+    const baseShape = getPlacedShape(base);
+    const toolShapes = tools.map((t) => getPlacedShape(t)).filter(Boolean);
     if (!baseShape || toolShapes.length !== tools.length) return;
     try {
       const result = computeBoolean(o, baseShape, toolShapes);
@@ -190,8 +193,8 @@ export const BooleanActionPanel: React.FC = () => {
     if (!baseId)        { setApplyErr('Pick a base solid first.'); return; }
     if (!toolIds.length) { setApplyErr('Pick at least one tool solid.'); return; }
 
-    const baseShape = reg.getShape(baseId);
-    const toolShapes = toolIds.map((t) => reg.getShape(t)).filter(Boolean);
+    const baseShape = getPlacedShape(baseId);
+    const toolShapes = toolIds.map((t) => getPlacedShape(t)).filter(Boolean);
     if (!baseShape || toolShapes.length !== toolIds.length) {
       setApplyErr('A selected solid is missing from the registry.'); return;
     }

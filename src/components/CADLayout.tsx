@@ -15,7 +15,7 @@ import { Viewport3D }           from './Viewport3D';
 import { CADHierarchyTree }     from './CADHierarchyTree';
 import { PropertiesPanel }      from './PropertiesPanel';
 import { CADStatusBar }         from './CADStatusBar';
-import { CADToolbar }           from './CADToolbar';
+import { Ribbon }               from './Ribbon';
 import { CADViewCube }          from './CADViewCube';
 import { MenuBar }              from './MenuBar';
 import { ErrorBoundary }        from './ErrorBoundary';
@@ -25,12 +25,29 @@ import { Op3DPanel, show3DOpPanel } from './Op3DPanel';
 import type { Op3DRequest, Op3DType } from './Op3DPanel';
 import { BlendActionPanel }    from './BlendActionPanel';
 import { BooleanActionPanel }  from './BooleanActionPanel';
-import { AdvancedToolbar }      from './AdvancedToolbar';
+import { ConstraintPanel }     from './ConstraintPanel';
 import { CADConsolePanel }      from './panels/CADConsolePanel';
 import { CADProjectPanel }      from './panels/CADProjectPanel';
+import { Icon }                 from './Icon';
 import { CADCameraService, CADViewPreset } from '../services/CADCameraService';
 import { useCADStore } from '../store/cadStore';
+import { getTheme, toggleTheme } from '../utils/theme';
 import 'dockview/dist/styles/dockview.css';
+
+// ─── Header theme toggle ──────────────────────────────────────────────────────
+const ThemeToggle: React.FC = () => {
+  const [theme, setThemeState] = useState(getTheme());
+  return (
+    <button
+      className="cad-btn cad-btn--icon"
+      title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+      onClick={() => setThemeState(toggleTheme())}
+      style={{ height: 22, width: 22 }}
+    >
+      <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={14} />
+    </button>
+  );
+};
 
 // ─── Numpad camera shortcuts ──────────────────────────────────────────────────
 function useNumpadCamera(
@@ -254,29 +271,38 @@ export const CADLayout: React.FC = () => {
       }}>
         {/* Title / menu row */}
         <div style={{
-          height: '28px',
+          height: '30px',
           background: 'var(--surface-1)',
           display: 'flex', alignItems: 'stretch',
           borderBottom: '1px solid var(--border-soft)',
         }}>
           {/* Logo */}
           <div style={{
-            display: 'flex', alignItems: 'center',
+            display: 'flex', alignItems: 'center', gap: 7,
             padding: '0 14px',
             borderRight: '1px solid var(--border-soft)',
             flexShrink: 0,
           }}>
-            <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--accent)', letterSpacing: '1.5px' }}>
+            <span style={{
+              display: 'inline-flex', width: 16, height: 16, borderRadius: 4,
+              background: 'linear-gradient(135deg, var(--accent), var(--accent-hover))',
+              alignItems: 'center', justifyContent: 'center', color: '#fff', flexShrink: 0,
+            }}>
+              <Icon name="box" size={11} stroke={2} color="#fff" />
+            </span>
+            <span style={{ fontSize: '12px', fontWeight: 800, color: 'var(--accent)', letterSpacing: '1.2px' }}>
               TOUBKAL<span style={{ color: 'var(--text-primary)', fontWeight: 400 }}>CAD</span>
             </span>
           </div>
           <MenuBar />
+          <div style={{ flex: 1 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px' }}>
+            <ThemeToggle />
+          </div>
         </div>
 
-        {/* Primary toolbar */}
-        <CADToolbar />
-        {/* Advanced operations: Revolve · Sweep · Loft */}
-        <AdvancedToolbar />
+        {/* Tabbed ribbon (replaces the two flat overflow toolbars) */}
+        <Ribbon />
       </div>
 
       {/* Dockview workspace */}
@@ -300,6 +326,7 @@ export const CADLayout: React.FC = () => {
       )}
       <BlendActionPanel />
       <BooleanActionPanel />
+      <ConstraintPanel />
     </div>
   );
 };

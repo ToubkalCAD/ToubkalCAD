@@ -230,7 +230,7 @@ export function useCADSketchTool(
 
   // ─── Register finalized sketch ───────────────────────────────────────────────
 
-  const registerWire = useCallback((oc: any, wire: any, shapeLabel: string, wp: Workplane) => {
+  const registerWire = useCallback((oc: any, wire: any, shapeLabel: string, wp: Workplane, geom?: any) => {
     const id = crypto.randomUUID();
     CADGeometryRegistry.getInstance().registerShape(id, wire);
 
@@ -252,7 +252,8 @@ export function useCADSketchTool(
       notes: '',
       transform: { position:[0,0,0], rotation:[0,0,0], scale:[1,1,1] },
       material:  { color:0x003388, roughness:0.5, metalness:0, wireframe:true, opacity:1, transparent:false },
-      params: { workplane: wp },
+      // sketchGeom (local-2D defining points) lets Phase-8 constraints re-solve this entity.
+      params: geom ? { workplane: wp, sketchGeom: geom } : { workplane: wp },
     });
     useCADStore.getState().setSelectedIds([id]);
     useCADStore.getState().log(
@@ -291,7 +292,9 @@ export function useCADSketchTool(
             const edge = OccSketchService.createLineEdge(oc, a, b);
             const wire = OccSketchService.createClosedWireFromEdges(oc, [edge]);
             addCommitted([a.clone(), b.clone()]);
-            registerWire(oc, wire, 'Line', wp);
+            const la = toLocal2D(a, wp); const lb = toLocal2D(b, wp);
+            registerWire(oc, wire, 'Line', wp,
+              { kind: 'line', a: [la.u, la.v], b: [lb.u, lb.v] });
           }
           break;
         }
@@ -303,7 +306,9 @@ export function useCADSketchTool(
             if (r < 0.01) { clicks.pop(); break; }
             const wire = OccSketchService.createCircleWire(oc, c, rim, wp);
             addCommitted(sampleCircle3D(c, rim, wp));
-            registerWire(oc, wire, `Circle-r${r.toFixed(1)}`, wp);
+            const lc = toLocal2D(c, wp);
+            registerWire(oc, wire, `Circle-r${r.toFixed(1)}`, wp,
+              { kind: 'circle', c: [lc.u, lc.v], r });
           }
           break;
         }
@@ -415,6 +420,46 @@ export function useCADSketchTool(
     });
     return unsub;
   }, []);
+
+  // ─── Replace a committed wire's visual after a constraint solve (Phase 8) ────
+  // The constraint panel rebuilds the OCC wire from solved 2D geometry and asks
+  // us to swap the THREE.Line polyline so the viewport reflects the new shape.
+  useEffect(() => {
+    const onReplace = (e: Event) => {
+      const { id, pts } = (e as CustomEvent).detail as { id: string; pts: number[][] };
+      const s = sceneRef.current;
+      if (!s || !pts?.length) return;
+      const old = wireVisualsRef.current.get(id) ?? [];
+      const visible = old[0]?.visible ?? true;
+      old.forEach((l) => { s.remove(l); l.geometry.dispose(); (l.material as THREE.Material).dispose(); });
+      const v3 = pts.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+      const line = mkLine(v3, COLOR_COMMIT);
+      line.userData.cadNodeId = id;
+      line.visible = visible;
+      s.add(line);
+      wireVisualsRef.current.set(id, [line]);
+    };
+    // S1 — sketch-edit (trim/extend/split) creates brand-new wire nodes outside
+    // the draw flow; this gives them a viewport line tracked in wireVisualsRef
+    // (so visibility-sync and delete-cleanup subscriptions handle them too).
+    const onAddVisual = (e: Event) => {
+      const { id, pts } = (e as CustomEvent).detail as { id: string; pts: number[][] };
+      const s = sceneRef.current;
+      if (!s || !pts?.length) return;
+      const v3 = pts.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
+      const line = mkLine(v3, COLOR_COMMIT);
+      line.userData.cadNodeId = id;
+      s.add(line);
+      const existing = wireVisualsRef.current.get(id) ?? [];
+      wireVisualsRef.current.set(id, [...existing, line]);
+    };
+    window.addEventListener('cad-sketch-replace-visual', onReplace);
+    window.addEventListener('cad-sketch-add-visual', onAddVisual);
+    return () => {
+      window.removeEventListener('cad-sketch-replace-visual', onReplace);
+      window.removeEventListener('cad-sketch-add-visual', onAddVisual);
+    };
+  }, [sceneRef]);
 
   // ─── Main event loop ─────────────────────────────────────────────────────────
 

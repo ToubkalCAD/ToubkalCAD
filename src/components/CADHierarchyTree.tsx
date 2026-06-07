@@ -16,6 +16,7 @@ const REEDITABLE = new Set<NodeType>(['extrusion', 'revolve', 'loft', 'sweep', '
 // 3D solids eligible for the right-click context menu (fillet/chamfer + re-edit)
 const SOLID_TYPES = new Set<NodeType>([
   'box', 'cylinder', 'sphere', 'extrusion', 'revolve', 'sweep', 'loft', 'boolean_operation', 'compound',
+  'mirror', 'pattern',
 ]);
 
 const NODE_ICONS: Record<NodeType, string> = {
@@ -30,6 +31,8 @@ const NODE_ICONS: Record<NodeType, string> = {
   revolve:           '↻',
   sweep:             '⟿',
   loft:              '⊿',
+  mirror:            '◫',
+  pattern:           '▦',
 };
 
 const NODE_COLORS: Record<NodeType, string> = {
@@ -44,6 +47,8 @@ const NODE_COLORS: Record<NodeType, string> = {
   revolve:           '#cc4488',
   sweep:             '#44bbcc',
   loft:              '#cc8844',
+  mirror:            '#4488cc',
+  pattern:           '#8844cc',
 };
 
 // ─── Icon button ──────────────────────────────────────────────────────────────
@@ -81,6 +86,8 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
   const toggleLock         = useCADStore((s) => s.toggleLock);
   const resumeSketch       = useCADStore((s) => s.resumeSketchSession);
   const openContextMenu    = useCADStore((s) => s.openTreeContextMenu);
+  const interactionMode    = useCADStore((s) => s.interactionMode);
+  const pickBooleanSolid   = useCADStore((s) => s.pickBooleanSolid);
 
   const [isEditing,  setIsEditing]  = useState(false);
   const [editValue,  setEditValue]  = useState('');
@@ -106,6 +113,14 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
 
   const handleClick = (e: React.MouseEvent) => {
     if (isEditing) return;
+    // Boolean pick mode: route tree clicks to base/tool picking so solids that
+    // are hidden behind / coincident with others (un-clickable in the viewport)
+    // can still be chosen. First solid = base, subsequent = tools (toggle).
+    if (interactionMode === 'BOOLEAN_PICK' && SOLID_TYPES.has(node.type)) {
+      e.stopPropagation();
+      pickBooleanSolid(nodeId);
+      return;
+    }
     if (node.type === 'sketch' && hasChildren) {
       // Single-click on sketch container toggles collapse
       if (!e.ctrlKey && !e.metaKey) {

@@ -29,7 +29,26 @@
       "Bash(echo \"tsc exit=$?\")",
       "Bash(pkill -f \"rspack serve.*8091\")",
       "Bash(curl -sI http://localhost:8080/)",
-      "Bash(git check-ignore *)"
+      "Bash(git check-ignore *)",
+      "Read(//tmp/solverout/**)",
+      "Read(//tmp/**)",
+      "Bash(timeout 90 google-chrome --headless=new --disable-gpu --no-sandbox --hide-scrollbars --window-size=1600,900 --virtual-time-budget=25000 --screenshot=/tmp/cad_light.png http://localhost:8080)",
+      "Bash(echo \"exit $?\")",
+      "Bash(ls -la /tmp/cad_light.png)",
+      "Bash(timeout 120 google-chrome --headless=new --no-sandbox --hide-scrollbars --window-size=1600,900 --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader --ignore-gpu-blocklist --virtual-time-budget=30000 --screenshot=/tmp/cad_light.png http://localhost:8080)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:8080)",
+      "Bash(pkill -f rspack)",
+      "Bash(rm -rf /tmp/chrome-prof)",
+      "Bash(timeout 180 google-chrome --headless=new --no-sandbox --user-data-dir=/tmp/chrome-prof --hide-scrollbars --window-size=1600,900 --use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader --ignore-gpu-blocklist --virtual-time-budget=140000 --screenshot=/tmp/cad_dark2.png http://localhost:8080)",
+      "Bash(curl -s http://localhost:8080/main.c79eafc9.css)",
+      "Bash(python3 -c \"import websocket; print\\('ws ok'\\)\")",
+      "Bash(python3 -c \"import pychrome; print\\('pychrome ok'\\)\")",
+      "WebSearch",
+      "Bash(awk '/declare class TopoDS_Compound /{f=1} f{print} f&&/^}/{exit}' node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(awk '/declare class gp_Trsf /{f=1} f{print} f&&/^}/{exit}' node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(python3 *)",
+      "Bash(npx playwright *)",
+      "Bash(echo \"started pid $!\")"
     ]
   }
 }

@@ -15,8 +15,8 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
-import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccEdgeService } from '../services/OccEdgeService';
+import { getPlacedShape } from '../utils/placedShape';
 
 const COLOR_EDGE     = 0x66ccff; // idle
 const COLOR_HOVER    = 0xffe000; // hovered
@@ -54,7 +54,10 @@ export function useCADEdgeSelect(
     disposeLines();
 
     if (!blendReq || !window.oc) return;
-    const shape = CADGeometryRegistry.getInstance().getShape(blendReq.targetId);
+    // Bake the node's placement so the pickable edge lines land on the moved
+    // body — and so these indices match the fillet/chamfer application, which
+    // bakes the same placement (deterministic → identical topology order).
+    const shape = getPlacedShape(blendReq.targetId);
     if (!shape) {
       useCADStore.getState().log('Blend: target shape not found in registry.', 'error');
       return;

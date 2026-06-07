@@ -12,7 +12,8 @@ export type NodeType =
   | 'box' | 'cylinder' | 'sphere'
   | 'extrusion' | 'boolean_operation' | 'compound'
   | 'sketch' | 'sketch_wire'
-  | 'revolve' | 'sweep' | 'loft';
+  | 'revolve' | 'sweep' | 'loft'
+  | 'mirror' | 'pattern';
 
 // ─── Workplane ────────────────────────────────────────────────────────────────
 
@@ -46,9 +47,45 @@ export type InteractionMode =
   | 'SKETCH_POLYGON'
   | 'MEASURE_DISTANCE'
   | 'BLEND_EDGE'
-  | 'BOOLEAN_PICK';
+  | 'BOOLEAN_PICK'
+  | 'CONSTRAIN'
+  | 'FACE_SKETCH'    // picking a planar face to start a sketch on it (S2)
+  | 'EDIT_TRIM'      // S1 — trim a sketch line at its intersections
+  | 'EDIT_EXTEND'    // S1 — extend a sketch line to the nearest boundary
+  | 'EDIT_SPLIT';    // S1 — break a sketch line at its intersections
 
 export type BooleanOp = 'CUT' | 'FUSE' | 'COMMON';
+
+// ─── Parametric 2D constraints (Phase 8) ──────────────────────────────────────
+
+export type SketchConstraintType =
+  // Geometric
+  | 'HORIZONTAL' | 'VERTICAL' | 'PARALLEL' | 'PERPENDICULAR'
+  | 'COLLINEAR'  | 'TANGENT'  | 'CONCENTRIC' | 'EQUAL'
+  | 'COINCIDENT' | 'SYMMETRY' | 'FIXED'
+  // Dimensional (driving)
+  | 'LENGTH' | 'RADIUS' | 'DISTANCE' | 'ANGLE';
+
+/** A constraint operand: a whole entity (line/circle) or one of its points. */
+export interface SketchRef {
+  kind: 'entity' | 'point';
+  /** sketch_wire node id. */
+  id:   string;
+  /** Which point — line endpoint 'a'/'b' or circle center 'c'. (point refs only) */
+  pt?:  'a' | 'b' | 'c';
+}
+
+export interface SketchConstraint {
+  id:    string;
+  type:  SketchConstraintType;
+  /** Ordered operands (entities and/or points). */
+  refs:  SketchRef[];
+  /** Driving dimension: LENGTH/RADIUS/DISTANCE in mm, ANGLE in degrees. */
+  value?: number;
+}
+
+export const sketchRefEq = (a: SketchRef, b: SketchRef) =>
+  a.kind === b.kind && a.id === b.id && a.pt === b.pt;
 
 export type GizmoMode = 'translate' | 'rotate' | 'scale';
 
@@ -223,6 +260,23 @@ interface CADState {
   /** Reset base + tool selection (panel "Clear"). */
   clearBooleanPick:  () => void;
 
+  /** Constraint editing session — non-null while the constraint panel is open. */
+  constraintReq: { sketchId: string } | null;
+  /** Entity/point operands currently picked in the viewport for a new constraint. */
+  constraintSel: SketchRef[];
+  /** Live solver status for the active sketch (degrees of freedom + state). */
+  constraintStatus: { dof: number; state: 'under' | 'full' | 'over'; residual: number } | null;
+  /** Open the constraint panel for a sketch container + enter CONSTRAIN mode. */
+  openConstraintPanel:  (sketchId: string) => void;
+  /** Close the constraint panel and return to SELECT mode. */
+  closeConstraintPanel: () => void;
+  /** Toggle an entity/point operand in/out of the pending constraint selection. */
+  toggleConstraintRef:  (ref: SketchRef) => void;
+  /** Clear the pending constraint selection. */
+  clearConstraintSel:   () => void;
+  /** Publish the latest solve status (drives DoF readout + colour-coding). */
+  setConstraintStatus:  (s: CADState['constraintStatus']) => void;
+
   addMeasurement:    (m: Omit<CADMeasurement, 'id'>) => void;
   removeMeasurement: (id: string) => void;
   clearMeasurements: () => void;
@@ -284,6 +338,8 @@ export const NODE_TYPE_COLORS: Record<NodeType, number> = {
   revolve:           0xcc4488,
   sweep:             0x44bbcc,
   loft:              0xcc8844,
+  mirror:            0x4488cc,
+  pattern:           0x8844cc,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -326,6 +382,9 @@ export const useCADStore = create<CADState>((set, get) => ({
   booleanReq:          null,
   booleanBaseId:       null,
   booleanToolIds:      [],
+  constraintReq:       null,
+  constraintSel:       [],
+  constraintStatus:    null,
 
   // ── Logging ────────────────────────────────────────────────────────────────
   log: (msg, level = 'info') =>
@@ -429,6 +488,30 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
   }),
   clearBooleanPick: () => set({ booleanBaseId: null, booleanToolIds: [] }),
+
+  openConstraintPanel: (sketchId) => {
+    const node = get().nodes[sketchId];
+    if (!node || node.type !== 'sketch') {
+      get().log('Constraints require a sketch container.', 'warn');
+      return;
+    }
+    set({
+      constraintReq: { sketchId },
+      constraintSel: [],
+      constraintStatus: null,
+      interactionMode: 'CONSTRAIN',
+      selectedIds: [sketchId],
+    });
+    get().log(`Editing constraints on "${node.name}" — click sketch lines/circles (or their points) to pick.`, 'info');
+  },
+  closeConstraintPanel: () => set({ constraintReq: null, constraintSel: [], constraintStatus: null, interactionMode: 'SELECT' }),
+  toggleConstraintRef: (ref) => set((s) => ({
+    constraintSel: s.constraintSel.some((r) => sketchRefEq(r, ref))
+      ? s.constraintSel.filter((r) => !sketchRefEq(r, ref))
+      : [...s.constraintSel, ref],
+  })),
+  clearConstraintSel: () => set({ constraintSel: [] }),
+  setConstraintStatus: (st) => set({ constraintStatus: st }),
 
   reparentNode: (nodeId, newParentId) => {
     const { nodes, rootIds } = get();
@@ -542,6 +625,26 @@ export const useCADStore = create<CADState>((set, get) => ({
     const deletedName = nodes[id].name;
     removeRecursive(id);
 
+    // Restore visibility of any input solids a deleted op had hidden (booleans
+    // hide base+tools, fillet/chamfer hide the source). Without this, deleting
+    // a result strands its inputs invisible-but-present in the tree.
+    const restoreCandidates = new Set<string>();
+    deletedIds.forEach((did) => {
+      const p = nodes[did]?.params;
+      if (!p) return;
+      if (typeof p.baseId   === 'string') restoreCandidates.add(p.baseId);
+      if (typeof p.sourceId === 'string') restoreCandidates.add(p.sourceId);
+      if (Array.isArray(p.toolIds)) p.toolIds.forEach((t: any) => { if (typeof t === 'string') restoreCandidates.add(t); });
+    });
+    const restoredIds: string[] = [];
+    restoreCandidates.forEach((rid) => {
+      const n = updatedNodes[rid];                 // must still exist (not itself deleted)
+      if (n && !n.visible) {
+        updatedNodes[rid] = { ...n, visible: true };
+        restoredIds.push(rid);
+      }
+    });
+
     const updatedRootIds = rootIds.filter((r) => r !== id);
     if (parentId && updatedNodes[parentId]) {
       updatedNodes[parentId] = {
@@ -564,8 +667,17 @@ export const useCADStore = create<CADState>((set, get) => ({
     deletedIds.forEach((did) =>
       window.dispatchEvent(new CustomEvent('cad-remove-mesh', { detail: { id: did } }))
     );
+    // Re-show restored input meshes
+    restoredIds.forEach((rid) =>
+      window.dispatchEvent(new CustomEvent('cad-visibility-changed', { detail: { id: rid, visible: true } }))
+    );
 
-    get().log(`Deleted: ${deletedName}`, 'warn');
+    get().log(
+      restoredIds.length
+        ? `Deleted: ${deletedName} (restored ${restoredIds.length} input${restoredIds.length > 1 ? 's' : ''})`
+        : `Deleted: ${deletedName}`,
+      'warn',
+    );
   },
 
   duplicateNode: (id) => {

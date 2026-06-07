@@ -249,6 +249,8 @@ export const TreeContextMenu: React.FC = () => {
         <>
           <div style={{ padding: '3px 0 1px' }}>
             <Item icon="✦" label="Resume Sketch" onClick={() => { closeMenu(); resumeSketch(menu.nodeId); }} />
+            <Item icon="⟂" label="Edit constraints…" accent="#1d9e74"
+              onClick={() => { closeMenu(); useCADStore.getState().openConstraintPanel(menu.nodeId); }} />
           </div>
           {wireIds.length > 0 && (
             <>

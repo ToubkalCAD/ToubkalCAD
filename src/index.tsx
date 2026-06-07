@@ -12,7 +12,11 @@ import { ParameterModal }      from './components/ParameterModal';
 import { ErrorBoundary }       from './components/ErrorBoundary';
 import { CADGeometryRegistry } from './services/CADGeometryRegistry';
 import { ThreeMeshCache }      from './services/ThreeMeshCache';
+import { initTheme }           from './utils/theme';
 import './styles/global.css';
+
+// Restore the saved light/dark theme before first paint.
+initTheme();
 
 // ─── Engineering CAD Illustration (SVG) ──────────────────────────────────────
 // Isometric box + cylinder assembly with technical annotations.

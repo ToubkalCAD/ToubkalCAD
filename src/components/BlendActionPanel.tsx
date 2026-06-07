@@ -22,6 +22,7 @@ import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccConverter }        from '../services/OccConverter';
 import { OccFilletService }    from '../services/OccFilletService';
 import { OccEdgeService }      from '../services/OccEdgeService';
+import { getPlacedShape }      from '../utils/placedShape';
 import { useDragPanel }        from '../hooks/useDragPanel';
 
 type BlendOp = 'fillet' | 'chamfer';
@@ -78,7 +79,7 @@ export const BlendActionPanel: React.FC = () => {
     setApplyErr(null);
     // Total edge count for the "Select All" affordance
     try {
-      const shape = reg.getShape(blendReq.targetId);
+      const shape = getPlacedShape(blendReq.targetId);
       setEdgeTotal(shape && window.oc ? OccEdgeService.edgeCount(window.oc, shape) : 0);
     } catch { setEdgeTotal(0); }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -131,7 +132,7 @@ export const BlendActionPanel: React.FC = () => {
     if (!window.oc || !sc) return;
     clearPreview();
     if (!edges.length || v <= 0) return;
-    const shape = reg.getShape(targetId);
+    const shape = getPlacedShape(targetId);
     if (!shape) return;
     try {
       const result = computeBlend(o, shape, edges, v);
@@ -206,7 +207,7 @@ export const BlendActionPanel: React.FC = () => {
     if (!window.oc) { setApplyErr('OCC kernel not ready.'); return; }
     if (!selEdges.length) { setApplyErr('Select at least one edge.'); return; }
 
-    const shape = reg.getShape(blendReq.targetId);
+    const shape = getPlacedShape(blendReq.targetId);
     if (!shape) { setApplyErr('Source shape not found — re-select it.'); return; }
 
     if (debounceRef.current) clearTimeout(debounceRef.current);

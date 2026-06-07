@@ -21,9 +21,13 @@ import { useCADGizmoHotkeys }  from '../hooks/useCADGizmoHotkeys';
 import { useCADSketchTool }    from '../hooks/useCADSketchTool';
 import { useCADEdgeSelect }    from '../hooks/useCADEdgeSelect';
 import { useCADBooleanPick }   from '../hooks/useCADBooleanPick';
+import { useCADConstraintPick } from '../hooks/useCADConstraintPick';
+import { useCADSketchFacePick } from '../hooks/useCADSketchFacePick';
+import { useCADSketchEdit }     from '../hooks/useCADSketchEdit';
 import { CADCameraService }    from '../services/CADCameraService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
 import { SketchOverlay }       from './SketchOverlay';
+import { SketchDimensions }    from './SketchDimensions';
 import { CursorAnnotation }   from './CursorAnnotation';
 
 interface Viewport3DProps {
@@ -68,6 +72,15 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── Boolean-pick hook (handles BOOLEAN_PICK mode for base/tool selection) ───
   useCADBooleanPick(containerRef, sceneRef, cameraRef);
+
+  // ─── Constraint-pick hook (handles CONSTRAIN mode entity selection) ──────────
+  useCADConstraintPick(containerRef, sceneRef, cameraRef);
+
+  // ─── Face-pick hook (handles FACE_SKETCH mode — sketch on a 3D face, S2) ──────
+  useCADSketchFacePick(containerRef, sceneRef, cameraRef);
+
+  // ─── Sketch-edit hook (EDIT_TRIM/EXTEND/SPLIT — 2D line editing, S1) ──────────
+  useCADSketchEdit(containerRef, sceneRef, cameraRef);
 
   // ─── Camera: animate to view normal to workplane when sketch starts ──────────
   useEffect(() => {
@@ -248,8 +261,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     if (!containerRef.current) return;
     const container = containerRef.current;
 
+    const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xe0e5ec); // Fusion 360-style light blue-gray canvas
+    scene.background = new THREE.Color(isDark() ? 0x15181d : 0xe3e8ee);
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(
@@ -324,9 +338,23 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     fill.position.set(-20, -10, -20);
     scene.add(fill);
 
-    // Grid — light theme colours
-    const grid = new THREE.GridHelper(200, 200, 0xa8b4c0, 0xc8d0d8);
-    scene.add(grid);
+    // Ground grid — theme-aware, recreated on theme change (GridHelper bakes
+    // its colours into vertex data, so we rebuild rather than recolour).
+    const makeGrid = (dark: boolean) =>
+      new THREE.GridHelper(200, 200, dark ? 0x3a414c : 0xa8b4c0, dark ? 0x252a31 : 0xc8d0d8);
+    let groundGrid = makeGrid(isDark());
+    scene.add(groundGrid);
+
+    const onThemeChanged = () => {
+      const dark = isDark();
+      scene.background = new THREE.Color(dark ? 0x15181d : 0xe3e8ee);
+      scene.remove(groundGrid);
+      groundGrid.geometry.dispose();
+      (groundGrid.material as THREE.Material).dispose();
+      groundGrid = makeGrid(dark);
+      scene.add(groundGrid);
+    };
+    window.addEventListener('cad-theme-changed', onThemeChanged);
 
     // ── Zoom-to-cursor (immediate) ───────────────────────────────────────────
     // Registered on window with capture:true so it fires BEFORE Dockview (and
@@ -432,6 +460,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       cancelAnimationFrame(rafId);
       if (mousePosRafRef.current) cancelAnimationFrame(mousePosRafRef.current);
       window.removeEventListener('wheel', onWheelZoom, { capture: true });
+      window.removeEventListener('cad-theme-changed', onThemeChanged);
       tc.dispose();
       orbit.dispose();
       renderer.dispose();
@@ -667,6 +696,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
       {/* Live cursor dimension annotation — follows the mouse */}
       <CursorAnnotation />
+
+      {/* Phase 8 – parametric dimension & constraint annotations */}
+      <SketchDimensions />
 
       {/* Session idle hint — shown between shapes when no tool selected */}
       {sessionIdleHint && (
