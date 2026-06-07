@@ -158,12 +158,32 @@ export class OccSketchService {
   // The midpoint p2 determines which of the two arcs (CW / CCW from p1 to p3) to draw.
 
   static createArcByThreePoints(oc: any, p1: V3, p2: V3, p3: V3, wp: Workplane): any {
+    const params = OccSketchService.arcParams3P(p1, p2, p3, wp);
+    if (!params) throw new Error('Arc-3P: points are collinear');
+    const { c, r, a1, a2 } = params;
+    const center3D = fromLocal2D(c[0], c[1], wp);
+    const { normal, uAxis } = workplaneBasis(wp);
+    const ax2   = ax2WithX(oc, center3D, normal, uAxis);
+    const circ  = new oc.gp_Circ_2(ax2, r);
+    const maker = new oc.BRepBuilderAPI_MakeEdge_9(circ, a1, a2);
+    ax2.delete(); circ.delete();
+    if (!maker.IsDone()) { maker.delete(); throw new Error('Arc-3P edge failed'); }
+    const edge = maker.Edge(); maker.delete();
+    return edge;
+  }
+
+  /**
+   * Local-plane arc parameters for the 3-point arc (centre/radius + CCW a1→a2).
+   * Shared by createArcByThreePoints (edge build) and the sketch tool (so the
+   * committed node carries a `kind:'arc'` sketchGeom for trim/split/constraints).
+   */
+  static arcParams3P(
+    p1: V3, p2: V3, p3: V3, wp: Workplane,
+  ): { c: [number, number]; r: number; a1: number; a2: number } | null {
     const lp1 = toLocal2D(p1, wp); const lp2 = toLocal2D(p2, wp); const lp3 = toLocal2D(p3, wp);
     const cc  = circumcircle2D(lp1, lp2, lp3);
-    if (!cc) throw new Error('Arc-3P: points are collinear');
+    if (!cc) return null;
     const { cu, cv, cr } = cc;
-    const center3D = fromLocal2D(cu, cv, wp);
-    const { normal, uAxis } = workplaneBasis(wp);
 
     // Angles of each point relative to the circumcircle centre
     const a1 = Math.atan2(lp1.v - cv, lp1.u - cu);
@@ -181,24 +201,10 @@ export class OccSketchService {
     // Is the midpoint on the CCW arc from a1 to a3?
     const midOnCCW = ccwToMid > 1e-9 && ccwToMid < ccwSpan - 1e-9;
 
-    let arcStart: number, arcEnd: number;
-    if (midOnCCW) {
-      arcStart = a1n;
-      arcEnd   = a1n + ccwSpan;
-    } else {
-      // Midpoint is on the CW arc from a1 to a3 → draw CCW arc from a3 back to a1
-      const cwSpan = n2(a1n - a3n);
-      arcStart = a3n;
-      arcEnd   = a3n + cwSpan;
-    }
-
-    const ax2   = ax2WithX(oc, center3D, normal, uAxis);
-    const circ  = new oc.gp_Circ_2(ax2, cr);
-    const maker = new oc.BRepBuilderAPI_MakeEdge_9(circ, arcStart, arcEnd);
-    ax2.delete(); circ.delete();
-    if (!maker.IsDone()) { maker.delete(); throw new Error('Arc-3P edge failed'); }
-    const edge = maker.Edge(); maker.delete();
-    return edge;
+    if (midOnCCW) return { c: [cu, cv], r: cr, a1: a1n, a2: a1n + ccwSpan };
+    // Midpoint is on the CW arc from a1 to a3 → draw CCW arc from a3 back to a1
+    const cwSpan = n2(a1n - a3n);
+    return { c: [cu, cv], r: cr, a1: a3n, a2: a3n + cwSpan };
   }
 
   // ── Rectangle (closed wire) ───────────────────────────────────────────────
@@ -331,8 +337,134 @@ export class OccSketchService {
     return makeWire(oc, edges);
   }
 
+  // ── Region profile (closed wire from a detected loop of members) ───────────
+  // members: ordered loop of { id } referencing sketchGeom looked up via geomOf.
+  // OCC connects the edges by shared endpoints, so per-member orientation is
+  // handled by the wire builder; we just emit each member's edge(s).
+
+  static createRegionWire(
+    oc: any, members: { id: string }[], geomOf: (id: string) => any, wp: Workplane,
+  ): any {
+    const edges: any[] = [];
+    for (const m of members) {
+      const g = geomOf(m.id);
+      if (!g) continue;
+      if (g.kind === 'line') {
+        edges.push(lineEdge(oc, fromLocal2D(g.a[0], g.a[1], wp), fromLocal2D(g.b[0], g.b[1], wp)));
+      } else if (g.kind === 'arc') {
+        const center = fromLocal2D(g.c[0], g.c[1], wp);
+        const start  = fromLocal2D(g.c[0] + g.r * Math.cos(g.a1), g.c[1] + g.r * Math.sin(g.a1), wp);
+        const end    = fromLocal2D(g.c[0] + g.r * Math.cos(g.a2), g.c[1] + g.r * Math.sin(g.a2), wp);
+        edges.push(OccSketchService.createArcEdge(oc, center, start, end, wp));
+      } else if (g.kind === 'circle') {
+        // A circle is a self-contained region — return its wire directly.
+        const rim = fromLocal2D(g.c[0] + g.r, g.c[1], wp);
+        return OccSketchService.createCircleWire(oc, fromLocal2D(g.c[0], g.c[1], wp), rim, wp);
+      } else if (g.kind === 'polyline' && Array.isArray(g.pts)) {
+        const p3 = g.pts.map((p: number[]) => fromLocal2D(p[0], p[1], wp));
+        for (let i = 0; i < p3.length - 1; i++) edges.push(lineEdge(oc, p3[i], p3[i + 1]));
+      }
+    }
+    if (!edges.length) throw new Error('Region has no edges');
+    return makeWire(oc, edges);
+  }
+
+  /**
+   * Heal a wire built from independent edges: reorder into connection order,
+   * snap near-coincident endpoints together (within `prec`) and close the loop.
+   * Lets the exact line/arc edges form a valid closed wire even when the drawn
+   * corners only met within the detector's tolerance — keeping curves smooth
+   * instead of faceting them. Returns the healed wire.
+   */
+  static healWire(oc: any, wire: any, prec = 1e-2): any {
+    const sfw = new oc.ShapeFix_Wire_1();
+    sfw.Load_1(wire);
+    sfw.SetPrecision(prec);
+    sfw.FixReorder_1();        // edges into head-to-tail order
+    sfw.FixConnected_1(prec);  // weld endpoints within prec
+    sfw.FixClosed(prec);       // close last→first
+    const out = sfw.Wire();
+    sfw.delete();
+    return out;
+  }
+
+  /**
+   * Build the best closed wire for a detected region: single-member regions
+   * (circle/ellipse) use exact geometry; multi-edge loops try exact edges +
+   * healing (smooth arcs) and fall back to the gap-free faceted loop. Returns
+   * the wire and whether the faceted fallback was used.
+   */
+  static buildRegionProfileWire(
+    oc: any, region: { members: { id: string }[]; loop: number[][] },
+    geomOf: (id: string) => any, wp: Workplane,
+  ): { wire: any; faceted: boolean } {
+    if (region.members.length === 1) {
+      return { wire: OccSketchService.createRegionWire(oc, region.members, geomOf, wp), faceted: false };
+    }
+    try {
+      const exact  = OccSketchService.createRegionWire(oc, region.members, geomOf, wp);
+      const healed = OccSketchService.healWire(oc, exact, 1e-2);
+      if (OccSketchService.wireMakesFace(oc, healed)) return { wire: healed, faceted: false };
+    } catch { /* fall through to facet */ }
+    return { wire: OccSketchService.createRegionWireFromLoop(oc, region.loop, wp), faceted: true };
+  }
+
+  /** True if a planar face can be built from the wire (i.e. it's closed/planar). */
+  static wireMakesFace(oc: any, wire: any): boolean {
+    const fm = new oc.BRepBuilderAPI_MakeFace_15(wire, true);
+    const ok = fm.IsDone();
+    fm.delete();
+    return ok;
+  }
+
+  /**
+   * Build a closed region wire from a gap-free loop polygon (local-2D points,
+   * as produced by SketchRegions.findRegions). Chaining consecutive points and
+   * closing last→first guarantees a closed wire even when the source curves only
+   * met within the detector's tolerance (sub-OCC-precision gaps that would make
+   * an edge-by-edge wire fail to close). Curved members become faceted here.
+   */
+  static createRegionWireFromLoop(oc: any, loop: number[][], wp: Workplane): any {
+    const p3: V3[] = [];
+    for (const p of loop) {
+      const v = fromLocal2D(p[0], p[1], wp);
+      if (!p3.length || p3[p3.length - 1].distanceTo(v) > 1e-7) p3.push(v);
+    }
+    if (p3.length > 1 && p3[0].distanceTo(p3[p3.length - 1]) < 1e-7) p3.pop(); // drop closing dup
+    if (p3.length < 3) throw new Error('Region loop too small to extrude');
+    const edges: any[] = [];
+    for (let i = 0; i < p3.length; i++) edges.push(lineEdge(oc, p3[i], p3[(i + 1) % p3.length]));
+    return makeWire(oc, edges);
+  }
+
   static buildClosedWire(oc: any, edges: any[]): any {
     return makeWire(oc, edges);
+  }
+
+  // ── Single sketch entity → wire (rebuild from sketchGeom) ──────────────────
+  // Used by the 2D Mirror/Array tools to materialise a transformed entity.
+  static buildEntityWire(oc: any, geom: any, wp: Workplane): any {
+    if (geom.kind === 'line') {
+      return makeWire(oc, [lineEdge(oc, fromLocal2D(geom.a[0], geom.a[1], wp), fromLocal2D(geom.b[0], geom.b[1], wp))]);
+    }
+    if (geom.kind === 'circle') {
+      const center = fromLocal2D(geom.c[0], geom.c[1], wp);
+      const rim    = fromLocal2D(geom.c[0] + geom.r, geom.c[1], wp);
+      return OccSketchService.createCircleWire(oc, center, rim, wp);
+    }
+    if (geom.kind === 'arc') {
+      const center = fromLocal2D(geom.c[0], geom.c[1], wp);
+      const start  = fromLocal2D(geom.c[0] + geom.r * Math.cos(geom.a1), geom.c[1] + geom.r * Math.sin(geom.a1), wp);
+      const end    = fromLocal2D(geom.c[0] + geom.r * Math.cos(geom.a2), geom.c[1] + geom.r * Math.sin(geom.a2), wp);
+      return makeWire(oc, [OccSketchService.createArcEdge(oc, center, start, end, wp)]);
+    }
+    if (geom.kind === 'polyline') {
+      const p3 = geom.pts.map((p: number[]) => fromLocal2D(p[0], p[1], wp));
+      const edges: any[] = [];
+      for (let i = 0; i < p3.length - 1; i++) edges.push(lineEdge(oc, p3[i], p3[i + 1]));
+      return makeWire(oc, edges);
+    }
+    throw new Error(`Cannot build wire for sketch geom kind: ${geom.kind}`);
   }
 
   // ── Removed: mapToXZPlane — not needed with 3D wire approach ─────────────

@@ -23,6 +23,13 @@ import { OccExchangeService }       from '../services/OccExchangeService';
 import { OccRevolutionService }     from '../services/OccRevolutionService';
 import { OccLoftService }           from '../services/OccLoftService';
 import { OccSweepService }          from '../services/OccSweepService';
+import { OccSketchService, fromLocal2D } from '../services/OccSketchService';
+import { findRegions, RegionEntity, toRegionEntity } from '../services/SketchRegions';
+import { setAlignOffset } from '../hooks/useCADAssemblyMate';
+import { resolveProfileWire } from '../utils/sketchProfile';
+import { createSketchEntityNode } from '../utils/sketchEntity';
+import { transformGeom, translator } from '../services/SketchTransform2D';
+import { beginSketchMirror, beginSketchCircular } from '../hooks/useCADSketchTransformPick';
 import { OccTransformService, PlaneLabel } from '../services/OccTransformService';
 import { CADGeometryRegistry }      from '../services/CADGeometryRegistry';
 import { getPlacedShape }           from '../utils/placedShape';
@@ -53,7 +60,7 @@ const RIBBON_TABS: RibbonTab[] = [
     { label: 'Basic',       ids: ['line', 'circle', 'rect', 'arc'] },
     { label: 'Curves',      ids: ['arc3p', 'ellipse', 'bezier', 'spline'] },
     { label: 'Advanced',    ids: ['roundrect', 'polygon'] },
-    { label: 'Modify',      ids: ['trim', 'extend', 'split'] },
+    { label: 'Modify',      ids: ['trim', 'extend', 'split', 'powertrim', 'region'] },
     { label: 'Datum',       ids: ['sketch-face'] },
     { label: 'Constrain',   ids: ['constraints'] },
   ] },
@@ -61,6 +68,7 @@ const RIBBON_TABS: RibbonTab[] = [
     { label: 'Primitives',  ids: ['box', 'cylinder', 'sphere', 'torus', 'cone'] },
     { label: 'From Sketch', ids: ['extrude', 'revolve', 'loft', 'sweep'] },
     { label: 'Transform',   ids: ['mirror', 'array-lin', 'array-circ'] },
+    { label: 'Assembly',    ids: ['mate', 'align', 'concentric'] },
   ] },
   { id: 'modify', label: 'Modify', groups: [
     { label: 'Edges',       ids: ['fillet', 'chamfer'] },
@@ -248,42 +256,118 @@ export const Ribbon: React.FC = () => {
     setMode(m);
   };
 
+  // ─── Auto-region close — detect closed loops → extrudable profile(s) ──────────
+  const closeRegions = () => {
+    const sketchId = constrainTargetId();
+    if (!sketchId) { log('Open or select a sketch to detect regions.', 'warn'); return; }
+    withOC(() => {
+      const st = useCADStore.getState();
+      const ents = Object.values(st.nodes).filter(
+        (n) => n.type === 'sketch_wire' && n.parentId === sketchId && n.params?.sketchGeom,
+      );
+      if (!ents.length) { log('This sketch has no editable curves.', 'warn'); return; }
+      const wp = ents[0].params!.workplane;
+      const regionEnts = ents
+        .map((n) => toRegionEntity(n.id, n.params!.sketchGeom))
+        .filter((e): e is RegionEntity => !!e);
+      const regions = findRegions(regionEnts);
+      if (!regions.length) { log('No closed regions found in this sketch.', 'warn'); return; }
+
+      const geomOf = (id: string) => useCADStore.getState().nodes[id]?.params?.sketchGeom;
+      const newIds: string[] = [];
+      let faceted = 0;
+      regions.forEach((rg, i) => {
+        const built = OccSketchService.buildRegionProfileWire(window.oc, rg, geomOf, wp);
+        const wire = built.wire;
+        if (built.faceted) faceted++;
+        const id = crypto.randomUUID();
+        reg.registerShape(id, wire);
+        addNode({
+          id, name: `Region ${i + 1}`, type: 'sketch_wire',
+          visible: true, locked: false, parentId: sketchId, notes: '',
+          transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
+          material:  { color: 0x00aa66, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
+          // No sketchGeom: a Region is a finished closed profile, not an editable
+          // entity — this keeps it out of trim/constraint/region-detection passes.
+          params: { workplane: wp, region: true, regionArea: rg.area },
+        });
+        window.dispatchEvent(new CustomEvent('cad-sketch-add-visual', {
+          detail: { id, pts: rg.loop.map((p) => { const v = fromLocal2D(p[0], p[1], wp); return [v.x, v.y, v.z]; }) },
+        }));
+        newIds.push(id);
+      });
+      st.setSelectedIds(newIds);
+      const facetNote = faceted ? ` (${faceted} faceted — corners didn't meet exactly)` : '';
+      log(`Found ${regions.length} region${regions.length === 1 ? '' : 's'}${facetNote} → select one and Extrude.`, 'success');
+    });
+  };
+
+  // ─── Assembly: Align (parallel faces with offset) — ask offset, then pick ─────
+  const alignParallel = () => {
+    withOC(async () => {
+      const v = await showParamModal('Align (Parallel)', [
+        { key: 'offset', label: 'Offset', default: 0, unit: 'mm' },
+      ]);
+      if (!v) return;
+      setAlignOffset(v.offset);
+      setMode('ASSEMBLY_ALIGN');
+    });
+  };
+
+  // Resolve the profile wire id for the selected sketch / sketch-wire (or null).
+  // A sketch container of several open edges → its enclosed region is built.
+  const profileWireFor = (): string | null => {
+    const node = nodes[selIds[0]];
+    if (node?.type === 'sketch_wire') return selIds[0];
+    if (node?.type === 'sketch') {
+      const childIds = Object.values(useCADStore.getState().nodes)
+        .filter((n) => n.parentId === node.id && n.type === 'sketch_wire')
+        .map((n) => n.id);
+      return resolveProfileWire(node.id, childIds);
+    }
+    return null;
+  };
+
   // ─── Extrusion ──────────────────────────────────────────────────────────────
   const extrude = () => {
-    if (!selIds.length) { log('Select a sketch (sketch_wire).', 'warn'); return; }
+    if (!selIds.length) { log('Select a sketch or sketch wire.', 'warn'); return; }
     const node = nodes[selIds[0]];
-    if (node?.type !== 'sketch_wire') { log('Selected object must be a 2D sketch.', 'warn'); return; }
+    if (node?.type !== 'sketch_wire' && node?.type !== 'sketch') { log('Selected object must be a 2D sketch.', 'warn'); return; }
     withOC(async () => {
       const v = await showParamModal('Extrude', [
         { key: 'h', label: 'Height', default: 20, min: 0.01, unit: 'mm' },
       ]);
       if (!v) return;
-      const wire = reg.getShape(selIds[0]);
+      const wireId = profileWireFor();
+      if (!wireId) { log('This sketch has no closed region to extrude.', 'warn'); return; }
+      const wire = reg.getShape(wireId);
       if (!wire) { log('Sketch wire not found.', 'error'); return; }
-      const wp = node.params?.workplane;
+      const wp = useCADStore.getState().nodes[wireId]?.params?.workplane;
       const direction: [number,number,number] = wp?.normal ?? activeWorkplane.normal;
       setProc(true, 'Extruding…');
       try {
         const id = crypto.randomUUID();
         create(id, `Extrusion${v.h.toFixed(0)}mm`, 'extrusion',
           OccExtrusionService.extrudeWire(window.oc, wire, v.h, direction));
-        useCADStore.getState().adoptSketchSources(id, [selIds[0]]);
+        useCADStore.getState().adoptSketchSources(id, [wireId]);
       } finally { setProc(false); }
     });
   };
 
   // ─── Revolve ────────────────────────────────────────────────────────────────
   const revolve = () => {
-    if (!selIds.length) { log('Select a sketch (sketch_wire).', 'warn'); return; }
+    if (!selIds.length) { log('Select a sketch or sketch wire.', 'warn'); return; }
     const node = nodes[selIds[0]];
-    if (node?.type !== 'sketch_wire') { log('Selected object must be a 2D sketch.', 'warn'); return; }
+    if (node?.type !== 'sketch_wire' && node?.type !== 'sketch') { log('Selected object must be a 2D sketch.', 'warn'); return; }
     withOC(async () => {
       const v = await showParamModal('Revolve', [
         { key: 'axis',  label: 'Axis (0=X 1=Y 2=Z)', default: 1, min: 0, max: 2, step: 1 },
         { key: 'angle', label: 'Angle', default: 360, min: 1, max: 360, unit: '°' },
       ]);
       if (!v) return;
-      const wire = reg.getShape(selIds[0]);
+      const wireId = profileWireFor();
+      if (!wireId) { log('This sketch has no closed region to revolve.', 'warn'); return; }
+      const wire = reg.getShape(wireId);
       if (!wire) { log('Sketch wire not found.', 'error'); return; }
       const axisVecs: [number,number,number][] = [[1,0,0],[0,1,0],[0,0,1]];
       const axisLabels = ['X','Y','Z'];
@@ -293,7 +377,7 @@ export const Ribbon: React.FC = () => {
         const id = crypto.randomUUID();
         create(id, `Revolve${v.angle.toFixed(0)}°/${axisLabels[idx]}`, 'revolve',
           OccRevolutionService.revolveProfile(window.oc, wire, [0,0,0], axisVecs[idx], v.angle));
-        useCADStore.getState().adoptSketchSources(id, [selIds[0]]);
+        useCADStore.getState().adoptSketchSources(id, [wireId]);
       } finally { setProc(false); }
     });
   };
@@ -351,9 +435,73 @@ export const Ribbon: React.FC = () => {
   const AXIS_LABEL = ['X','Y','Z'];
   const PLANE_LABEL: PlaneLabel[] = ['XY','YZ','ZX'];
 
+  // ─── 2D sketch transforms (Mirror / Array on sketch entities) ─────────────────
+  // Selecting a sketch (all its entities) or one/more sketch wires routes the
+  // Transform tools to an in-plane version that emits new sketch entities.
+  interface SketchSel { sketchId: string | null; wp: any; entities: { id: string; geom: any }[]; }
+  const sketchSelection = (): SketchSel | null => {
+    const st = useCADStore.getState();
+    const node = st.nodes[selIds[0]];
+    let entNodes: any[] = [];
+    let sketchId: string | null = null;
+    if (node?.type === 'sketch') {
+      sketchId = node.id;
+      entNodes = Object.values(st.nodes).filter((n) => n.parentId === node.id && n.type === 'sketch_wire' && n.params?.sketchGeom);
+    } else {
+      entNodes = selIds.map((id) => st.nodes[id]).filter((n) => n?.type === 'sketch_wire' && n.params?.sketchGeom);
+      if (entNodes.length) sketchId = entNodes[0].parentId ?? null;
+    }
+    if (!entNodes.length) return null;
+    return { sketchId, wp: entNodes[0].params.workplane, entities: entNodes.map((n) => ({ id: n.id, geom: n.params.sketchGeom })) };
+  };
+
+  const emitSketchCopies = (sk: SketchSel, makeXF: (i: number) => { f: any; reverses: boolean }, copies: number, verb: string) => {
+    const newIds: string[] = [];
+    for (let i = 1; i <= copies; i++) {
+      const { f, reverses } = makeXF(i);
+      for (const e of sk.entities) {
+        const g = transformGeom(e.geom, f, reverses);
+        const id = g && createSketchEntityNode(g, sk.wp, sk.sketchId);
+        if (id) newIds.push(id);
+      }
+    }
+    useCADStore.getState().setSelectedIds(newIds);
+    log(`${verb} → ${newIds.length} new sketch ${newIds.length === 1 ? 'entity' : 'entities'}.`, 'success');
+  };
+
+  // Mirror picks its axis interactively (2 points on the plane).
+  const mirror2D = (sk: SketchSel) => beginSketchMirror(sk);
+
+  const linearArray2D = (sk: SketchSel) => withOC(async () => {
+    const v = await showParamModal('Linear Pattern (Sketch)', [
+      { key: 'axis',    label: 'Axis (0=U 1=V)', default: 0, min: 0, max: 1, step: 1 },
+      { key: 'spacing', label: 'Spacing', default: 20, min: 0.01, unit: 'mm' },
+      { key: 'count',   label: 'Count (incl. original)', default: 4, min: 2, max: 200, step: 1 },
+    ]);
+    if (!v) return;
+    const uAxis = Math.round(v.axis) === 0;
+    const count = Math.round(v.count);
+    setProc(true, 'Building pattern…');
+    try {
+      emitSketchCopies(sk, (i) => ({ f: translator(uAxis ? v.spacing * i : 0, uAxis ? 0 : v.spacing * i), reverses: false }), count - 1, `Linear×${count}`);
+    } finally { setProc(false); }
+  });
+
+  // Circular array asks count/angle, then picks its centre point interactively.
+  const circularArray2D = (sk: SketchSel) => withOC(async () => {
+    const v = await showParamModal('Circular Pattern (Sketch)', [
+      { key: 'angle', label: 'Angle step', default: 45, min: -360, max: 360, unit: '°' },
+      { key: 'count', label: 'Count (incl. original)', default: 8, min: 2, max: 360, step: 1 },
+    ]);
+    if (!v) return;
+    beginSketchCircular(sk, Math.round(v.count), v.angle);
+  });
+
   const mirror = () => {
+    const sk = sketchSelection();
+    if (sk) { mirror2D(sk); return; }
     const srcId = selectedSolidId();
-    if (!srcId) { log('Select a solid to mirror.', 'warn'); return; }
+    if (!srcId) { log('Select a solid or sketch to mirror.', 'warn'); return; }
     withOC(async () => {
       const v = await showParamModal('Mirror', [
         { key: 'plane', label: 'Plane (0=XY 1=YZ 2=ZX)', default: 0, min: 0, max: 2, step: 1 },
@@ -373,8 +521,10 @@ export const Ribbon: React.FC = () => {
   };
 
   const linearArray = () => {
+    const sk = sketchSelection();
+    if (sk) { linearArray2D(sk); return; }
     const srcId = selectedSolidId();
-    if (!srcId) { log('Select a solid to pattern.', 'warn'); return; }
+    if (!srcId) { log('Select a solid or sketch to pattern.', 'warn'); return; }
     withOC(async () => {
       const v = await showParamModal('Linear Pattern', [
         { key: 'axis',    label: 'Axis (0=X 1=Y 2=Z)', default: 0, min: 0, max: 2, step: 1 },
@@ -397,8 +547,10 @@ export const Ribbon: React.FC = () => {
   };
 
   const circularArray = () => {
+    const sk = sketchSelection();
+    if (sk) { circularArray2D(sk); return; }
     const srcId = selectedSolidId();
-    if (!srcId) { log('Select a solid to pattern.', 'warn'); return; }
+    if (!srcId) { log('Select a solid or sketch to pattern.', 'warn'); return; }
     withOC(async () => {
       const v = await showParamModal('Circular Pattern', [
         { key: 'axis',  label: 'Axis (0=X 1=Y 2=Z)', default: 2, min: 0, max: 2, step: 1 },
@@ -467,7 +619,7 @@ export const Ribbon: React.FC = () => {
 
   // ─── Derived enable flags ───────────────────────────────────────────────────
   const hasSel       = selIds.length > 0;
-  const hasSketch    = hasSel && nodes[selIds[0]]?.type === 'sketch_wire';
+  const hasSketch    = hasSel && (nodes[selIds[0]]?.type === 'sketch_wire' || nodes[selIds[0]]?.type === 'sketch');
   const sketchCount  = selIds.filter((id) => nodes[id]?.type === 'sketch_wire').length;
   const selType      = hasSel ? nodes[selIds[0]]?.type : undefined;
   const canConstrain = !!sketchSession || selType === 'sketch' || selType === 'sketch_wire';
@@ -475,6 +627,10 @@ export const Ribbon: React.FC = () => {
     const t = nodes[id]?.type;
     return t && t !== 'sketch' && t !== 'sketch_wire' && reg.getShape(id);
   });
+  // On-Face sketching works on ANY visible solid's face, not just the selected
+  // one — gate it on the scene having a solid rather than on the selection.
+  const hasAnySolid  = Object.values(nodes).some((n) =>
+    n.visible && n.type !== 'sketch' && n.type !== 'sketch_wire' && !!reg.getShape(n.id));
   const SK           = 'var(--sketch)';
 
   // ─── Command registry (R1) ──────────────────────────────────────────────────
@@ -494,7 +650,9 @@ export const Ribbon: React.FC = () => {
     trim:      { id:'trim',   icon:'trim',   label:'Trim',   run:() => startEdit('EDIT_TRIM'),   active: mode==='EDIT_TRIM',   enabled:canConstrain, accent:'#cc6633' },
     extend:    { id:'extend', icon:'extend', label:'Extend', run:() => startEdit('EDIT_EXTEND'), active: mode==='EDIT_EXTEND', enabled:canConstrain, accent:'#cc6633' },
     split:     { id:'split',  icon:'split',  label:'Split',  run:() => startEdit('EDIT_SPLIT'),  active: mode==='EDIT_SPLIT',  enabled:canConstrain, accent:'#cc6633' },
-    'sketch-face':{id:'sketch-face',icon:'plane',label:'On Face', run:sketchOnFace, active: mode==='FACE_SKETCH', enabled:hasSolid, accent:SK },
+    powertrim: { id:'powertrim', icon:'powertrim', label:'Power Trim', run:() => startEdit('EDIT_POWER_TRIM'), active: mode==='EDIT_POWER_TRIM', enabled:canConstrain, accent:'#cc6633' },
+    region:    { id:'region', icon:'region', label:'Region', run:closeRegions, enabled:canConstrain, accent:'#33aa77' },
+    'sketch-face':{id:'sketch-face',icon:'plane',label:'On Face', run:sketchOnFace, active: mode==='FACE_SKETCH', enabled:hasAnySolid && !sketchSession, accent:SK },
     // primitives
     box:       { id:'box',       icon:'box',       label:'Box',      run:mkBox },
     cylinder:  { id:'cylinder',  icon:'cylinder',  label:'Cylinder', run:mkCyl },
@@ -503,13 +661,16 @@ export const Ribbon: React.FC = () => {
     cone:      { id:'cone',      icon:'cone',      label:'Cone',     run:mkCone },
     // from sketch
     extrude:   { id:'extrude',   icon:'extrude',   label:'Extrude',  run:extrude, enabled:hasSketch,         accent:'#9944cc' },
-    revolve:   { id:'revolve',   icon:'revolve',   label:'Revolve',  run:revolve, enabled:sketchCount>=1,    accent:'#cc4488' },
+    revolve:   { id:'revolve',   icon:'revolve',   label:'Revolve',  run:revolve, enabled:hasSketch,         accent:'#cc4488' },
     loft:      { id:'loft',      icon:'loft',      label:'Loft',     run:loft,    enabled:sketchCount>=2,    accent:'#cc8844' },
     sweep:     { id:'sweep',     icon:'sweep',     label:'Sweep',    run:sweep,   enabled:sketchCount>=2,    accent:'#44bbcc' },
     // transform
-    mirror:        { id:'mirror',        icon:'mirror',    label:'Mirror',     run:mirror,        enabled:hasSolid, accent:'#4488cc' },
-    'array-lin':   { id:'array-lin',     icon:'array',     label:'Lin Array',  run:linearArray,   enabled:hasSolid, accent:'#8844cc' },
-    'array-circ':  { id:'array-circ',    icon:'circarray', label:'Circ Array', run:circularArray, enabled:hasSolid, accent:'#8844cc' },
+    mirror:        { id:'mirror',        icon:'mirror',    label:'Mirror',     run:mirror,        enabled:hasSolid||hasSketch, accent:'#4488cc' },
+    'array-lin':   { id:'array-lin',     icon:'array',     label:'Lin Array',  run:linearArray,   enabled:hasSolid||hasSketch, accent:'#8844cc' },
+    'array-circ':  { id:'array-circ',    icon:'circarray', label:'Circ Array', run:circularArray, enabled:hasSolid||hasSketch, accent:'#8844cc' },
+    mate:          { id:'mate', icon:'mate', label:'Mate', run:() => setMode('ASSEMBLY_MATE'), active: mode==='ASSEMBLY_MATE', enabled:hasAnySolid, accent:'#cc8844' },
+    align:         { id:'align', icon:'align', label:'Align', run:alignParallel, active: mode==='ASSEMBLY_ALIGN', enabled:hasAnySolid, accent:'#cc8844' },
+    concentric:    { id:'concentric', icon:'concentric', label:'Concentric', run:() => setMode('ASSEMBLY_CONCENTRIC'), active: mode==='ASSEMBLY_CONCENTRIC', enabled:hasAnySolid, accent:'#cc8844' },
     // modify
     fillet:    { id:'fillet',    icon:'fillet',    label:'Fillet',   run:() => openBlend('fillet'),  enabled:hasSel },
     chamfer:   { id:'chamfer',   icon:'chamfer',   label:'Chamfer',  run:() => openBlend('chamfer'), enabled:hasSel },

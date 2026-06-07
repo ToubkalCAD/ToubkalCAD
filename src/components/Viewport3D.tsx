@@ -24,6 +24,9 @@ import { useCADBooleanPick }   from '../hooks/useCADBooleanPick';
 import { useCADConstraintPick } from '../hooks/useCADConstraintPick';
 import { useCADSketchFacePick } from '../hooks/useCADSketchFacePick';
 import { useCADSketchEdit }     from '../hooks/useCADSketchEdit';
+import { useCADAssemblyMate }   from '../hooks/useCADAssemblyMate';
+import { useCADAssemblyConcentric } from '../hooks/useCADAssemblyConcentric';
+import { useCADSketchTransformPick } from '../hooks/useCADSketchTransformPick';
 import { CADCameraService }    from '../services/CADCameraService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
 import { SketchOverlay }       from './SketchOverlay';
@@ -82,6 +85,13 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   // ─── Sketch-edit hook (EDIT_TRIM/EXTEND/SPLIT — 2D line editing, S1) ──────────
   useCADSketchEdit(containerRef, sceneRef, cameraRef);
 
+  // ─── Assembly hooks (ASSEMBLY_MATE/ALIGN — faces; ASSEMBLY_CONCENTRIC — axes) ──
+  useCADAssemblyMate(containerRef, sceneRef, cameraRef);
+  useCADAssemblyConcentric(containerRef, sceneRef, cameraRef);
+
+  // ─── 2D sketch transform reference picking (mirror line / array centre) ────────
+  useCADSketchTransformPick(containerRef, sceneRef, cameraRef);
+
   // ─── Camera: animate to view normal to workplane when sketch starts ──────────
   useEffect(() => {
     const isSketch = interactionMode.startsWith('SKETCH_');
@@ -111,6 +121,18 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     // we stay at the workplane-normal view so the user can keep drawing comfortably.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactionMode.startsWith('SKETCH_'), activeWorkplane, !!sketchSession]);
+
+  // ─── Lock camera rotation while sketching ────────────────────────────────────
+  // OrbitControls rotates on left-drag, so a tiny drag while clicking to place a
+  // sketch point would orbit the view off the workplane normal. Disable rotation
+  // for the whole sketch session (pan/zoom and view presets still work); re-enable
+  // once the session ends. This keeps the head-on view locked until Quit Sketch.
+  useEffect(() => {
+    const orbit = orbitRef.current;
+    if (!orbit) return;
+    const inSketch = interactionMode.startsWith('SKETCH_') || !!sketchSession;
+    orbit.enableRotate = !inSketch;
+  }, [interactionMode, sketchSession]);
 
   // ─── Camera: animate when a session is resumed from the tree panel ───────────
   useEffect(() => {

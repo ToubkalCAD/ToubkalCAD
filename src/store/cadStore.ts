@@ -52,7 +52,13 @@ export type InteractionMode =
   | 'FACE_SKETCH'    // picking a planar face to start a sketch on it (S2)
   | 'EDIT_TRIM'      // S1 — trim a sketch line at its intersections
   | 'EDIT_EXTEND'    // S1 — extend a sketch line to the nearest boundary
-  | 'EDIT_SPLIT';    // S1 — break a sketch line at its intersections
+  | 'EDIT_SPLIT'     // S1 — break a sketch line at its intersections
+  | 'EDIT_POWER_TRIM' // power-trim — drag a stroke; every crossed curve is trimmed at the crossing
+  | 'ASSEMBLY_MATE'   // pick a reference face then a face on another solid → mate them (one-shot)
+  | 'ASSEMBLY_ALIGN'  // like mate but faces parallel (same direction) with an offset
+  | 'ASSEMBLY_CONCENTRIC' // pick two cylindrical faces → align their axes (peg-in-hole)
+  | 'MIRROR_AXIS_PICK'    // pick 2 points on the sketch plane → mirror line for a 2D sketch mirror
+  | 'ARRAY_CENTER_PICK';  // pick 1 point on the sketch plane → centre for a 2D circular array
 
 export type BooleanOp = 'CUT' | 'FUSE' | 'COMMON';
 

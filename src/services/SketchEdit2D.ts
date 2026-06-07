@@ -14,11 +14,20 @@
 export type Pt = [number, number];
 export type Entity2D =
   | { kind: 'line';   a: Pt; b: Pt }
-  | { kind: 'circle'; c: Pt; r: number };
+  | { kind: 'circle'; c: Pt; r: number }
+  | { kind: 'arc';    c: Pt; r: number; a1: number; a2: number }
+  | { kind: 'polyline'; pts: Pt[] };   // tessellated curve cutter (ellipse/spline/bezier)
 export interface Line2D { a: Pt; b: Pt }
+export interface Circle2D { c: Pt; r: number }
+/** Arc parameterised CCW from a1 to a2 (a2 > a1, span < 2π). */
+export interface Arc2D { c: Pt; r: number; a1: number; a2: number }
 
 const EPS       = 1e-9;   // geometric zero
 const PARAM_EPS = 1e-4;   // param-space tolerance (endpoint / dedupe)
+const TWO_PI    = 2 * Math.PI;
+const norm2pi   = (a: number): number => ((a % TWO_PI) + TWO_PI) % TWO_PI;
+/** Raw signed angle of p about centre c (atan2, in (−π, π]). */
+const angleOf   = (c: Pt, p: Pt): number => Math.atan2(p[1] - c[1], p[0] - c[0]);
 
 const sub  = (p: Pt, q: Pt): Pt => [p[0] - q[0], p[1] - q[1]];
 const add  = (p: Pt, q: Pt): Pt => [p[0] + q[0], p[1] + q[1]];
@@ -74,8 +83,19 @@ function rawParams(target: Line2D, cutters: Entity2D[]): number[] {
     if (e.kind === 'line') {
       const t = tLineLineInfinite(target, { a: e.a, b: e.b });
       if (t !== null) ts.push(t);
-    } else {
+    } else if (e.kind === 'circle') {
       ts.push(...tLineCircleInfinite(target, e));
+    } else if (e.kind === 'arc') { // circle crossings restricted to the arc's angular span
+      const span = e.a2 - e.a1;
+      for (const t of tLineCircleInfinite(target, { c: e.c, r: e.r })) {
+        const rel = norm2pi(angleOf(e.c, pointAt(target, t)) - e.a1);
+        if (rel > -PARAM_EPS && rel < span + PARAM_EPS) ts.push(t);
+      }
+    } else { // polyline cutter — test each chord segment
+      for (let i = 0; i < e.pts.length - 1; i++) {
+        const t = tLineLineInfinite(target, { a: e.pts[i], b: e.pts[i + 1] });
+        if (t !== null) ts.push(t);
+      }
     }
   }
   return ts;
@@ -143,5 +163,169 @@ export function extendLine(target: Line2D, cutters: Entity2D[], end: 'a' | 'b'):
     const ahead = ts.filter((t) => t < -PARAM_EPS).sort((a, b) => b - a); // closest to 0 first
     if (!ahead.length) return null;
     return { a: pointAt(target, ahead[0]), b: target.b };
+  }
+}
+
+// ── Circle/arc cutters → intersection points ──────────────────────────────────
+// Geometry for circle & arc TARGETS: we work in angle space about the target's
+// centre. First gather the 2D points where each cutter meets the target's circle
+// (of radius R about C), respecting the cutter's own finite extent.
+
+/** Points on the segment a→b that lie on the circle (C,R); s∈[0,1]. */
+function circleSegPoints(C: Pt, R: number, a: Pt, b: Pt): Pt[] {
+  const d = sub(b, a);
+  const f = sub(a, C);
+  const A = dot(d, d);
+  if (A < EPS) return [];
+  const B = 2 * dot(f, d);
+  const Cc = dot(f, f) - R * R;
+  const disc = B * B - 4 * A * Cc;
+  if (disc < 0) return [];
+  const sq = Math.sqrt(disc);
+  const ss = Math.abs(disc) < EPS ? [-B / (2 * A)] : [(-B - sq) / (2 * A), (-B + sq) / (2 * A)];
+  return ss.filter((s) => s > -PARAM_EPS && s < 1 + PARAM_EPS).map((s) => add(a, scale(d, s)));
+}
+
+/** Intersection points of two circles (0, 1 tangent, or 2). */
+function circleCirclePoints(C1: Pt, R1: number, C2: Pt, R2: number): Pt[] {
+  const dx = C2[0] - C1[0], dy = C2[1] - C1[1];
+  const d = Math.hypot(dx, dy);
+  if (d < EPS) return [];                                  // concentric
+  if (d > R1 + R2 + EPS || d < Math.abs(R1 - R2) - EPS) return []; // disjoint / nested
+  const aa = (R1 * R1 - R2 * R2 + d * d) / (2 * d);
+  const h2 = R1 * R1 - aa * aa;
+  const h = h2 > 0 ? Math.sqrt(h2) : 0;
+  const ex = dx / d, ey = dy / d;
+  const px = C1[0] + aa * ex, py = C1[1] + aa * ey;
+  if (h < EPS) return [[px, py]];                          // tangent
+  return [[px - h * ey, py + h * ex], [px + h * ey, py - h * ex]];
+}
+
+/** All points where the cutters meet the circle (C,R), honouring cutter extents. */
+function cutterPointsOnCircle(C: Pt, R: number, cutters: Entity2D[]): Pt[] {
+  const pts: Pt[] = [];
+  for (const e of cutters) {
+    if (e.kind === 'line') {
+      pts.push(...circleSegPoints(C, R, e.a, e.b));
+    } else if (e.kind === 'circle') {
+      pts.push(...circleCirclePoints(C, R, e.c, e.r));
+    } else if (e.kind === 'arc') { // keep crossings inside the cutter's angular span
+      const span = e.a2 - e.a1;
+      for (const p of circleCirclePoints(C, R, e.c, e.r)) {
+        const rel = norm2pi(angleOf(e.c, p) - e.a1);
+        if (rel > -PARAM_EPS && rel < span + PARAM_EPS) pts.push(p);
+      }
+    } else { // polyline cutter — crossings of each chord segment with the circle
+      for (let i = 0; i < e.pts.length - 1; i++) pts.push(...circleSegPoints(C, R, e.pts[i], e.pts[i + 1]));
+    }
+  }
+  return pts;
+}
+
+/** Sorted, de-duplicated cut angles on the full circle about C, in [0, 2π). */
+export function circleCutAngles(C: Pt, R: number, cutters: Entity2D[]): number[] {
+  const angs = cutterPointsOnCircle(C, R, cutters)
+    .map((p) => norm2pi(angleOf(C, p)))
+    .sort((a, b) => a - b);
+  const out: number[] = [];
+  for (const a of angs) if (!out.length || a - out[out.length - 1] > PARAM_EPS) out.push(a);
+  // collapse a wrap-around duplicate (last ≈ first + 2π)
+  if (out.length >= 2 && out[0] + TWO_PI - out[out.length - 1] < PARAM_EPS) out.pop();
+  return out;
+}
+
+// ── Circle target ops ─────────────────────────────────────────────────────────
+
+/** Break the circle at every cut angle → arcs. Needs ≥2 cuts (else []). */
+export function splitCircle(circle: Circle2D, cutters: Entity2D[]): Arc2D[] {
+  const angs = circleCutAngles(circle.c, circle.r, cutters);
+  if (angs.length < 2) return [];
+  const arcs: Arc2D[] = [];
+  for (let i = 0; i < angs.length; i++) {
+    const a1 = angs[i];
+    const a2 = i + 1 < angs.length ? angs[i + 1] : angs[0] + TWO_PI;
+    arcs.push({ c: circle.c, r: circle.r, a1, a2 });
+  }
+  return arcs;
+}
+
+/**
+ * Trim a circle: remove the arc span containing the click angle, bounded by the
+ * two nearest cut angles. The remainder survives as a single arc. Returns null
+ * when there are fewer than 2 intersections (nothing to bound the cut).
+ */
+export function trimCircle(circle: Circle2D, cutters: Entity2D[], clickAngle: number): Arc2D[] | null {
+  const angs = circleCutAngles(circle.c, circle.r, cutters);
+  if (angs.length < 2) return null;
+  const ca = norm2pi(clickAngle);
+  // Locate the gap (cyclic) containing the click.
+  let lo = angs[angs.length - 1], hi = angs[0] + TWO_PI;      // default: wrap gap
+  for (let i = 0; i < angs.length - 1; i++) {
+    if (ca >= angs[i] - PARAM_EPS && ca <= angs[i + 1] + PARAM_EPS) { lo = angs[i]; hi = angs[i + 1]; break; }
+  }
+  // Survivor = complement: CCW from hi back round to lo.
+  let a1 = hi, a2 = lo + TWO_PI;
+  while (a1 >= TWO_PI) { a1 -= TWO_PI; a2 -= TWO_PI; }
+  return [{ c: circle.c, r: circle.r, a1, a2 }];
+}
+
+// ── Arc target ops ────────────────────────────────────────────────────────────
+
+/** Cut angles strictly inside the arc span, as absolute angles, sorted. */
+export function arcCutAngles(arc: Arc2D, cutters: Entity2D[]): number[] {
+  const span = arc.a2 - arc.a1;
+  const abs = cutterPointsOnCircle(arc.c, arc.r, cutters)
+    .map((p) => arc.a1 + norm2pi(angleOf(arc.c, p) - arc.a1))
+    .filter((a) => a - arc.a1 > PARAM_EPS && a < arc.a2 - PARAM_EPS && a - arc.a1 < span)
+    .sort((a, b) => a - b);
+  const out: number[] = [];
+  for (const a of abs) if (!out.length || a - out[out.length - 1] > PARAM_EPS) out.push(a);
+  return out;
+}
+
+/** Break the arc at every interior cut → sub-arcs (≥1). */
+export function splitArc(arc: Arc2D, cutters: Entity2D[]): Arc2D[] {
+  const cuts = arcCutAngles(arc, cutters);
+  if (!cuts.length) return [arc];
+  const bounds = [arc.a1, ...cuts, arc.a2];
+  const out: Arc2D[] = [];
+  for (let i = 0; i < bounds.length - 1; i++) {
+    if (bounds[i + 1] - bounds[i] > PARAM_EPS) out.push({ c: arc.c, r: arc.r, a1: bounds[i], a2: bounds[i + 1] });
+  }
+  return out;
+}
+
+/** Trim an arc: drop the clicked sub-span bounded by nearest cuts / arc ends. */
+export function trimArc(arc: Arc2D, cutters: Entity2D[], clickAngle: number): Arc2D[] {
+  const cuts = arcCutAngles(arc, cutters);
+  const bounds = [arc.a1, ...cuts, arc.a2];
+  const ca = arc.a1 + Math.max(0, Math.min(arc.a2 - arc.a1, norm2pi(clickAngle - arc.a1)));
+  let lo = arc.a1, hi = arc.a2;
+  for (let i = 0; i < bounds.length - 1; i++) {
+    if (ca >= bounds[i] - PARAM_EPS && ca <= bounds[i + 1] + PARAM_EPS) { lo = bounds[i]; hi = bounds[i + 1]; break; }
+  }
+  const out: Arc2D[] = [];
+  if (lo - arc.a1 > PARAM_EPS) out.push({ c: arc.c, r: arc.r, a1: arc.a1, a2: lo });
+  if (arc.a2 - hi > PARAM_EPS) out.push({ c: arc.c, r: arc.r, a1: hi, a2: arc.a2 });
+  return out;
+}
+
+/** Extend an arc end ('a'=start/a1 backwards CW, 'b'=end/a2 forwards CCW) to the next cut. */
+export function extendArc(arc: Arc2D, cutters: Entity2D[], end: 'a' | 'b'): Arc2D | null {
+  const pts = cutterPointsOnCircle(arc.c, arc.r, cutters);
+  if (end === 'b') {
+    const ahead = pts
+      .map((p) => arc.a2 + norm2pi(angleOf(arc.c, p) - arc.a2))
+      .filter((a) => a - arc.a2 > PARAM_EPS && a - arc.a2 < TWO_PI - PARAM_EPS)
+      .sort((x, y) => x - y);
+    if (!ahead.length) return null;
+    return { c: arc.c, r: arc.r, a1: arc.a1, a2: ahead[0] };
+  } else {
+    const ahead = pts
+      .map((p) => arc.a1 - norm2pi(arc.a1 - angleOf(arc.c, p)))
+      .filter((a) => arc.a1 - a > PARAM_EPS && arc.a1 - a < TWO_PI - PARAM_EPS)
+      .sort((x, y) => y - x);
+    if (!ahead.length) return null;
+    return { c: arc.c, r: arc.r, a1: ahead[0], a2: arc.a2 };
   }
 }

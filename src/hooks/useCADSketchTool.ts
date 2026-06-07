@@ -61,6 +61,11 @@ function sampleArc3PPreview(p1: THREE.Vector3, p2: THREE.Vector3, p3: THREE.Vect
   return sampleArc3D(center, p1, p3, wp);
 }
 
+/** Project sampled 3D curve points to local-2D — stored as a `polyline` cutter. */
+function localPts2D(pts3: THREE.Vector3[], wp: Workplane): [number, number][] {
+  return pts3.map((p) => { const l = toLocal2D(p, wp); return [l.u, l.v]; });
+}
+
 function sampleEllipse3D(
   center: THREE.Vector3, majorEnd: THREE.Vector3, minorEnd: THREE.Vector3,
   wp: Workplane, segs = 72,
@@ -329,7 +334,12 @@ export function useCADSketchTool(
             const edge = OccSketchService.createArcEdge(oc, center, startPt, endPt, wp);
             const wire = OccSketchService.createClosedWireFromEdges(oc, [edge]);
             addCommitted(sampleArc3D(center, startPt, endPt, wp));
-            registerWire(oc, wire, 'Arc', wp);
+            const lc = toLocal2D(center, wp); const ls = toLocal2D(startPt, wp); const le = toLocal2D(endPt, wp);
+            const r  = Math.hypot(ls.u - lc.u, ls.v - lc.v);
+            const a1 = Math.atan2(ls.v - lc.v, ls.u - lc.u);
+            let   a2 = Math.atan2(le.v - lc.v, le.u - lc.u);
+            if (a2 <= a1) a2 += 2 * Math.PI;
+            registerWire(oc, wire, 'Arc', wp, { kind: 'arc', c: [lc.u, lc.v], r, a1, a2 });
           }
           break;
         }
@@ -341,7 +351,9 @@ export function useCADSketchTool(
             const wire = OccSketchService.createClosedWireFromEdges(oc, [edge]);
             const preview = sampleArc3PPreview(p1, p2, p3, wp);
             addCommitted(preview ?? [p1.clone(), p2.clone(), p3.clone()]);
-            registerWire(oc, wire, 'Arc-3P', wp);
+            const ap = OccSketchService.arcParams3P(p1, p2, p3, wp);
+            registerWire(oc, wire, 'Arc-3P', wp,
+              ap ? { kind: 'arc', c: ap.c, r: ap.r, a1: ap.a1, a2: ap.a2 } : undefined);
           }
           break;
         }
@@ -350,8 +362,9 @@ export function useCADSketchTool(
           if (clicks.length === 3) {
             const [c, majPt, minPt] = clicks;
             const wire = OccSketchService.createEllipseWire(oc, c, majPt, minPt, wp);
-            addCommitted(sampleEllipse3D(c, majPt, minPt, wp));
-            registerWire(oc, wire, 'Ellipse', wp);
+            const samp = sampleEllipse3D(c, majPt, minPt, wp);
+            addCommitted(samp);
+            registerWire(oc, wire, 'Ellipse', wp, { kind: 'polyline', pts: localPts2D(samp, wp) });
           }
           break;
         }
@@ -499,12 +512,14 @@ export function useCADSketchTool(
       try {
         if (mode === 'SKETCH_BEZIER') {
           const wire = OccSketchService.createBezierWire(oc, clicks);
-          addCommitted(sampleBezier3D(clicks));
-          registerWire(oc, wire, `Bezier-${clicks.length}pts`, wp);
+          const samp = sampleBezier3D(clicks);
+          addCommitted(samp);
+          registerWire(oc, wire, `Bezier-${clicks.length}pts`, wp, { kind: 'polyline', pts: localPts2D(samp, wp) });
         } else {
           const wire = OccSketchService.createSplineWire(oc, clicks, wp);
-          addCommitted(sampleCatmullRom3D(clicks));
-          registerWire(oc, wire, `Spline-${clicks.length}pts`, wp);
+          const samp = sampleCatmullRom3D(clicks);
+          addCommitted(samp);
+          registerWire(oc, wire, `Spline-${clicks.length}pts`, wp, { kind: 'polyline', pts: localPts2D(samp, wp) });
         }
       } catch (err: any) {
         useCADStore.getState().log(`Curve error: ${err.message}`, 'error');

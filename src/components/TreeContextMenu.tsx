@@ -15,6 +15,7 @@ import { show3DOpPanel, createAndEditOp } from './Op3DPanel';
 import type { Op3DType } from './Op3DPanel';
 import { showBlendPanel }      from './BlendActionPanel';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
+import { resolveProfileWire } from '../utils/sketchProfile';
 
 // Node types whose right-click triggers re-edit
 const REEDITABLE_OP = new Set<NodeType>(['extrusion', 'revolve', 'loft', 'sweep', 'compound']);
@@ -82,14 +83,26 @@ export const TreeContextMenu: React.FC = () => {
 
   // Create solid immediately (appears in tree) then open panel in EDIT mode.
   const doExtrude = () => {
-    if (!firstWireId) return;
     closeMenu();
+    if (isSketchContainer) {
+      const pid = resolveProfileWire(menu.nodeId, wireIds);
+      if (!pid) { useCADStore.getState().log('This sketch has no closed region to extrude.', 'warn'); return; }
+      createAndEditOp('extrude', [pid]);
+      return;
+    }
+    if (!firstWireId) return;
     createAndEditOp('extrude', [firstWireId]);
   };
 
   const doRevolve = () => {
-    if (!firstWireId) return;
     closeMenu();
+    if (isSketchContainer) {
+      const pid = resolveProfileWire(menu.nodeId, wireIds);
+      if (!pid) { useCADStore.getState().log('This sketch has no closed region to revolve.', 'warn'); return; }
+      createAndEditOp('revolve', [pid]);
+      return;
+    }
+    if (!firstWireId) return;
     createAndEditOp('revolve', [firstWireId]);
   };
 

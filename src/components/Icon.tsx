@@ -21,9 +21,9 @@ export type IconName =
   // 3d ops
   | 'extrude' | 'revolve' | 'loft' | 'sweep'
   // transforms
-  | 'mirror' | 'array' | 'circarray'
+  | 'mirror' | 'array' | 'circarray' | 'mate' | 'align' | 'concentric'
   // sketch editing
-  | 'trim' | 'extend' | 'split'
+  | 'trim' | 'extend' | 'split' | 'powertrim' | 'region'
   // tools / chrome
   | 'select' | 'measure' | 'import' | 'export' | 'undo' | 'redo'
   | 'plane' | 'check' | 'sun' | 'moon' | 'sketch' | 'grid' | 'close';
@@ -57,9 +57,14 @@ const P: Record<IconName, React.ReactNode> = {
   mirror: (<><path d="M12 3.5v17" strokeDasharray="2.4 2.4" opacity=".5" /><path d="M8.5 7l-4 5 4 5z" /><path d="M15.5 7l4 5-4 5z" opacity=".5" /></>),
   array: (<><rect x="3.5" y="3.5" width="7" height="7" rx="1" /><rect x="13.5" y="3.5" width="7" height="7" rx="1" opacity=".5" /><rect x="3.5" y="13.5" width="7" height="7" rx="1" opacity=".5" /><rect x="13.5" y="13.5" width="7" height="7" rx="1" opacity=".5" /></>),
   circarray: (<><circle cx="12" cy="12" r="8" strokeDasharray="2.4 2.4" opacity=".4" /><circle cx="12" cy="4" r="2.1" /><circle cx="20" cy="12" r="1.7" opacity=".55" /><circle cx="12" cy="20" r="1.7" opacity=".55" /><circle cx="4" cy="12" r="1.7" opacity=".55" /></>),
+  mate: (<><rect x="3" y="7" width="8" height="10" rx="1" /><rect x="13" y="7" width="8" height="10" rx="1" opacity=".4" /><path d="M11 12h2" /><path d="M12 4v3M12 17v3" opacity=".6" /></>),
+  align: (<><rect x="3" y="6" width="6" height="12" rx="1" /><rect x="15" y="6" width="6" height="12" rx="1" opacity=".4" /><path d="M9 9h6M9 15h6" opacity=".7" strokeDasharray="2 2" /></>),
+  concentric: (<><circle cx="12" cy="12" r="8.5" opacity=".4" /><circle cx="12" cy="12" r="4" /><circle cx="12" cy="12" r="1" /></>),
   trim: (<><path d="M14 10L21 3" /><path d="M3 7l7 5-7 5" opacity=".4" strokeDasharray="2.4 2.4" /><circle cx="10.5" cy="11.5" r="2.4" /><path d="M14 14l3 3M17 14l-3 3" opacity=".8" /></>),
   extend: (<><path d="M3 12h11" /><path d="M14 8l5 4-5 4" /><path d="M21 5v14" opacity=".4" strokeDasharray="2.4 2.4" /></>),
   split: (<><path d="M4 12h6" /><path d="M14 12h6" /><circle cx="12" cy="12" r="1.8" /><path d="M12 4v3M12 17v3" opacity=".5" /></>),
+  powertrim: (<><path d="M4 18C9 18 8 6 13 6" /><path d="M20 6C15 6 16 18 11 18" opacity=".4" /><path d="M5 13l3 3M8 13l-3 3" opacity=".9" /><path d="M14 8l3 3M17 8l-3 3" opacity=".9" /></>),
+  region: (<><path d="M5 8c0-2 2-3 5-3s4 2 7 2 2 8-1 10-5 1-8 0-3-7-3-9z" /><path d="M9 11l2 2 4-4" opacity=".7" /></>),
   select: (<path d="M5 3.2l13.5 6.6-5.7 1.5 3.4 6.1-2.1 1.2-3.4-6.1-3.6 4.4z" />),
   measure: (<><rect x="2.7" y="9" width="18.6" height="6" rx="1" transform="rotate(-45 12 12)" /><path d="M9.4 7.2l1.5 1.5M12.2 10l1.5 1.5M15 12.8l1.5 1.5" opacity=".7" /></>),
   import: (<><path d="M12 3v12M8 11l4 4 4-4" /><path d="M4 17v3.2h16V17" /></>),
