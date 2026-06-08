@@ -7,7 +7,8 @@
     "dev": "rspack serve --config rspack.config.ts",
     "build": "tsc --noEmit && rspack build --config rspack.config.ts",
     "preview": "rspack serve --config rspack.config.ts --mode production",
-    "clean": "rimraf dist"
+    "clean": "rimraf dist",
+    "test:extrude": "node scripts/test-extrude.mjs"
   },
   "dependencies": {
     "dockview": "^1.11.0",

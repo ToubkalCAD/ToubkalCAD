@@ -27,6 +27,7 @@ import { useCADSketchEdit }     from '../hooks/useCADSketchEdit';
 import { useCADAssemblyMate }   from '../hooks/useCADAssemblyMate';
 import { useCADAssemblyConcentric } from '../hooks/useCADAssemblyConcentric';
 import { useCADSketchTransformPick } from '../hooks/useCADSketchTransformPick';
+import { useCADExtrudeTargetPick } from '../hooks/useCADExtrudeTargetPick';
 import { CADCameraService }    from '../services/CADCameraService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
 import { SketchOverlay }       from './SketchOverlay';
@@ -91,6 +92,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── 2D sketch transform reference picking (mirror line / array centre) ────────
   useCADSketchTransformPick(containerRef, sceneRef, cameraRef);
+
+  // ─── Pad/Pocket boolean target picking (EXTRUDE_TARGET_PICK — E2) ──────────────
+  useCADExtrudeTargetPick(containerRef, sceneRef, cameraRef);
 
   // ─── Camera: animate to view normal to workplane when sketch starts ──────────
   useEffect(() => {

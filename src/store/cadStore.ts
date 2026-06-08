@@ -58,7 +58,8 @@ export type InteractionMode =
   | 'ASSEMBLY_ALIGN'  // like mate but faces parallel (same direction) with an offset
   | 'ASSEMBLY_CONCENTRIC' // pick two cylindrical faces → align their axes (peg-in-hole)
   | 'MIRROR_AXIS_PICK'    // pick 2 points on the sketch plane → mirror line for a 2D sketch mirror
-  | 'ARRAY_CENTER_PICK';  // pick 1 point on the sketch plane → centre for a 2D circular array
+  | 'ARRAY_CENTER_PICK'   // pick 1 point on the sketch plane → centre for a 2D circular array
+  | 'EXTRUDE_TARGET_PICK'; // pick an existing solid as the Pad/Pocket boolean target (one-shot)
 
 export type BooleanOp = 'CUT' | 'FUSE' | 'COMMON';
 
@@ -239,6 +240,14 @@ interface CADState {
   op3DPanelReq: { op: string; targetIds: string[]; editNodeId?: string } | null;
   openOp3DPanel:  (op: string, targetIds: string[], editNodeId?: string) => void;
   closeOp3DPanel: () => void;
+  /** One-shot result of EXTRUDE_TARGET_PICK: the solid id the user clicked
+   *  while picking a Pad/Pocket boolean target. The Op3DPanel consumes and
+   *  clears it. */
+  op3DTargetPick: string | null;
+  /** Begin picking a Pad/Pocket target (enters EXTRUDE_TARGET_PICK mode). */
+  startOp3DTargetPick: () => void;
+  /** Record the picked target solid (called by the pick hook) and exit. */
+  setOp3DTargetPick: (id: string | null) => void;
 
   /** Per-edge blend (fillet/chamfer) request — non-null while the panel is open. */
   blendReq: { targetId: string; op: 'fillet' | 'chamfer'; editNodeId?: string } | null;
@@ -383,6 +392,7 @@ export const useCADStore = create<CADState>((set, get) => ({
   sketchPreviewPoint: null,
   treeContextMenu:    null,
   op3DPanelReq:       null,
+  op3DTargetPick:     null,
   blendReq:            null,
   selectedEdgeIndices: [],
   booleanReq:          null,
@@ -459,6 +469,9 @@ export const useCADStore = create<CADState>((set, get) => ({
 
   openOp3DPanel:  (op, targetIds, editNodeId) => set({ op3DPanelReq: { op, targetIds, editNodeId } }),
   closeOp3DPanel: ()                          => set({ op3DPanelReq: null }),
+
+  startOp3DTargetPick: () => set({ interactionMode: 'EXTRUDE_TARGET_PICK', op3DTargetPick: null }),
+  setOp3DTargetPick:   (id) => set({ op3DTargetPick: id, interactionMode: 'SELECT' }),
 
   openBlendPanel: (targetId, op, editNodeId, preEdges) => set({
     blendReq: { targetId, op, editNodeId },

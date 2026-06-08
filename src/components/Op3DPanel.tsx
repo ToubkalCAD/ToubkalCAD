@@ -15,7 +15,8 @@ import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS } from '../store/cadSto
 import type { NodeType, Workplane } from '../store/cadStore';
 import { CADGeometryRegistry }  from '../services/CADGeometryRegistry';
 import { OccConverter }         from '../services/OccConverter';
-import { OccExtrusionService }  from '../services/OccExtrusionService';
+import { OccExtrusionService, ExtrudeEnd } from '../services/OccExtrusionService';
+import { OccBooleanService }    from '../services/OccBooleanService';
 import { OccRevolutionService } from '../services/OccRevolutionService';
 import { OccLoftService }       from '../services/OccLoftService';
 import { OccSweepService }      from '../services/OccSweepService';
@@ -96,8 +97,11 @@ const OP_TITLE:  Record<Op3DType, string>   = { extrude:'Extrude', revolve:'Revo
 const OP_ICON:   Record<Op3DType, string>   = { extrude:'↑', revolve:'↻', loft:'⊿', sweep:'⌇', fillet:'⌒', chamfer:'⌐' };
 const OP_LABEL:  Record<Op3DType, string>   = { extrude:'Extrusion', revolve:'Revolution', loft:'Loft', sweep:'Sweep', fillet:'Fillet', chamfer:'Chamfer' };
 const OP_NTYPE:  Record<Op3DType, NodeType> = { extrude:'extrusion', revolve:'revolve', loft:'loft', sweep:'sweep', fillet:'compound', chamfer:'compound' };
+// extrude numeric knobs:
+//   endMode 0=blind 1=symmetric 2=twoSided · reverse 0/1 · op 0=new 1=pad 2=pocket
+//   draft = taper angle in degrees (0 = straight walls) · thick = wall mm (0 = solid)
 export const OP_DEFAULTS: Record<Op3DType, Record<string, number>> = {
-  extrude:  { h: 20 },
+  extrude:  { h: 20, endMode: 0, h2: 10, reverse: 0, draft: 0, thick: 0, op: 0 },
   revolve:  { angle: 360, axis: 1 },
   loft:     { solid: 1, ruled: 0 },
   sweep:    {},
@@ -114,10 +118,40 @@ function getDir(id: string): [number, number, number] {
   return wp?.normal ?? [0, 1, 0];
 }
 
-function computeShape(op: Op3DType, ids: string[], p: Record<string, number>): any {
+function getOrigin(id: string): [number, number, number] {
+  const wp = useCADStore.getState().nodes[id]?.params?.workplane as Workplane | undefined;
+  return wp?.origin ?? [0, 0, 0];
+}
+
+const EXTRUDE_END: ExtrudeEnd[] = ['blind', 'symmetric', 'twoSided'];
+
+function computeShape(op: Op3DType, ids: string[], p: Record<string, number>, targetSolidId?: string): any {
   const oc = window.oc;
   switch (op) {
-    case 'extrude': { const w=reg.getShape(ids[0]); if(!w) throw new Error('Wire not found.'); return OccExtrusionService.extrudeWire(oc,w,p.h??20,getDir(ids[0])); }
+    case 'extrude': {
+      const w = reg.getShape(ids[0]);
+      if (!w) throw new Error('Wire not found.');
+      let solid = OccExtrusionService.extrude(oc, w, {
+        height:       p.h ?? 20,
+        end:          EXTRUDE_END[Math.round(p.endMode ?? 0)] ?? 'blind',
+        height2:      p.h2 ?? 10,
+        reverse:      (p.reverse ?? 0) >= 0.5,
+        direction:    getDir(ids[0]),
+        draftAngle:   p.draft ?? 0,
+        neutralPoint: getOrigin(ids[0]),
+        thickness:    p.thick ?? 0,
+      });
+      // Pad (fuse) / Pocket (cut) against an explicitly picked target solid.
+      const boolOp = Math.round(p.op ?? 0);
+      if ((boolOp === 1 || boolOp === 2) && targetSolidId) {
+        const target = reg.getShape(targetSolidId);
+        if (!target) throw new Error('Boolean target solid not found — re-pick it.');
+        solid = boolOp === 1
+          ? OccBooleanService.fuse(oc, target, solid)
+          : OccBooleanService.subtract(oc, target, solid);
+      }
+      return solid;
+    }
     case 'revolve': { const w=reg.getShape(ids[0]); if(!w) throw new Error('Wire not found.'); const axes:any[]=[[1,0,0],[0,1,0],[0,0,1]]; return OccRevolutionService.revolveProfile(oc,w,[0,0,0],axes[Math.round(p.axis??1)],p.angle??360); }
     case 'loft':    { const ws=ids.map(id=>reg.getShape(id)).filter(Boolean); if(ws.length<2) throw new Error('Need ≥ 2 wires.'); return OccLoftService.loftProfiles(oc,ws,(p.solid??1)>=0.5,(p.ruled??0)>=0.5); }
     case 'sweep':   { const pr=reg.getShape(ids[0]),sp=reg.getShape(ids[1]); if(!pr||!sp) throw new Error('Profile/spine not found.'); return OccSweepService.sweepProfile(oc,pr,sp); }
@@ -175,6 +209,40 @@ const ToggleRow: React.FC<{label:string;k:string;opts:{label:string;v:number}[];
     </div>
   );
 
+// Pad/Pocket target-solid picker row (E2).
+const TargetPickRow: React.FC<{
+  targetName: string | null;
+  isPicking:  boolean;
+  onPick:     () => void;
+  onClear:    () => void;
+}> = ({ targetName, isPicking, onPick, onClear }) => (
+  <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+    <span style={{ fontSize:10, color:'var(--text-dim)', textTransform:'uppercase', letterSpacing:'0.4px', minWidth:55 }}>Target</span>
+    <div style={{ display:'flex', alignItems:'center', gap:6, flex:1, minWidth:0 }}>
+      <button onClick={onPick} style={{
+        padding:'2px 10px', fontSize:11, cursor:'pointer', whiteSpace:'nowrap',
+        border:`1px solid ${isPicking ? 'var(--accent)' : 'var(--border)'}`,
+        borderRadius:'var(--radius-sm)',
+        background: isPicking ? 'var(--accent)' : 'var(--surface-3)',
+        color: isPicking ? '#fff' : 'var(--text-primary)',
+      }}>{isPicking ? 'Click a solid…' : (targetName ? 'Re-pick' : 'Pick target')}</button>
+      {targetName && (
+        <span title={targetName} style={{
+          fontSize:11, color:'var(--accent)', fontFamily:'monospace',
+          overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', flex:1,
+        }}>{targetName}</span>
+      )}
+      {targetName && !isPicking && (
+        <button onClick={onClear} title="Clear target" style={{
+          padding:'0 6px', fontSize:13, lineHeight:1, cursor:'pointer',
+          border:'1px solid var(--border)', borderRadius:'var(--radius-sm)',
+          background:'var(--surface-3)', color:'var(--text-dim)',
+        }}>×</button>
+      )}
+    </div>
+  </div>
+);
+
 // ─── Main panel (controlled) ─────────────────────────────────────────────────
 
 export interface Op3DPanelProps {
@@ -197,10 +265,30 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
 
   const [params, setParams]       = useState<Record<string, number>>(buildInit);
   const [applyErr, setApplyErr]   = useState<string | null>(null);
+  // E2 — Pad/Pocket boolean target solid (id). Tracked outside numeric params.
+  const [targetSolidId, setTargetSolidId] = useState<string | null>(
+    () => (req.editNodeId
+      ? (useCADStore.getState().nodes[req.editNodeId]?.params?.targetSolidId ?? null)
+      : null),
+  );
   const previewRef    = useRef<THREE.Mesh | null>(null);
   const debounceRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // In EDIT mode, the original committed mesh is hidden while the preview is live.
-  const hiddenMeshRef = useRef<THREE.Object3D | null>(null);
+  // Committed meshes hidden while the preview is live (edited node + boolean target).
+  const hiddenMeshesRef = useRef<THREE.Object3D[]>([]);
+
+  // Live store values needed by the picker + UI.
+  const interactionMode = useCADStore((s) => s.interactionMode);
+  const pickedTarget    = useCADStore((s) => s.op3DTargetPick);
+  const isPicking       = interactionMode === 'EXTRUDE_TARGET_PICK';
+
+  // Adopt a solid the user clicked in EXTRUDE_TARGET_PICK mode, then clear the
+  // one-shot store signal so re-picking the same id fires again.
+  useEffect(() => {
+    if (pickedTarget) {
+      setTargetSolidId(pickedTarget);
+      useCADStore.getState().setOp3DTargetPick(null);
+    }
+  }, [pickedTarget]);
   const { pos, onHandleMouseDown } = useDragPanel(
     Math.max(260, Math.round(window.innerWidth / 2 - 136)), 120,
   );
@@ -224,11 +312,9 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     }
     previewRef.current = null;
 
-    // Restore the original committed mesh that was hidden during preview
-    if (hiddenMeshRef.current) {
-      hiddenMeshRef.current.visible = true;
-      hiddenMeshRef.current = null;
-    }
+    // Restore every committed mesh hidden during preview (edit node + target)
+    for (const obj of hiddenMeshesRef.current) obj.visible = true;
+    hiddenMeshesRef.current = [];
   }, []);
 
   // Clear preview on any node deletion (prevents ghost meshes after tree delete)
@@ -238,22 +324,25 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     return () => window.removeEventListener('cad-remove-mesh', h);
   }, [clearPreview]);
 
-  const buildPreview = useCallback((liveReq: Op3DRequest, liveParams: Record<string, number>) => {
+  const buildPreview = useCallback((liveReq: Op3DRequest, liveParams: Record<string, number>, liveTarget: string | null) => {
     const sc = (window as any).cadScene as THREE.Scene | null;
     if (!window.oc || !sc) return;
     clearPreview();
 
-    // In EDIT mode hide the committed solid so the preview doesn't overlap it
-    if (liveReq.editNodeId) {
-      const original = sc.children.find(c => c.userData?.cadNodeId === liveReq.editNodeId);
-      if (original) {
-        original.visible = false;
-        hiddenMeshRef.current = original;
-      }
-    }
+    // Hide committed meshes the preview would overlap: the edited node itself,
+    // and (for Pad/Pocket) the boolean target, since the preview already
+    // contains the combined result.
+    const hideById = (nid?: string | null) => {
+      if (!nid) return;
+      const obj = sc.children.find(c => c.userData?.cadNodeId === nid);
+      if (obj && obj.visible) { obj.visible = false; hiddenMeshesRef.current.push(obj); }
+    };
+    hideById(liveReq.editNodeId);
+    const boolActive = liveReq.op === 'extrude' && Math.round(liveParams.op ?? 0) !== 0;
+    if (boolActive) hideById(liveTarget);
 
     try {
-      const shape = computeShape(liveReq.op, liveReq.targetIds, liveParams);
+      const shape = computeShape(liveReq.op, liveReq.targetIds, liveParams, liveTarget ?? undefined);
       const geo   = OccConverter.shapeToThreeGeometry(window.oc, shape, 0.2);
       const mat   = new THREE.MeshStandardMaterial({ color:0x4488ee, opacity:0.70, transparent:true, roughness:0.25, metalness:0.15, side:THREE.DoubleSide });
       const mesh  = new THREE.Mesh(geo, mat);
@@ -261,20 +350,18 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
       sc.add(mesh);
       previewRef.current = mesh;
     } catch {
-      // Preview failed — restore hidden mesh so user can still see the solid
-      if (hiddenMeshRef.current) {
-        hiddenMeshRef.current.visible = true;
-        hiddenMeshRef.current = null;
-      }
+      // Preview failed — restore hidden meshes so the user can still see the solids
+      for (const obj of hiddenMeshesRef.current) obj.visible = true;
+      hiddenMeshesRef.current = [];
     }
   }, [clearPreview]);
 
   // Debounce preview on param change
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => buildPreview(req, params), 250);
+    debounceRef.current = setTimeout(() => buildPreview(req, params, targetSolidId), 250);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-  }, [params, req, buildPreview]);
+  }, [params, req, targetSolidId, buildPreview]);
 
   // Cleanup on unmount
   useEffect(() => () => {
@@ -343,11 +430,26 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     }
     store.log('Op3D: all input shapes found in registry ✓', 'info');
 
+    // ── Validate Pad/Pocket target (E2) ──────────────────────────────────────
+    const boolOp = req.op === 'extrude' ? Math.round(snap.op ?? 0) : 0;
+    if (boolOp !== 0) {
+      if (!targetSolidId) {
+        const msg = `Pick a ${boolOp === 1 ? 'Pad (Add)' : 'Pocket (Remove)'} target solid first.`;
+        setApplyErr(msg); store.log(`Op3D FAIL: ${msg}`, 'error');
+        return;
+      }
+      if (!reg.getShape(targetSolidId)) {
+        const msg = 'Boolean target solid not found — re-pick it.';
+        setApplyErr(msg); store.log(`Op3D FAIL: ${msg}`, 'error');
+        return;
+      }
+    }
+
     store.setProcessing(true, `${OP_TITLE[req.op]}…`);
 
     try {
       // ── Compute OCC shape ──────────────────────────────────────────────────
-      const shape = computeShape(req.op, req.targetIds, snap);
+      const shape = computeShape(req.op, req.targetIds, snap, targetSolidId ?? undefined);
       store.log(`Op3D: OCC shape computed ✓`, 'info');
 
       if (req.editNodeId) {
@@ -358,7 +460,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         window.dispatchEvent(new CustomEvent('cad-update-mesh', { detail: { id, material: old?.material } }));
         const idx = Number(old?.name?.match(/\d+$/)?.[0] ?? nextIdx(OP_NTYPE[req.op]));
         store.renameNode(id, `${OP_LABEL[req.op]}${idx}`);
-        store.setNodeParams(id, { opType: req.op, targetWireIds: req.targetIds, opParams: snap });
+        store.setNodeParams(id, { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined });
         store.log(`${old?.name ?? id} updated ✓`, 'success');
       } else {
         // ── CREATE ────────────────────────────────────────────────────────────
@@ -374,7 +476,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
           id, name, type, visible: true, locked: false, parentId: null, notes: '',
           transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
           material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS[type] ?? 0x5588cc },
-          params:    { opType: req.op, targetWireIds: req.targetIds, opParams: snap },
+          params:    { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined },
         });
 
         // Verify the node is actually in the store
@@ -388,6 +490,16 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
           store.adoptSketchSources(id, req.targetIds);
         }
         store.log(`${name} created ✓`, 'success');
+      }
+
+      // Pad/Pocket consumes its target: hide it so only the combined body shows.
+      // (Reversible — the node stays in the tree and can be re-shown.)
+      if (boolOp !== 0 && targetSolidId) {
+        const tnode = useCADStore.getState().nodes[targetSolidId];
+        if (tnode?.visible) {
+          store.toggleVisibility(targetSolidId);
+          store.log(`Target "${tnode.name}" hidden (consumed by ${boolOp === 1 ? 'Pad' : 'Pocket'}).`, 'info');
+        }
       }
 
       store.setProcessing(false);
@@ -434,7 +546,26 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         </div>
 
         <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:12 }}>
-          {req.op === 'extrude'  && <SliderRow label="Height (mm)"    k="h"     min={0.01} max={500} step={0.5} params={params} onChange={set} />}
+          {req.op === 'extrude'  && (
+            <>
+              <ToggleRow label="Limit" k="endMode" opts={[{label:'Blind',v:0},{label:'Sym',v:1},{label:'2-Sided',v:2}]} params={params} onChange={set} />
+              <SliderRow label={Math.round(params.endMode??0)===1 ? 'Length (mm)' : 'Limit 1 (mm)'} k="h" min={0.01} max={500} step={0.5} params={params} onChange={set} />
+              {Math.round(params.endMode??0)===2 && <SliderRow label="Limit 2 (mm)" k="h2" min={0.01} max={500} step={0.5} params={params} onChange={set} />}
+              <ToggleRow label="Reverse" k="reverse" opts={[{label:'Off',v:0},{label:'On',v:1}]} params={params} onChange={set} />
+              <SliderRow label="Draft (°)" k="draft" min={-30} max={30} step={0.5} params={params} onChange={set} />
+              <SliderRow label="Wall (mm)" k="thick" min={0} max={20} step={0.5} params={params} onChange={set} />
+              <div style={{ height:1, background:'var(--border-soft)', margin:'2px 0' }} />
+              <ToggleRow label="Result" k="op" opts={[{label:'New',v:0},{label:'Pad',v:1},{label:'Pocket',v:2}]} params={params} onChange={set} />
+              {Math.round(params.op??0)!==0 && (
+                <TargetPickRow
+                  targetName={targetSolidId ? (useCADStore.getState().nodes[targetSolidId]?.name ?? '—') : null}
+                  isPicking={isPicking}
+                  onPick={() => useCADStore.getState().startOp3DTargetPick()}
+                  onClear={() => setTargetSolidId(null)}
+                />
+              )}
+            </>
+          )}
           {req.op === 'revolve'  && <><SliderRow label="Angle (°)" k="angle" min={1} max={360} step={1} params={params} onChange={set} /><ToggleRow label="Axis" k="axis" opts={[{label:'X',v:0},{label:'Y',v:1},{label:'Z',v:2}]} params={params} onChange={set} /></>}
           {req.op === 'loft'     && <><ToggleRow label="Type"    k="solid" opts={[{label:'Solid',v:1},{label:'Shell',v:0}]}   params={params} onChange={set} /><ToggleRow label="Surface" k="ruled" opts={[{label:'Smooth',v:0},{label:'Ruled',v:1}]} params={params} onChange={set} /></>}
           {req.op === 'sweep'    && <div style={{ fontSize:11, color:'var(--text-muted)', fontStyle:'italic', textAlign:'center', padding:'8px 0' }}>Sweeps profile [0] along spine [1].</div>}

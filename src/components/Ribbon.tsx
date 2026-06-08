@@ -18,7 +18,6 @@ import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS, InteractionMode } from
 import { Icon, IconName }            from './Icon';
 import { showParamModal }           from './ParameterModal';
 import { OccPrimitivesService }     from '../services/OccPrimitivesService';
-import { OccExtrusionService }      from '../services/OccExtrusionService';
 import { OccExchangeService }       from '../services/OccExchangeService';
 import { OccRevolutionService }     from '../services/OccRevolutionService';
 import { OccLoftService }           from '../services/OccLoftService';
@@ -27,6 +26,7 @@ import { OccSketchService, fromLocal2D } from '../services/OccSketchService';
 import { findRegions, RegionEntity, toRegionEntity } from '../services/SketchRegions';
 import { setAlignOffset } from '../hooks/useCADAssemblyMate';
 import { resolveProfileWire } from '../utils/sketchProfile';
+import { createAndEditOp } from './Op3DPanel';
 import { createSketchEntityNode } from '../utils/sketchEntity';
 import { transformGeom, translator } from '../services/SketchTransform2D';
 import { beginSketchMirror, beginSketchCircular } from '../hooks/useCADSketchTransformPick';
@@ -333,24 +333,12 @@ export const Ribbon: React.FC = () => {
     if (!selIds.length) { log('Select a sketch or sketch wire.', 'warn'); return; }
     const node = nodes[selIds[0]];
     if (node?.type !== 'sketch_wire' && node?.type !== 'sketch') { log('Selected object must be a 2D sketch.', 'warn'); return; }
-    withOC(async () => {
-      const v = await showParamModal('Extrude', [
-        { key: 'h', label: 'Height', default: 20, min: 0.01, unit: 'mm' },
-      ]);
-      if (!v) return;
+    withOC(() => {
       const wireId = profileWireFor();
       if (!wireId) { log('This sketch has no closed region to extrude.', 'warn'); return; }
-      const wire = reg.getShape(wireId);
-      if (!wire) { log('Sketch wire not found.', 'error'); return; }
-      const wp = useCADStore.getState().nodes[wireId]?.params?.workplane;
-      const direction: [number,number,number] = wp?.normal ?? activeWorkplane.normal;
-      setProc(true, 'Extruding…');
-      try {
-        const id = crypto.randomUUID();
-        create(id, `Extrusion${v.h.toFixed(0)}mm`, 'extrusion',
-          OccExtrusionService.extrudeWire(window.oc, wire, v.h, direction));
-        useCADStore.getState().adoptSketchSources(id, [wireId]);
-      } finally { setProc(false); }
+      // Open the full Pad/Pocket panel (end conditions, reverse, boolean target,
+      // live preview) instead of a one-shot height prompt.
+      createAndEditOp('extrude', [wireId]);
     });
   };
 
