@@ -15,7 +15,8 @@ import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const COLOR_RUBBER  = 0x0077cc;
-const COLOR_COMMIT  = 0x003388;
+const COLOR_COMMIT  = 0xff8800;   // amber — high contrast vs the blue sketch grid
+                                  // (was 0x003388, which blended into grid lines)
 
 // ─── Curve-sampling for preview ───────────────────────────────────────────────
 
