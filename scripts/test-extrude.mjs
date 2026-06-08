@@ -189,6 +189,47 @@ function extrudeUpToFace(wire, dir, target, neutralPoint = [0, 0, 0]) {
   return best;
 }
 
+/** Mirror of OccExtrusionService.extrudeUpToNext (cut all bodies, keep base). */
+function extrudeUpToNext(wire, dir, bodies, neutralPoint = [0, 0, 0]) {
+  let [dx, dy, dz] = dir; const len = Math.hypot(dx, dy, dz); dx /= len; dy /= len; dz /= len; const d = [dx, dy, dz];
+  let over = 0; for (const b of bodies) over = Math.max(over, projRange(b, neutralPoint, d).max); over += 10;
+  const fm = new oc.BRepBuilderAPI_MakeFace_15(wire, true);
+  let cur = new oc.BRepPrimAPI_MakePrism_1(fm.Shape(), new oc.gp_Vec_4(dx * over, dy * over, dz * over), false, true).Shape();
+  for (const b of bodies) {
+    const cut = new oc.BRepAlgoAPI_Cut_3(cur, b, new oc.Message_ProgressRange_1());
+    cut.Build(new oc.Message_ProgressRange_1());
+    if (cut.IsDone()) cur = cut.Shape();
+  }
+  let best = null, bestKey = Infinity;
+  const exp = new oc.TopExp_Explorer_2(cur, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+  while (exp.More()) {
+    const sol = oc.TopoDS.Solid_1(exp.Current());
+    const key = Math.abs(projRange(sol, neutralPoint, d).min);
+    if (key < bestKey) { bestKey = key; best = sol; }
+    exp.Next();
+  }
+  return best;
+}
+
+/** Mirror of OccExtrusionService.extrudeUpToLast (Common → furthest, blind). */
+function extrudeUpToLast(wire, dir, bodies, neutralPoint = [0, 0, 0]) {
+  let [dx, dy, dz] = dir; const len = Math.hypot(dx, dy, dz); dx /= len; dy /= len; dz /= len; const d = [dx, dy, dz];
+  let over = 0; for (const b of bodies) over = Math.max(over, projRange(b, neutralPoint, d).max); over += 10;
+  const overShape = new oc.BRepPrimAPI_MakePrism_1(new oc.BRepBuilderAPI_MakeFace_15(wire, true).Shape(),
+    new oc.gp_Vec_4(dx * over, dy * over, dz * over), false, true).Shape();
+  let farMost = -Infinity;
+  for (const b of bodies) {
+    const common = new oc.BRepAlgoAPI_Common_3(overShape, b, new oc.Message_ProgressRange_1());
+    common.Build(new oc.Message_ProgressRange_1());
+    if (!common.IsDone()) continue;
+    const cs = common.Shape();
+    if (!new oc.TopExp_Explorer_2(cs, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE).More()) continue;
+    farMost = Math.max(farMost, projRange(cs, neutralPoint, d).max);
+  }
+  return new oc.BRepPrimAPI_MakePrism_1(new oc.BRepBuilderAPI_MakeFace_15(wire, true).Shape(),
+    new oc.gp_Vec_4(dx * farMost, dy * farMost, dz * farMost), false, true).Shape();
+}
+
 /** Mirror of OccExtrusionService.extrudeProfiles. */
 function extrudeProfiles(wires, height) {
   const builder = new oc.BRep_Builder();
@@ -269,6 +310,18 @@ console.log('\nE5 — up to face');
   const target = extrude(squareWire(10, 20), { height: 10 });   // block z[20,30]
   const up = extrudeUpToFace(squareWire(10), [0, 0, 1], target); // base piece z[0,20]
   check('up-to-face (block z[20,30]) → z[0,20] = 2000', measure(up), { vol: 2000, cz: 10 });
+}
+
+// ─── E6 — Up to Next / Up to Last ─────────────────────────────────────────────
+// Two blocks: A z[20,30], B z[40,50]. Profile at z=0.
+//   Next → stops at nearest face (z=20)  → z[0,20] = 2000
+//   Last → reaches furthest face (z=50)  → z[0,50] = 5000
+console.log('\nE6 — up to next / last');
+{
+  const A = extrude(squareWire(10, 20), { height: 10 });
+  const B = extrude(squareWire(10, 40), { height: 10 });
+  check('up-to-next (nearest z20) → z[0,20] = 2000', measure(extrudeUpToNext(squareWire(10), [0, 0, 1], [A, B])), { vol: 2000, cz: 10 });
+  check('up-to-last (furthest z50) → z[0,50] = 5000', measure(extrudeUpToLast(squareWire(10), [0, 0, 1], [A, B])), { vol: 5000, cz: 25 });
 }
 
 // ─── E7 — Multi-profile (compound) ────────────────────────────────────────────

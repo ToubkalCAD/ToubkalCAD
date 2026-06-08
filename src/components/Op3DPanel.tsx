@@ -124,6 +124,17 @@ function getOrigin(id: string): [number, number, number] {
   return wp?.origin ?? [0, 0, 0];
 }
 
+/** All solid bodies in the scene (baked to their gizmo pose), excluding the
+ *  given ids — used as the "up to next/last" targets (E6). */
+function allSolidShapes(excludeIds: string[]): any[] {
+  const NON_SOLID = new Set(['sketch', 'sketch_wire']);
+  const skip = new Set(excludeIds);
+  return Object.values(useCADStore.getState().nodes)
+    .filter((n) => !NON_SOLID.has(n.type) && !skip.has(n.id))
+    .map((n) => getPlacedShape(n.id))
+    .filter(Boolean);
+}
+
 const EXTRUDE_END: ExtrudeEnd[] = ['blind', 'symmetric', 'twoSided'];
 
 function computeShape(op: Op3DType, ids: string[], p: Record<string, number>, targetSolidId?: string): any {
@@ -134,6 +145,11 @@ function computeShape(op: Op3DType, ids: string[], p: Record<string, number>, ta
       if (!wires.length) throw new Error('Wire not found.');
       const endMode = Math.round(p.endMode ?? 0);
       let solid;
+      const upToOpts = {
+        direction:    getDir(ids[0]),
+        reverse:      (p.reverse ?? 0) >= 0.5,
+        neutralPoint: getOrigin(ids[0]),
+      };
       if (endMode === 3) {
         // Up-to-Face: trim to the picked target solid (reuses the boolean target).
         // Single profile only — multi-region up-to-face is deferred.
@@ -141,11 +157,15 @@ function computeShape(op: Op3DType, ids: string[], p: Record<string, number>, ta
         // where the user sees the solid, not at its origin pose.
         const tgt = targetSolidId ? getPlacedShape(targetSolidId) : null;
         if (!tgt) throw new Error('Up-to-Face needs a target solid — pick one.');
-        solid = OccExtrusionService.extrudeUpToFace(oc, wires[0], {
-          direction:    getDir(ids[0]),
-          reverse:      (p.reverse ?? 0) >= 0.5,
-          neutralPoint: getOrigin(ids[0]),
-        }, tgt);
+        solid = OccExtrusionService.extrudeUpToFace(oc, wires[0], upToOpts, tgt);
+      } else if (endMode === 4 || endMode === 5) {
+        // Up-to-Next / Up-to-Last: trim against every other body in the scene.
+        const editId = useCADStore.getState().op3DPanelReq?.editNodeId;
+        const bodies = allSolidShapes([...ids, ...(editId ? [editId] : [])]);
+        if (!bodies.length) throw new Error('Up-to-Next/Last needs another solid in the model.');
+        solid = endMode === 4
+          ? OccExtrusionService.extrudeUpToNext(oc, wires[0], upToOpts, bodies)
+          : OccExtrusionService.extrudeUpToLast(oc, wires[0], upToOpts, bodies);
       } else {
         // E7: extrude every region (one wire → solid, many → compound).
         solid = OccExtrusionService.extrudeProfiles(oc, wires, {
@@ -214,7 +234,7 @@ const ToggleRow: React.FC<{label:string;k:string;opts:{label:string;v:number}[];
   ({ label, k, opts, params, onChange }) => (
     <div style={{ display:'flex', alignItems:'center', gap:8 }}>
       <span style={{ fontSize:10, color:'var(--text-dim)', textTransform:'uppercase', letterSpacing:'0.4px', minWidth:55 }}>{label}</span>
-      <div style={{ display:'flex', gap:4 }}>
+      <div style={{ display:'flex', gap:4, flexWrap:'wrap' }}>
         {opts.map(o=>(
           <button key={o.v} onClick={()=>onChange(k,o.v)} style={{
             padding:'2px 10px', fontSize:11, cursor:'pointer',
@@ -568,17 +588,20 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:12 }}>
           {req.op === 'extrude'  && (() => {
             const endM = Math.round(params.endMode ?? 0);
-            const upTo = endM === 3;
-            const needTarget = upTo || Math.round(params.op ?? 0) !== 0;
+            const isUpTo = endM >= 3;                       // ↥Face / Next / Last
+            const needTarget = endM === 3 || Math.round(params.op ?? 0) !== 0;
+            const upToHint = endM === 3 ? 'Extrudes up to the first surface of the picked target solid.'
+              : endM === 4 ? 'Extrudes up to the next body it meets in the model.'
+              : 'Extrudes up to the last (furthest) surface in the model.';
             return (
             <>
-              <ToggleRow label="Limit" k="endMode" opts={[{label:'Blind',v:0},{label:'Sym',v:1},{label:'2-Sided',v:2},{label:'↥ Face',v:3}]} params={params} onChange={set} />
-              {!upTo && <SliderRow label={endM===1 ? 'Length (mm)' : 'Limit 1 (mm)'} k="h" min={0.01} max={500} step={0.5} params={params} onChange={set} />}
+              <ToggleRow label="Limit" k="endMode" opts={[{label:'Blind',v:0},{label:'Sym',v:1},{label:'2-Sided',v:2},{label:'↥ Face',v:3},{label:'Next',v:4},{label:'Last',v:5}]} params={params} onChange={set} />
+              {!isUpTo && <SliderRow label={endM===1 ? 'Length (mm)' : 'Limit 1 (mm)'} k="h" min={0.01} max={500} step={0.5} params={params} onChange={set} />}
               {endM===2 && <SliderRow label="Limit 2 (mm)" k="h2" min={0.01} max={500} step={0.5} params={params} onChange={set} />}
-              {upTo && <div style={{ fontSize:10, color:'var(--text-muted)', fontStyle:'italic' }}>Extrudes up to the first surface of the picked target solid.</div>}
+              {isUpTo && <div style={{ fontSize:10, color:'var(--text-muted)', fontStyle:'italic' }}>{upToHint}</div>}
               <ToggleRow label="Reverse" k="reverse" opts={[{label:'Off',v:0},{label:'On',v:1}]} params={params} onChange={set} />
-              {!upTo && <SliderRow label="Draft (°)" k="draft" min={-30} max={30} step={0.5} params={params} onChange={set} />}
-              {!upTo && <SliderRow label="Wall (mm)" k="thick" min={0} max={20} step={0.5} params={params} onChange={set} />}
+              {!isUpTo && <SliderRow label="Draft (°)" k="draft" min={-30} max={30} step={0.5} params={params} onChange={set} />}
+              {!isUpTo && <SliderRow label="Wall (mm)" k="thick" min={0} max={20} step={0.5} params={params} onChange={set} />}
               <div style={{ height:1, background:'var(--border-soft)', margin:'2px 0' }} />
               <ToggleRow label="Result" k="op" opts={[{label:'New',v:0},{label:'Pad',v:1},{label:'Pocket',v:2}]} params={params} onChange={set} />
               {needTarget && (

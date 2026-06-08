@@ -335,6 +335,128 @@ export class OccExtrusionService {
     return compound;
   }
 
+  /** Normalised, optionally-reversed extrusion axis. */
+  private static normDir(direction: [number, number, number], reverse: boolean): [number, number, number] {
+    let [dx, dy, dz] = direction;
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-10) throw new Error('Extrusion direction is zero-length');
+    dx /= len; dy /= len; dz /= len;
+    return reverse ? [-dx, -dy, -dz] : [dx, dy, dz];
+  }
+
+  /**
+   * Extrude up to the NEAREST body in the path (CATIA "Up to Next"). Over-
+   * extrudes past every body, cuts them all out, and keeps the piece touching
+   * the sketch plane — so it stops at the first surface encountered.
+   */
+  static extrudeUpToNext(
+    oc:   any,
+    wire: any,
+    opts: { direction?: [number, number, number]; reverse?: boolean; neutralPoint?: [number, number, number] },
+    bodies: any[],
+  ): any {
+    const { direction = [0, 1, 0], reverse = false, neutralPoint = [0, 0, 0] } = opts;
+    const [dx, dy, dz] = OccExtrusionService.normDir(direction, reverse);
+    const dir: [number, number, number] = [dx, dy, dz];
+    let over = 0;
+    for (const b of bodies) over = Math.max(over, OccExtrusionService.projRange(oc, b, neutralPoint, dir).max);
+    if (over <= 1e-6) throw new Error('Up-to-Next: no body ahead of the sketch plane.');
+    over += 10;
+
+    const scope = new WasmScope();
+    try {
+      const fm = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
+      if (!fm.IsDone()) throw new Error('Up-to-Next: face creation failed.');
+      const vec   = scope.keep(new oc.gp_Vec_4(dx * over, dy * over, dz * over));
+      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(fm.Shape(), vec, false, true));
+      if (!prism.IsDone()) throw new Error('Up-to-Next: over-extrude failed.');
+
+      let cur = prism.Shape();
+      for (const b of bodies) {
+        const cut = scope.keep(new oc.BRepAlgoAPI_Cut_3(cur, b, new oc.Message_ProgressRange_1()));
+        cut.Build(new oc.Message_ProgressRange_1());
+        if (cut.IsDone()) cur = cut.Shape();
+      }
+      return OccExtrusionService.keepBaseSolid(oc, cur, neutralPoint, dir, over);
+    } finally {
+      scope.free();
+    }
+  }
+
+  /**
+   * Extrude up to the FURTHEST surface in the path (CATIA "Up to Last").
+   * Intersects an over-extrude with every body (BRepAlgoAPI_Common) to find the
+   * furthest exit, then blind-extrudes to that distance — filling gaps along the
+   * way.
+   */
+  static extrudeUpToLast(
+    oc:   any,
+    wire: any,
+    opts: { direction?: [number, number, number]; reverse?: boolean; neutralPoint?: [number, number, number] },
+    bodies: any[],
+  ): any {
+    const { direction = [0, 1, 0], reverse = false, neutralPoint = [0, 0, 0] } = opts;
+    const [dx, dy, dz] = OccExtrusionService.normDir(direction, reverse);
+    const dir: [number, number, number] = [dx, dy, dz];
+    let over = 0;
+    for (const b of bodies) over = Math.max(over, OccExtrusionService.projRange(oc, b, neutralPoint, dir).max);
+    if (over <= 1e-6) throw new Error('Up-to-Last: no body ahead of the sketch plane.');
+    over += 10;
+
+    const scope = new WasmScope();
+    try {
+      const fm = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
+      if (!fm.IsDone()) throw new Error('Up-to-Last: face creation failed.');
+      const vec   = scope.keep(new oc.gp_Vec_4(dx * over, dy * over, dz * over));
+      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(fm.Shape(), vec, false, true));
+      if (!prism.IsDone()) throw new Error('Up-to-Last: over-extrude failed.');
+      const overShape = prism.Shape();
+
+      // Furthest exit projection across the bodies the prism actually intersects.
+      let farMost = -Infinity;
+      for (const b of bodies) {
+        const common = scope.keep(new oc.BRepAlgoAPI_Common_3(overShape, b, new oc.Message_ProgressRange_1()));
+        common.Build(new oc.Message_ProgressRange_1());
+        if (!common.IsDone()) continue;
+        const cs = common.Shape();
+        const probe = new oc.TopExp_Explorer_2(cs, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+        const hasSolid = probe.More(); probe.delete();
+        if (!hasSolid) continue;
+        farMost = Math.max(farMost, OccExtrusionService.projRange(oc, cs, neutralPoint, dir).max);
+      }
+      if (farMost <= 1e-6) throw new Error('Up-to-Last: the profile does not reach any body.');
+
+      const fm2  = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
+      const vec2 = scope.keep(new oc.gp_Vec_4(dx * farMost, dy * farMost, dz * farMost));
+      const out  = scope.keep(new oc.BRepPrimAPI_MakePrism_1(fm2.Shape(), vec2, false, true));
+      if (!out.IsDone()) throw new Error('Up-to-Last: final extrude failed.');
+      return out.Shape();
+    } finally {
+      scope.free();
+    }
+  }
+
+  /** From a (possibly multi-solid) cut result, keep the solid touching the
+   *  sketch plane (min |projection| ≈ 0); throw if it spans the full over-extrude
+   *  (i.e. the profile never reached a body). Shared by Up-to-Face / Up-to-Next. */
+  private static keepBaseSolid(
+    oc: any, shape: any, base: [number, number, number], dir: [number, number, number], over: number,
+  ): any {
+    let best: any = null, bestKey = Infinity, bestMax = 0;
+    const exp = new oc.TopExp_Explorer_2(shape, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+    while (exp.More()) {
+      const sol = oc.TopoDS.Solid_1(exp.Current());
+      const pr  = OccExtrusionService.projRange(oc, sol, base, dir);
+      const key = Math.abs(pr.min);
+      if (key < bestKey) { bestKey = key; best = sol; bestMax = pr.max; }
+      exp.Next();
+    }
+    exp.delete();
+    if (!best) throw new Error('Up-to: produced no solid.');
+    if (bestMax >= over - 1e-3) throw new Error('Up-to: the profile does not reach the target.');
+    return best;
+  }
+
   /**
    * Backwards-compatible blind extrusion.
    * @param direction  Unit normal of the sketch plane (extrusion axis).

@@ -122,8 +122,12 @@ the boolean step reuses `OccBooleanService`.
   target picker (`↥ Face` limit option); errors if the profile doesn't reach the target
   (verified: target block z[20,30] → fill z[0,20], vol 2000). *Deferred:* Up-to-Plane
   (datum) and multi-region up-to-face.
-- **E6** Up-to-Next / Up-to-Last. Generalise E5's filter: pick the first vs furthest
-  intersecting volume across the whole model rather than one explicit target.
+- **E6** ✅ *(done 2026-06-09)* Up-to-Next / Up-to-Last — no pick, considers every
+  body in the scene automatically. `extrudeUpToNext` over-extrudes, cuts all bodies, and
+  keeps the base piece (stops at the nearest surface, reusing `keepBaseSolid`).
+  `extrudeUpToLast` intersects the over-extrude with each body (`BRepAlgoAPI_Common`) to
+  find the furthest exit, then blind-extrudes to it (filling gaps). UI: "Next"/"Last"
+  limit options (verified: blocks z[20,30]+z[40,50] → Next vol 2000, Last vol 5000).
 - **E7** ✅ *(done 2026-06-08)* Multi-profile (Multi-Pad). `resolveAllProfileWires`
   detects every enclosed region (`SketchRegions`); `extrudeProfiles` extrudes each with
   the same options and groups them into one `TopoDS_Compound` (`BRep_Builder`). The
@@ -152,6 +156,7 @@ the boolean step reuses `OccBooleanService`.
 4. **E1 → E2** (Pad/Pocket + end conditions) ✅ + **E4 Draft** ✅ + **E3 Thick** ✅ —
    extrusion is now a real additive/subtractive, taperable, hollowable feature.
 5. **R3 / R4** (contextual tabs + customization).
-6. **E5 Up-to-Face** ✅ + **E7 Multi-Pad** ✅ — done. Remaining: **E6 Up-to-Next/Last**
-   + per-profile depths.
+6. **E5 Up-to-Face** ✅ + **E6 Up-to-Next/Last** ✅ + **E7 Multi-Pad** ✅ — the whole
+   Pad/Pocket limit family is done. Remaining extrusion polish: per-profile depths
+   (variable Multi-Pad), Up-to-Plane (datum).
 7. **P1 feature tree** last (also fixes the E2 re-edit visibility gap).
