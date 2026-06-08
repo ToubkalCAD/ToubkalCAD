@@ -15,6 +15,7 @@ import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS } from '../store/cadSto
 import type { NodeType, Workplane } from '../store/cadStore';
 import { CADGeometryRegistry }  from '../services/CADGeometryRegistry';
 import { OccConverter }         from '../services/OccConverter';
+import { getPlacedShape }       from '../utils/placedShape';
 import { OccExtrusionService, ExtrudeEnd } from '../services/OccExtrusionService';
 import { OccBooleanService }    from '../services/OccBooleanService';
 import { OccRevolutionService } from '../services/OccRevolutionService';
@@ -136,7 +137,9 @@ function computeShape(op: Op3DType, ids: string[], p: Record<string, number>, ta
       if (endMode === 3) {
         // Up-to-Face: trim to the picked target solid (reuses the boolean target).
         // Single profile only — multi-region up-to-face is deferred.
-        const tgt = targetSolidId ? reg.getShape(targetSolidId) : null;
+        // getPlacedShape bakes the target's gizmo transform so the trim happens
+        // where the user sees the solid, not at its origin pose.
+        const tgt = targetSolidId ? getPlacedShape(targetSolidId) : null;
         if (!tgt) throw new Error('Up-to-Face needs a target solid — pick one.');
         solid = OccExtrusionService.extrudeUpToFace(oc, wires[0], {
           direction:    getDir(ids[0]),
@@ -159,7 +162,7 @@ function computeShape(op: Op3DType, ids: string[], p: Record<string, number>, ta
       // Pad (fuse) / Pocket (cut) against an explicitly picked target solid.
       const boolOp = Math.round(p.op ?? 0);
       if ((boolOp === 1 || boolOp === 2) && targetSolidId) {
-        const target = reg.getShape(targetSolidId);
+        const target = getPlacedShape(targetSolidId);  // baked to its gizmo pose
         if (!target) throw new Error('Boolean target solid not found — re-pick it.');
         solid = boolOp === 1
           ? OccBooleanService.fuse(oc, target, solid)
