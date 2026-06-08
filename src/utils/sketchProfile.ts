@@ -63,11 +63,16 @@ export function resolveAllProfileWires(sketchId: string, childIds: string[]): st
   const st = useCADStore.getState();
   const reg = CADGeometryRegistry.getInstance();
 
-  if (childIds.length === 1) {
-    const w = reg.getShape(childIds[0]);
-    if (w && OccSketchService.wireMakesFace(oc, w)) return [childIds[0]];
-  }
+  // Each child that is ITSELF a closed wire (circle / rect / closed loop) is its
+  // own profile — return them all. This is the multi-profile (Multi-Pad) case:
+  // two separate rectangles are two profiles, not one region to detect.
+  const closed = childIds.filter((id) => {
+    const w = reg.getShape(id);
+    return w && OccSketchService.wireMakesFace(oc, w);
+  });
+  if (closed.length) return closed;
 
+  // Otherwise the sketch is loose open edges (trimmed lines/arcs) → find region(s).
   const ents = childIds
     .map((id) => toRegionEntity(id, st.nodes[id]?.params?.sketchGeom))
     .filter((e): e is RegionEntity => !!e);
