@@ -25,7 +25,7 @@ import { OccSweepService }          from '../services/OccSweepService';
 import { OccSketchService, fromLocal2D } from '../services/OccSketchService';
 import { findRegions, RegionEntity, toRegionEntity } from '../services/SketchRegions';
 import { setAlignOffset } from '../hooks/useCADAssemblyMate';
-import { resolveProfileWire } from '../utils/sketchProfile';
+import { resolveProfileWire, resolveAllProfileWires } from '../utils/sketchProfile';
 import { createAndEditOp } from './Op3DPanel';
 import { createSketchEntityNode } from '../utils/sketchEntity';
 import { transformGeom, translator } from '../services/SketchTransform2D';
@@ -334,11 +334,22 @@ export const Ribbon: React.FC = () => {
     const node = nodes[selIds[0]];
     if (node?.type !== 'sketch_wire' && node?.type !== 'sketch') { log('Selected object must be a 2D sketch.', 'warn'); return; }
     withOC(() => {
-      const wireId = profileWireFor();
-      if (!wireId) { log('This sketch has no closed region to extrude.', 'warn'); return; }
+      // E7: extrude every closed region in the sketch (Multi-Pad), not just one.
+      const node = nodes[selIds[0]];
+      let wireIds: string[];
+      if (node?.type === 'sketch') {
+        const childIds = Object.values(useCADStore.getState().nodes)
+          .filter((n) => n.parentId === node.id && n.type === 'sketch_wire')
+          .map((n) => n.id);
+        wireIds = resolveAllProfileWires(node.id, childIds);
+      } else {
+        const w = profileWireFor();
+        wireIds = w ? [w] : [];
+      }
+      if (!wireIds.length) { log('This sketch has no closed region to extrude.', 'warn'); return; }
       // Open the full Pad/Pocket panel (end conditions, reverse, boolean target,
       // live preview) instead of a one-shot height prompt.
-      createAndEditOp('extrude', [wireId]);
+      createAndEditOp('extrude', wireIds);
     });
   };
 

@@ -129,18 +129,33 @@ function computeShape(op: Op3DType, ids: string[], p: Record<string, number>, ta
   const oc = window.oc;
   switch (op) {
     case 'extrude': {
-      const w = reg.getShape(ids[0]);
-      if (!w) throw new Error('Wire not found.');
-      let solid = OccExtrusionService.extrude(oc, w, {
-        height:       p.h ?? 20,
-        end:          EXTRUDE_END[Math.round(p.endMode ?? 0)] ?? 'blind',
-        height2:      p.h2 ?? 10,
-        reverse:      (p.reverse ?? 0) >= 0.5,
-        direction:    getDir(ids[0]),
-        draftAngle:   p.draft ?? 0,
-        neutralPoint: getOrigin(ids[0]),
-        thickness:    p.thick ?? 0,
-      });
+      const wires = ids.map((id) => reg.getShape(id)).filter(Boolean);
+      if (!wires.length) throw new Error('Wire not found.');
+      const endMode = Math.round(p.endMode ?? 0);
+      let solid;
+      if (endMode === 3) {
+        // Up-to-Face: trim to the picked target solid (reuses the boolean target).
+        // Single profile only — multi-region up-to-face is deferred.
+        const tgt = targetSolidId ? reg.getShape(targetSolidId) : null;
+        if (!tgt) throw new Error('Up-to-Face needs a target solid — pick one.');
+        solid = OccExtrusionService.extrudeUpToFace(oc, wires[0], {
+          direction:    getDir(ids[0]),
+          reverse:      (p.reverse ?? 0) >= 0.5,
+          neutralPoint: getOrigin(ids[0]),
+        }, tgt);
+      } else {
+        // E7: extrude every region (one wire → solid, many → compound).
+        solid = OccExtrusionService.extrudeProfiles(oc, wires, {
+          height:       p.h ?? 20,
+          end:          EXTRUDE_END[endMode] ?? 'blind',
+          height2:      p.h2 ?? 10,
+          reverse:      (p.reverse ?? 0) >= 0.5,
+          direction:    getDir(ids[0]),
+          draftAngle:   p.draft ?? 0,
+          neutralPoint: getOrigin(ids[0]),
+          thickness:    p.thick ?? 0,
+        });
+      }
       // Pad (fuse) / Pocket (cut) against an explicitly picked target solid.
       const boolOp = Math.round(p.op ?? 0);
       if ((boolOp === 1 || boolOp === 2) && targetSolidId) {
@@ -430,16 +445,18 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     }
     store.log('Op3D: all input shapes found in registry ✓', 'info');
 
-    // ── Validate Pad/Pocket target (E2) ──────────────────────────────────────
-    const boolOp = req.op === 'extrude' ? Math.round(snap.op ?? 0) : 0;
-    if (boolOp !== 0) {
+    // ── Validate Pad/Pocket + Up-to-Face target (E2 / E5) ────────────────────
+    const boolOp  = req.op === 'extrude' ? Math.round(snap.op ?? 0) : 0;
+    const upToFace = req.op === 'extrude' && Math.round(snap.endMode ?? 0) === 3;
+    if (boolOp !== 0 || upToFace) {
       if (!targetSolidId) {
-        const msg = `Pick a ${boolOp === 1 ? 'Pad (Add)' : 'Pocket (Remove)'} target solid first.`;
+        const msg = upToFace ? 'Pick an Up-to-Face target solid first.'
+          : `Pick a ${boolOp === 1 ? 'Pad (Add)' : 'Pocket (Remove)'} target solid first.`;
         setApplyErr(msg); store.log(`Op3D FAIL: ${msg}`, 'error');
         return;
       }
       if (!reg.getShape(targetSolidId)) {
-        const msg = 'Boolean target solid not found — re-pick it.';
+        const msg = 'Target solid not found — re-pick it.';
         setApplyErr(msg); store.log(`Op3D FAIL: ${msg}`, 'error');
         return;
       }
@@ -546,17 +563,22 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         </div>
 
         <div style={{ padding:'12px 14px', display:'flex', flexDirection:'column', gap:12 }}>
-          {req.op === 'extrude'  && (
+          {req.op === 'extrude'  && (() => {
+            const endM = Math.round(params.endMode ?? 0);
+            const upTo = endM === 3;
+            const needTarget = upTo || Math.round(params.op ?? 0) !== 0;
+            return (
             <>
-              <ToggleRow label="Limit" k="endMode" opts={[{label:'Blind',v:0},{label:'Sym',v:1},{label:'2-Sided',v:2}]} params={params} onChange={set} />
-              <SliderRow label={Math.round(params.endMode??0)===1 ? 'Length (mm)' : 'Limit 1 (mm)'} k="h" min={0.01} max={500} step={0.5} params={params} onChange={set} />
-              {Math.round(params.endMode??0)===2 && <SliderRow label="Limit 2 (mm)" k="h2" min={0.01} max={500} step={0.5} params={params} onChange={set} />}
+              <ToggleRow label="Limit" k="endMode" opts={[{label:'Blind',v:0},{label:'Sym',v:1},{label:'2-Sided',v:2},{label:'↥ Face',v:3}]} params={params} onChange={set} />
+              {!upTo && <SliderRow label={endM===1 ? 'Length (mm)' : 'Limit 1 (mm)'} k="h" min={0.01} max={500} step={0.5} params={params} onChange={set} />}
+              {endM===2 && <SliderRow label="Limit 2 (mm)" k="h2" min={0.01} max={500} step={0.5} params={params} onChange={set} />}
+              {upTo && <div style={{ fontSize:10, color:'var(--text-muted)', fontStyle:'italic' }}>Extrudes up to the first surface of the picked target solid.</div>}
               <ToggleRow label="Reverse" k="reverse" opts={[{label:'Off',v:0},{label:'On',v:1}]} params={params} onChange={set} />
-              <SliderRow label="Draft (°)" k="draft" min={-30} max={30} step={0.5} params={params} onChange={set} />
-              <SliderRow label="Wall (mm)" k="thick" min={0} max={20} step={0.5} params={params} onChange={set} />
+              {!upTo && <SliderRow label="Draft (°)" k="draft" min={-30} max={30} step={0.5} params={params} onChange={set} />}
+              {!upTo && <SliderRow label="Wall (mm)" k="thick" min={0} max={20} step={0.5} params={params} onChange={set} />}
               <div style={{ height:1, background:'var(--border-soft)', margin:'2px 0' }} />
               <ToggleRow label="Result" k="op" opts={[{label:'New',v:0},{label:'Pad',v:1},{label:'Pocket',v:2}]} params={params} onChange={set} />
-              {Math.round(params.op??0)!==0 && (
+              {needTarget && (
                 <TargetPickRow
                   targetName={targetSolidId ? (useCADStore.getState().nodes[targetSolidId]?.name ?? '—') : null}
                   isPicking={isPicking}
@@ -565,7 +587,8 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
                 />
               )}
             </>
-          )}
+            );
+          })()}
           {req.op === 'revolve'  && <><SliderRow label="Angle (°)" k="angle" min={1} max={360} step={1} params={params} onChange={set} /><ToggleRow label="Axis" k="axis" opts={[{label:'X',v:0},{label:'Y',v:1},{label:'Z',v:2}]} params={params} onChange={set} /></>}
           {req.op === 'loft'     && <><ToggleRow label="Type"    k="solid" opts={[{label:'Solid',v:1},{label:'Shell',v:0}]}   params={params} onChange={set} /><ToggleRow label="Surface" k="ruled" opts={[{label:'Smooth',v:0},{label:'Ruled',v:1}]} params={params} onChange={set} /></>}
           {req.op === 'sweep'    && <div style={{ fontSize:11, color:'var(--text-muted)', fontStyle:'italic', textAlign:'center', padding:'8px 0' }}>Sweeps profile [0] along spine [1].</div>}

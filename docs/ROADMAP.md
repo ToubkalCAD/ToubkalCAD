@@ -115,14 +115,20 @@ the boolean step reuses `OccBooleanService`.
   the pull direction (verified: 10° on a 10³ box → frustum vol 688.8). UI: Draft (°)
   slider. Pipeline order: `profile → prism → draft → boolean`. Curved walls (circular
   profiles) left straight in this pass; shares the kernel with **M3**.
-- **E5** Up-to-Plane / Up-to-Face. Over-extrude past the target → `BRepAlgoAPI_Splitter`
-  with the bounding face/plane → keep the piece touching the sketch plane
-  (`TopExp_Explorer` filter). Reuses `OccFaceService.extractPlanarFaces` (S2) for face pick.
-- **E6** Up-to-Next / Up-to-Last. Over-extrude through the model → `BRepAlgoAPI_Common`
-  / `Splitter` → isolate the first (Next) or furthest (Last) intersecting volume.
-  Builds on E5's filter.
-- **E7** Multi-profile / Multi-Pad. Extrude several non-intersecting profiles from one
-  sketch at independent depths (per-region via `SketchRegions`).
+- **E5** ✅ *(done 2026-06-08)* Up-to-Face. `OccExtrusionService.extrudeUpToFace`
+  over-extrudes past the picked target (extent from `projRange` of target vertices),
+  `BRepAlgoAPI_Cut`s the target out, then keeps the solid touching the sketch plane
+  (min |projection| ≈ 0) — material fills base → first target surface. Reuses the E2
+  target picker (`↥ Face` limit option); errors if the profile doesn't reach the target
+  (verified: target block z[20,30] → fill z[0,20], vol 2000). *Deferred:* Up-to-Plane
+  (datum) and multi-region up-to-face.
+- **E6** Up-to-Next / Up-to-Last. Generalise E5's filter: pick the first vs furthest
+  intersecting volume across the whole model rather than one explicit target.
+- **E7** ✅ *(done 2026-06-08)* Multi-profile (Multi-Pad). `resolveAllProfileWires`
+  detects every enclosed region (`SketchRegions`); `extrudeProfiles` extrudes each with
+  the same options and groups them into one `TopoDS_Compound` (`BRep_Builder`). The
+  Ribbon Extrude now feeds all regions to the panel (verified: 6²+4² profiles → compound
+  vol 260). *Deferred:* per-profile independent depths (true variable Multi-Pad).
 
 ### Track C — Topology converters (Chili3D ToFace/ToWire/ToShell/ToSolid)
 - **C1** Wire→Face, Faces→Shell (sewing), Shell→Solid, with open-topology error handling.
@@ -146,5 +152,6 @@ the boolean step reuses `OccBooleanService`.
 4. **E1 → E2** (Pad/Pocket + end conditions) ✅ + **E4 Draft** ✅ + **E3 Thick** ✅ —
    extrusion is now a real additive/subtractive, taperable, hollowable feature.
 5. **R3 / R4** (contextual tabs + customization).
-6. **E5/E6 Up-to-* limits** — depend on robust face picking (S2).
+6. **E5 Up-to-Face** ✅ + **E7 Multi-Pad** ✅ — done. Remaining: **E6 Up-to-Next/Last**
+   + per-profile depths.
 7. **P1 feature tree** last (also fixes the E2 re-edit visibility gap).

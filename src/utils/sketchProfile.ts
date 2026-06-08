@@ -51,3 +51,45 @@ export function resolveProfileWire(sketchId: string, childIds: string[]): string
   });
   return id;
 }
+
+/**
+ * Like resolveProfileWire, but returns EVERY enclosed region's profile wire
+ * (Multi-Pad / E7). A single already-closed wire short-circuits to itself; a
+ * multi-region sketch yields one "Region N" sketch_wire per region.
+ */
+export function resolveAllProfileWires(sketchId: string, childIds: string[]): string[] {
+  const oc = window.oc;
+  if (!oc) return [];
+  const st = useCADStore.getState();
+  const reg = CADGeometryRegistry.getInstance();
+
+  if (childIds.length === 1) {
+    const w = reg.getShape(childIds[0]);
+    if (w && OccSketchService.wireMakesFace(oc, w)) return [childIds[0]];
+  }
+
+  const ents = childIds
+    .map((id) => toRegionEntity(id, st.nodes[id]?.params?.sketchGeom))
+    .filter((e): e is RegionEntity => !!e);
+  const regions = findRegions(ents);
+  if (!regions.length) return [];
+
+  const wp = st.nodes[childIds[0]]?.params?.workplane;
+  const geomOf = (id: string) => useCADStore.getState().nodes[id]?.params?.sketchGeom;
+  const ids: string[] = [];
+
+  regions.forEach((rg, i) => {
+    const { wire } = OccSketchService.buildRegionProfileWire(oc, rg, geomOf, wp);
+    const id = crypto.randomUUID();
+    reg.registerShape(id, wire);
+    st.addNode({
+      id, name: regions.length > 1 ? `Region ${i + 1}` : 'Region', type: 'sketch_wire',
+      visible: true, locked: false, parentId: sketchId, notes: '',
+      transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
+      material:  { color: 0x00aa66, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
+      params: { workplane: wp, region: true },
+    });
+    ids.push(id);
+  });
+  return ids;
+}

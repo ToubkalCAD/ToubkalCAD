@@ -153,6 +153,51 @@ function subtract(a, b) {
   const s = op.Shape(); op.delete(); return s;
 }
 
+/** Mirror of OccExtrusionService.projRange. */
+function projRange(shape, base, dir) {
+  let min = Infinity, max = -Infinity;
+  const exp = new oc.TopExp_Explorer_2(shape, oc.TopAbs_ShapeEnum.TopAbs_VERTEX, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+  while (exp.More()) {
+    const p = oc.BRep_Tool.Pnt(oc.TopoDS.Vertex_1(exp.Current()));
+    const proj = (p.X() - base[0]) * dir[0] + (p.Y() - base[1]) * dir[1] + (p.Z() - base[2]) * dir[2];
+    if (proj < min) min = proj;
+    if (proj > max) max = proj;
+    exp.Next();
+  }
+  return { min, max };
+}
+
+/** Mirror of OccExtrusionService.extrudeUpToFace. */
+function extrudeUpToFace(wire, dir, target, neutralPoint = [0, 0, 0]) {
+  let [dx, dy, dz] = dir; const len = Math.hypot(dx, dy, dz); dx /= len; dy /= len; dz /= len;
+  const d = [dx, dy, dz];
+  const over = projRange(target, neutralPoint, d).max + 10;
+  const fm = new oc.BRepBuilderAPI_MakeFace_15(wire, true);
+  const vec = new oc.gp_Vec_4(dx * over, dy * over, dz * over);
+  const prism = new oc.BRepPrimAPI_MakePrism_1(fm.Shape(), vec, false, true).Shape();
+  const cut = new oc.BRepAlgoAPI_Cut_3(prism, target, new oc.Message_ProgressRange_1());
+  cut.Build(new oc.Message_ProgressRange_1());
+  const trimmed = cut.Shape();
+  let best = null, bestKey = Infinity;
+  const exp = new oc.TopExp_Explorer_2(trimmed, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+  while (exp.More()) {
+    const sol = oc.TopoDS.Solid_1(exp.Current());
+    const key = Math.abs(projRange(sol, neutralPoint, d).min);
+    if (key < bestKey) { bestKey = key; best = sol; }
+    exp.Next();
+  }
+  return best;
+}
+
+/** Mirror of OccExtrusionService.extrudeProfiles. */
+function extrudeProfiles(wires, height) {
+  const builder = new oc.BRep_Builder();
+  const compound = new oc.TopoDS_Compound();
+  builder.MakeCompound(compound);
+  for (const w of wires) builder.Add(compound, extrude(w, { height }));
+  return compound;
+}
+
 // ─── E1 — End conditions + reverse ────────────────────────────────────────────
 // 10×10 square on XY, extruded along +Z. Volume = 100·length; centroid Z = mid-span.
 console.log('\nE1 — end conditions + reverse (10×10 profile)');
@@ -215,6 +260,23 @@ console.log('\nE3 — thick / thin-wall');
 {
   const tube = applyThickWall(extrude(squareWire(10), { height: 10 }), 2, [0, 0, 1]);
   check('wall t=2 (caps open)  → 1000 − 6×6×10 = 640', measure(tube), { vol: 640, cz: 5 });
+}
+
+// ─── E5 — Up to Face ──────────────────────────────────────────────────────────
+// Target block z[20,30]; profile at z=0 extruded "up to face" → fills z[0,20].
+console.log('\nE5 — up to face');
+{
+  const target = extrude(squareWire(10, 20), { height: 10 });   // block z[20,30]
+  const up = extrudeUpToFace(squareWire(10), [0, 0, 1], target); // base piece z[0,20]
+  check('up-to-face (block z[20,30]) → z[0,20] = 2000', measure(up), { vol: 2000, cz: 10 });
+}
+
+// ─── E7 — Multi-profile (compound) ────────────────────────────────────────────
+// Two disjoint squares (6² and 4²) extruded h=5 → one compound, volumes summed.
+console.log('\nE7 — multi-profile');
+{
+  const comp = extrudeProfiles([squareWire(6, 0, 0, 0), squareWire(4, 0, 10, 0)], 5);
+  check('two profiles → 6²·5 + 4²·5 = 260', measure(comp), { vol: 260 });
 }
 
 // ─── Summary ──────────────────────────────────────────────────────────────────

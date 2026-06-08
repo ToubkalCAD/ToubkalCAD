@@ -229,6 +229,112 @@ export class OccExtrusionService {
     }
   }
 
+  /** Min/max signed projection of a shape's vertices onto `dir` from `base`. */
+  private static projRange(
+    oc:   any,
+    shape: any,
+    base: [number, number, number],
+    dir:  [number, number, number],
+  ): { min: number; max: number } {
+    let min = Infinity, max = -Infinity;
+    const exp = new oc.TopExp_Explorer_2(
+      shape, oc.TopAbs_ShapeEnum.TopAbs_VERTEX, oc.TopAbs_ShapeEnum.TopAbs_SHAPE,
+    );
+    while (exp.More()) {
+      const v = oc.TopoDS.Vertex_1(exp.Current());
+      const p = oc.BRep_Tool.Pnt(v);
+      const proj = (p.X() - base[0]) * dir[0] + (p.Y() - base[1]) * dir[1] + (p.Z() - base[2]) * dir[2];
+      p.delete();
+      if (proj < min) min = proj;
+      if (proj > max) max = proj;
+      exp.Next();
+    }
+    exp.delete();
+    return { min, max };
+  }
+
+  /**
+   * Extrude a profile up to the first surface of a target solid (CATIA
+   * "Up to Next / Up to Face"). Over-extrudes past the target, cuts the target
+   * out, then keeps the piece touching the sketch plane — so material fills from
+   * the base to where it first meets the target.
+   */
+  static extrudeUpToFace(
+    oc:     any,
+    wire:   any,
+    opts:   { direction?: [number, number, number]; reverse?: boolean; neutralPoint?: [number, number, number] },
+    target: any,
+  ): any {
+    const { direction = [0, 1, 0], reverse = false, neutralPoint = [0, 0, 0] } = opts;
+    let [dx, dy, dz] = direction;
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-10) throw new Error('Extrusion direction is zero-length');
+    dx /= len; dy /= len; dz /= len;
+    if (reverse) { dx = -dx; dy = -dy; dz = -dz; }
+    const dir: [number, number, number] = [dx, dy, dz];
+
+    // How far the target reaches along the axis from the sketch plane.
+    const tr = OccExtrusionService.projRange(oc, target, neutralPoint, dir);
+    if (tr.max <= 1e-6) {
+      throw new Error('Up-to-Face: the target solid is not ahead of the sketch plane.');
+    }
+    const over = tr.max + 10; // extrude comfortably past the far side, then trim
+
+    const scope = new WasmScope();
+    try {
+      const faceMaker = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
+      if (!faceMaker.IsDone()) throw new Error('Up-to-Face: face creation failed (closed planar wire required).');
+      const vec   = scope.keep(new oc.gp_Vec_4(dx * over, dy * over, dz * over));
+      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(faceMaker.Shape(), vec, false, true));
+      if (!prism.IsDone()) throw new Error('Up-to-Face: over-extrude failed.');
+
+      // Subtract the target → the prism is trimmed at the target's near face.
+      const cut = scope.keep(new oc.BRepAlgoAPI_Cut_3(prism.Shape(), target, new oc.Message_ProgressRange_1()));
+      cut.Build(new oc.Message_ProgressRange_1());
+      if (!cut.IsDone()) throw new Error('Up-to-Face: trim (cut) failed.');
+      const trimmed = cut.Shape();
+
+      // Keep the solid touching the sketch plane (min |projection| ≈ 0).
+      let best: any = null, bestKey = Infinity, bestMax = 0;
+      const exp = scope.keep(new oc.TopExp_Explorer_2(
+        trimmed, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE,
+      ));
+      while (exp.More()) {
+        const sol = oc.TopoDS.Solid_1(exp.Current());
+        const pr  = OccExtrusionService.projRange(oc, sol, neutralPoint, dir);
+        const key = Math.abs(pr.min);
+        if (key < bestKey) { bestKey = key; best = sol; bestMax = pr.max; }
+        exp.Next();
+      }
+      if (!best) throw new Error('Up-to-Face: produced no solid.');
+      if (bestMax >= over - 1e-3) {
+        throw new Error('Up-to-Face: the profile does not reach the target solid.');
+      }
+      return best;
+    } finally {
+      scope.free();
+    }
+  }
+
+  /**
+   * Extrude several non-intersecting closed profiles (Multi-Pad). Each wire is
+   * extruded with the same options; the results are grouped into one compound
+   * (BRep_Builder) so a sketch with multiple regions becomes a single feature.
+   */
+  static extrudeProfiles(oc: any, wires: any[], opts: ExtrudeOptions): any {
+    if (!wires.length) throw new Error('Multi-extrude: no profiles.');
+    if (wires.length === 1) return OccExtrusionService.extrude(oc, wires[0], opts);
+
+    const builder  = new oc.BRep_Builder();
+    const compound = new oc.TopoDS_Compound();   // returned → not freed here
+    builder.MakeCompound(compound);
+    for (const w of wires) {
+      const solid = OccExtrusionService.extrude(oc, w, opts);
+      builder.Add(compound, solid);
+    }
+    return compound;
+  }
+
   /**
    * Backwards-compatible blind extrusion.
    * @param direction  Unit normal of the sketch plane (extrusion axis).
