@@ -141,6 +141,14 @@ the boolean step reuses `OccBooleanService`.
 - **X1** Mesh export: STL / OBJ / glTF / 3MF.
 - **X2** Multi-face selection (Ctrl) + surface-type filter (`GeomAdaptor_Surface.GetType()`).
 
+### Track D — Reference geometry (datum planes / axes / points)
+Option-based construction geometry (Offset/Angle/3-Point/Midplane/Tangent…) as
+first-class tree features you create then sketch on later, Fusion-style. Replaces the
+raw origin+normal Custom-plane UX. Full design + phased plan (D0–D13) + verified OCC
+construction cheat-sheet in **[REFERENCE-GEOMETRY.md](./REFERENCE-GEOMETRY.md)**.
+Keystone is **D0** (datum node model + persistent amber rendering); **D13** associativity
+depends on **P1**.
+
 ### Track P — Parametric feature tree (deepest)
 - **P1** Feature DAG + downstream recompute with persistent naming
   (`.Generated()`/`.Modified()`) so child features survive parent edits.
