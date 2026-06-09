@@ -60,6 +60,7 @@ export const TreeContextMenu: React.FC = () => {
   const isOp3D            = !isBlendResult && REEDITABLE_OP.has(node.type) && !!node.params?.opType;
   const hasShape          = SOLID_TYPES.has(node.type) && !!CADGeometryRegistry.getInstance().getShape(menu.nodeId);
   const isSolid           = hasShape; // eligible for per-edge fillet/chamfer + boolean
+  const isDatumPlane      = node.type === 'datum_plane';
 
   // Sketch wire IDs available for 3D operations (sketch container) or just this wire
   const wireIds: string[] = isSketchWire
@@ -69,7 +70,7 @@ export const TreeContextMenu: React.FC = () => {
       : [];
 
   // Nothing to show for unrecognised types
-  if (!isSketchContainer && !isSketchWire && !isOp3D && !isBlendResult && !isSolid) return null;
+  if (!isSketchContainer && !isSketchWire && !isOp3D && !isBlendResult && !isSolid && !isDatumPlane) return null;
 
   const firstWireId = wireIds[0];
 
@@ -116,6 +117,18 @@ export const TreeContextMenu: React.FC = () => {
     const opType  = node.params?.opType as Op3DType;
     const wIds    = node.params?.targetWireIds as string[] | undefined ?? [];
     show3DOpPanel(opType, wIds, menu.nodeId);
+  };
+
+  // Start a sketch on a datum plane (D9) — reuses startSketchSession.
+  const doSketchOnDatum = () => {
+    closeMenu();
+    const wp = node.params?.workplane;
+    if (!wp) { useCADStore.getState().log('Datum plane has no workplane.', 'error'); return; }
+    const st = useCADStore.getState();
+    if (st.sketchSession) { st.log('Quit the current sketch before starting a new one.', 'warn'); return; }
+    st.startSketchSession(wp);
+    st.setInteractionMode('SKETCH_LINE');
+    st.log(`Sketching on ${node.name}.`, 'success');
   };
 
   // Per-edge fillet / chamfer on a solid → opens BlendActionPanel
@@ -284,6 +297,13 @@ export const TreeContextMenu: React.FC = () => {
         </>
       )}
 
+      {/* ── Datum plane: Create Sketch (D9) ───────────────────────────────── */}
+      {isDatumPlane && (
+        <div style={{ padding: '3px 0 1px' }}>
+          <Item icon="✦" label="Create Sketch" accent="#f0a30a" onClick={doSketchOnDatum} />
+        </div>
+      )}
+
       {/* ── Sketch wire: 3D ops ───────────────────────────────────────────── */}
       {isSketchWire && (
         <>
@@ -304,10 +324,12 @@ const NODE_ICON: Partial<Record<NodeType, string>> = {
   sketch: '✦', sketch_wire: '╱',
   extrusion: '↑', revolve: '↻', loft: '⊿', sweep: '⌇', compound: '◈',
   box: '◻', cylinder: '⬡', sphere: '●', boolean_operation: '⊕',
+  datum_plane: '▱',
 };
 
 const NODE_COLOR: Partial<Record<NodeType, string>> = {
   sketch: '#ff9900', sketch_wire: '#ffcc00',
   extrusion: '#aa44cc', revolve: '#cc4488', loft: '#cc8844', sweep: '#44bbcc', compound: '#888888',
   box: '#5588cc', cylinder: '#44aa66', sphere: '#cc6644', boolean_operation: '#ccaa22',
+  datum_plane: '#f0a30a',
 };

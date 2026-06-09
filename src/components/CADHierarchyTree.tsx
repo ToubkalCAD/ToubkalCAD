@@ -196,6 +196,7 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
           const isSolidType = SOLID_TYPES.has(node.type);
           const isContextable = node.type === 'sketch'
             || node.type === 'sketch_wire'
+            || node.type === 'datum_plane'
             || isSolidType;
           if (isContextable) {
             e.preventDefault();

@@ -61,7 +61,8 @@ export type InteractionMode =
   | 'ASSEMBLY_CONCENTRIC' // pick two cylindrical faces → align their axes (peg-in-hole)
   | 'MIRROR_AXIS_PICK'    // pick 2 points on the sketch plane → mirror line for a 2D sketch mirror
   | 'ARRAY_CENTER_PICK'   // pick 1 point on the sketch plane → centre for a 2D circular array
-  | 'EXTRUDE_TARGET_PICK'; // pick an existing solid as the Pad/Pocket boolean target (one-shot)
+  | 'EXTRUDE_TARGET_PICK' // pick an existing solid as the Pad/Pocket boolean target (one-shot)
+  | 'DATUM_SKETCH';       // pick a datum plane in the viewport → start a sketch on it (D9)
 
 export type BooleanOp = 'CUT' | 'FUSE' | 'COMMON';
 

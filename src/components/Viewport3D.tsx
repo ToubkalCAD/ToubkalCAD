@@ -28,6 +28,7 @@ import { useCADAssemblyMate }   from '../hooks/useCADAssemblyMate';
 import { useCADAssemblyConcentric } from '../hooks/useCADAssemblyConcentric';
 import { useCADSketchTransformPick } from '../hooks/useCADSketchTransformPick';
 import { useCADExtrudeTargetPick } from '../hooks/useCADExtrudeTargetPick';
+import { useCADDatumSketchPick } from '../hooks/useCADDatumSketchPick';
 import { CADCameraService }    from '../services/CADCameraService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
 import { SketchOverlay }       from './SketchOverlay';
@@ -70,6 +71,7 @@ function buildDatumPlaneGroup(id: string, wp: {
   group.add(face, border);
   group.applyMatrix4(new THREE.Matrix4().makeBasis(u, v, n).setPosition(o)); // local X→u, Y→v, Z→n
   group.userData.datumNodeId = id;
+  face.userData.datumNodeId  = id;   // raycast target for DATUM_SKETCH pick (D9)
   group.renderOrder = 997;
   return group;
 }
@@ -136,6 +138,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── Pad/Pocket boolean target picking (EXTRUDE_TARGET_PICK — E2) ──────────────
   useCADExtrudeTargetPick(containerRef, sceneRef, cameraRef);
+
+  // ─── Sketch-on-datum-plane picking (DATUM_SKETCH — D9) ─────────────────────────
+  useCADDatumSketchPick(containerRef, sceneRef, cameraRef);
 
   // ─── Camera: animate to view normal to workplane when sketch starts ──────────
   useEffect(() => {

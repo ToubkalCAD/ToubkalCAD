@@ -61,7 +61,7 @@ const RIBBON_TABS: RibbonTab[] = [
     { label: 'Curves',      ids: ['arc3p', 'ellipse', 'bezier', 'spline'] },
     { label: 'Advanced',    ids: ['roundrect', 'polygon'] },
     { label: 'Modify',      ids: ['trim', 'extend', 'split', 'powertrim', 'region'] },
-    { label: 'Datum',       ids: ['sketch-face'] },
+    { label: 'Datum',       ids: ['sketch-face', 'sketch-datum'] },
     { label: 'Constrain',   ids: ['constraints'] },
   ] },
   { id: 'model', label: 'Model', groups: [
@@ -145,6 +145,12 @@ export const Ribbon: React.FC = () => {
   const datumOrigin = () => {
     const st = useCADStore.getState();
     (['XY', 'YZ', 'ZX'] as const).forEach((k) => st.createDatumPlane(STANDARD_WORKPLANES[k], 'origin'));
+  };
+  const sketchOnDatum = () => {
+    if (useCADStore.getState().sketchSession) { log('Quit the current sketch before starting a new one.', 'warn'); return; }
+    const hasDatum = Object.values(useCADStore.getState().nodes).some((n) => n.type === 'datum_plane');
+    if (!hasDatum) { log('No reference planes yet — create one first (Model ▸ Datum).', 'warn'); return; }
+    setMode('DATUM_SKETCH');
   };
   const datumOffset = async () => {
     const v = await showParamModal('Offset Plane (from XY)', [
@@ -667,6 +673,7 @@ export const Ribbon: React.FC = () => {
     powertrim: { id:'powertrim', icon:'powertrim', label:'Power Trim', run:() => startEdit('EDIT_POWER_TRIM'), active: mode==='EDIT_POWER_TRIM', enabled:canConstrain, accent:'#cc6633' },
     region:    { id:'region', icon:'region', label:'Region', run:closeRegions, enabled:canConstrain, accent:'#33aa77' },
     'sketch-face':{id:'sketch-face',icon:'plane',label:'On Face', run:sketchOnFace, active: mode==='FACE_SKETCH', enabled:hasAnySolid && !sketchSession, accent:SK },
+    'sketch-datum':{id:'sketch-datum',icon:'plane',label:'On Datum', run:sketchOnDatum, active: mode==='DATUM_SKETCH', enabled:!sketchSession, accent:SK },
     'datum-origin':{id:'datum-origin',icon:'plane',label:'Origin Planes', run:datumOrigin, accent:'#f0a30a' },
     'datum-offset':{id:'datum-offset',icon:'plane',label:'Offset Plane', run:datumOffset, accent:'#f0a30a' },
     // primitives
