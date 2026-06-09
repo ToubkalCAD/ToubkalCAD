@@ -43,6 +43,45 @@ interface Viewport3DProps {
   ) => void;
 }
 
+// ─── Datum-plane visual (Track D, D0) ─────────────────────────────────────────
+// Fusion-style construction plane: translucent amber face + darker border,
+// oriented from the node's workplane (u/v/normal). depthWrite:false so it never
+// clips solids behind it. Tagged datumNodeId (not cadNodeId) so the solid pick
+// hooks ignore it.
+const DATUM_SIZE = 100;
+function buildDatumPlaneGroup(id: string, wp: {
+  origin: [number,number,number]; normal: [number,number,number];
+  uAxis: [number,number,number]; vAxis: [number,number,number];
+}): THREE.Group {
+  const u = new THREE.Vector3(...wp.uAxis).normalize();
+  const v = new THREE.Vector3(...wp.vAxis).normalize();
+  const n = new THREE.Vector3(...wp.normal).normalize();
+  const o = new THREE.Vector3(...wp.origin);
+
+  const geo  = new THREE.PlaneGeometry(DATUM_SIZE, DATUM_SIZE);
+  const face = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color: 0xf0a30a, side: THREE.DoubleSide, transparent: true, opacity: 0.16, depthWrite: false,
+  }));
+  const border = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geo),
+    new THREE.LineBasicMaterial({ color: 0xd47a00, transparent: true, opacity: 0.85, depthWrite: false }),
+  );
+  const group = new THREE.Group();
+  group.add(face, border);
+  group.applyMatrix4(new THREE.Matrix4().makeBasis(u, v, n).setPosition(o)); // local X→u, Y→v, Z→n
+  group.userData.datumNodeId = id;
+  group.renderOrder = 997;
+  return group;
+}
+
+function disposeGroup(g: THREE.Object3D) {
+  g.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.geometry) m.geometry.dispose();
+    if (m.material) (Array.isArray(m.material) ? m.material : [m.material]).forEach((x) => x.dispose());
+  });
+}
+
 
 export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const containerRef      = useRef<HTMLDivElement>(null);
@@ -51,6 +90,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const orbitRef          = useRef<OrbitControls | null>(null);
   const transformRef      = useRef<TransformControls | null>(null);
   const workplaneGridRef  = useRef<THREE.Object3D | null>(null);
+  const datumGroupsRef    = useRef<Map<string, THREE.Group>>(new Map()); // datum_plane visuals by node id
   const restoreCameraRef  = useRef<(() => void) | null>(null); // stored restore fn
 
   // Measurement — track scene objects for cleanup
@@ -65,6 +105,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const interactionMode = useCADStore((s) => s.interactionMode);
   const activeWorkplane = useCADStore((s) => s.activeWorkplane);
   const sketchSession   = useCADStore((s) => s.sketchSession);
+  const nodes           = useCADStore((s) => s.nodes);
   const updateTransform = useCADStore((s) => s.updateTransform);
   const setTransformLive = useCADStore((s) => s.setTransformLive);
 
@@ -220,6 +261,31 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   // sketchSession dependency ensures grid appears/disappears with the session
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactionMode, activeWorkplane, !!sketchSession]);
+
+  // ─── Persistent datum-plane visuals (Track D, D0) ────────────────────────────
+  // Sync amber construction planes to the datum_plane nodes in the store: add on
+  // create, remove on delete, follow visibility. (Workplane edits rebuild later.)
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    const groups = datumGroupsRef.current;
+    const seen = new Set<string>();
+
+    for (const id in nodes) {
+      const node = nodes[id];
+      if (node.type !== 'datum_plane') continue;
+      const wp = node.params?.workplane;
+      if (!wp) continue;
+      seen.add(id);
+      let g = groups.get(id);
+      if (!g) { g = buildDatumPlaneGroup(id, wp); scene.add(g); groups.set(id, g); }
+      g.visible = node.visible;
+    }
+
+    for (const [id, g] of groups) {
+      if (!seen.has(id)) { scene.remove(g); disposeGroup(g); groups.delete(id); }
+    }
+  }, [nodes, sceneRef]);
 
   // ─── Hotkeys ────────────────────────────────────────────────────────────────
   useCADGizmoHotkeys({

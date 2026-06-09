@@ -13,7 +13,9 @@ export type NodeType =
   | 'extrusion' | 'boolean_operation' | 'compound'
   | 'sketch' | 'sketch_wire'
   | 'revolve' | 'sweep' | 'loft'
-  | 'mirror' | 'pattern';
+  | 'mirror' | 'pattern'
+  // Reference geometry (Track D) — carry no OCC solid; render from params.
+  | 'datum_plane' | 'datum_axis' | 'datum_point';
 
 // ─── Workplane ────────────────────────────────────────────────────────────────
 
@@ -191,6 +193,8 @@ interface CADState {
   // ── Actions ────────────────────────────────────────────────────────────────
 
   addNode:            (node: Omit<CADNode, 'children'>) => void;
+  /** Create a reference (datum) plane node from a workplane. Returns its id. */
+  createDatumPlane:   (wp: Workplane, method?: string, refs?: any[]) => string;
   deleteNode:         (id: string) => void;
   duplicateNode:      (id: string) => string;
   renameNode:         (id: string, name: string) => void;
@@ -355,6 +359,9 @@ export const NODE_TYPE_COLORS: Record<NodeType, number> = {
   loft:              0xcc8844,
   mirror:            0x4488cc,
   pattern:           0x8844cc,
+  datum_plane:       0xf0a30a,   // Fusion amber
+  datum_axis:        0xf0a30a,
+  datum_point:       0xf0a30a,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -622,6 +629,20 @@ export const useCADStore = create<CADState>((set, get) => ({
     set({ nodes: updatedNodes, rootIds: updatedRootIds,
           past: [...get().past, action], future: [] });
     get().log(`Created: ${newNode.name} (${newNode.type})`, 'success');
+  },
+
+  createDatumPlane: (wp, method = 'custom', refs = []) => {
+    const id = makeId();
+    const count = Object.values(get().nodes).filter((n) => n.type === 'datum_plane').length + 1;
+    const name  = wp.label && wp.label !== 'Custom' ? `Plane ${count} [${wp.label}]` : `Plane ${count}`;
+    get().addNode({
+      id, name, type: 'datum_plane',
+      visible: true, locked: false, parentId: null, notes: '',
+      transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
+      material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS.datum_plane },
+      params: { datum: 'plane', workplane: wp, method, refs },
+    });
+    return id;
   },
 
   deleteNode: (id) => {

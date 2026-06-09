@@ -14,7 +14,7 @@
 // ============================================================
 
 import React, { useState } from 'react';
-import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS, InteractionMode } from '../store/cadStore';
+import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS, InteractionMode, STANDARD_WORKPLANES } from '../store/cadStore';
 import { Icon, IconName }            from './Icon';
 import { showParamModal }           from './ParameterModal';
 import { OccPrimitivesService }     from '../services/OccPrimitivesService';
@@ -68,6 +68,7 @@ const RIBBON_TABS: RibbonTab[] = [
     { label: 'Primitives',  ids: ['box', 'cylinder', 'sphere', 'torus', 'cone'] },
     { label: 'From Sketch', ids: ['extrude', 'revolve', 'loft', 'sweep'] },
     { label: 'Transform',   ids: ['mirror', 'array-lin', 'array-circ'] },
+    { label: 'Datum',       ids: ['datum-origin', 'datum-offset'] },
     { label: 'Assembly',    ids: ['mate', 'align', 'concentric'] },
   ] },
   { id: 'modify', label: 'Modify', groups: [
@@ -138,6 +139,20 @@ export const Ribbon: React.FC = () => {
     if (useCADStore.getState().sketchSession) { log('Quit the current sketch before starting a new one.', 'warn'); return; }
     if (!window.oc) { log('OCC kernel not initialized.', 'error'); return; }
     setMode('FACE_SKETCH');
+  };
+
+  // ─── Reference geometry (Track D) — datum planes are pure data, no OCC needed ──
+  const datumOrigin = () => {
+    const st = useCADStore.getState();
+    (['XY', 'YZ', 'ZX'] as const).forEach((k) => st.createDatumPlane(STANDARD_WORKPLANES[k], 'origin'));
+  };
+  const datumOffset = async () => {
+    const v = await showParamModal('Offset Plane (from XY)', [
+      { key: 'd', label: 'Distance', default: 20, unit: 'mm' },
+    ]);
+    if (!v) return;
+    const wp = { ...STANDARD_WORKPLANES.XY, label: 'Custom', origin: [0, 0, v.d] as [number, number, number] };
+    useCADStore.getState().createDatumPlane(wp, 'offset');
   };
 
   // ─── Helpers (verbatim from CADToolbar) ─────────────────────────────────────
@@ -652,6 +667,8 @@ export const Ribbon: React.FC = () => {
     powertrim: { id:'powertrim', icon:'powertrim', label:'Power Trim', run:() => startEdit('EDIT_POWER_TRIM'), active: mode==='EDIT_POWER_TRIM', enabled:canConstrain, accent:'#cc6633' },
     region:    { id:'region', icon:'region', label:'Region', run:closeRegions, enabled:canConstrain, accent:'#33aa77' },
     'sketch-face':{id:'sketch-face',icon:'plane',label:'On Face', run:sketchOnFace, active: mode==='FACE_SKETCH', enabled:hasAnySolid && !sketchSession, accent:SK },
+    'datum-origin':{id:'datum-origin',icon:'plane',label:'Origin Planes', run:datumOrigin, accent:'#f0a30a' },
+    'datum-offset':{id:'datum-offset',icon:'plane',label:'Offset Plane', run:datumOffset, accent:'#f0a30a' },
     // primitives
     box:       { id:'box',       icon:'box',       label:'Box',      run:mkBox },
     cylinder:  { id:'cylinder',  icon:'cylinder',  label:'Cylinder', run:mkCyl },

@@ -33,6 +33,9 @@ const NODE_ICONS: Record<NodeType, string> = {
   loft:              '⊿',
   mirror:            '◫',
   pattern:           '▦',
+  datum_plane:       '▱',
+  datum_axis:        '⟋',
+  datum_point:       '•',
 };
 
 const NODE_COLORS: Record<NodeType, string> = {
@@ -49,6 +52,9 @@ const NODE_COLORS: Record<NodeType, string> = {
   loft:              '#cc8844',
   mirror:            '#4488cc',
   pattern:           '#8844cc',
+  datum_plane:       '#f0a30a',
+  datum_axis:        '#f0a30a',
+  datum_point:       '#f0a30a',
 };
 
 // ─── Icon button ──────────────────────────────────────────────────────────────
