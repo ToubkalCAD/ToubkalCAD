@@ -33,6 +33,59 @@ export class OccFaceService {
     return faceMap;
   }
 
+  /** Per-face world-space triangle soup for EVERY face (planar or curved). Used
+   *  to build raycastable hover overlays for face picking — unlike
+   *  extractPlanarFaces it keeps cylinders/spheres/cones so they highlight too. */
+  static extractFaceMeshes(oc: any, shape: any, deflection = 0.1): { index: number; positions: number[] }[] {
+    const out: { index: number; positions: number[] }[] = [];
+
+    const incMesh = new oc.BRepMesh_IncrementalMesh_2(shape, deflection, false, 0.5, false);
+    if (typeof incMesh.Perform === 'function') incMesh.Perform(new oc.Message_ProgressRange_1());
+
+    const faceMap = this.buildFaceMap(oc, shape);
+    try {
+      const count = faceMap.Extent();
+      for (let i = 1; i <= count; i++) {
+        const scope = new WasmScope();
+        try {
+          const face     = oc.TopoDS.Face_1(faceMap.FindKey(i));
+          const reversed = face.Orientation_1() === oc.TopAbs_Orientation.TopAbs_REVERSED;
+          const location = scope.keep(new oc.TopLoc_Location_1());
+          const polyH    = oc.BRep_Tool.Triangulation(face, location, 0);
+          if (polyH.IsNull()) continue;
+          const poly = polyH.get();
+          const trsf = scope.keep(location.Transformation());
+          const isId = location.IsIdentity();
+          const nbT  = poly.NbTriangles();
+
+          const positions: number[] = [];
+          for (let t = 1; t <= nbT; t++) {
+            const tri = poly.Triangle(t);
+            let a = tri.Value(1), b = tri.Value(2), c = tri.Value(3);
+            tri.delete();
+            if (reversed) { const tmp = a; a = b; b = tmp; }
+            for (const idx of [a, b, c]) {
+              const node = poly.Node(idx);
+              let px = node.X(), py = node.Y(), pz = node.Z();
+              if (!isId) { const p = node.Transformed(trsf); px = p.X(); py = p.Y(); pz = p.Z(); p.delete(); }
+              node.delete();
+              positions.push(px, py, pz);
+            }
+          }
+          if (positions.length >= 9) out.push({ index: i - 1, positions });
+        } catch {
+          /* skip faces without usable triangulation */
+        } finally {
+          scope.free();
+        }
+      }
+    } finally {
+      faceMap.delete();
+      incMesh.delete();
+    }
+    return out;
+  }
+
   /** All planar faces of `shape`, with triangulation + derived workplane. */
   static extractPlanarFaces(oc: any, shape: any, deflection = 0.1): PlanarFace[] {
     const out: PlanarFace[] = [];

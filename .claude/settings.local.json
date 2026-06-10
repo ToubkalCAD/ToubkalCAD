@@ -48,7 +48,9 @@
       "Bash(awk '/declare class gp_Trsf /{f=1} f{print} f&&/^}/{exit}' node_modules/opencascade.js/dist/opencascade.full.d.ts)",
       "Bash(python3 *)",
       "Bash(npx playwright *)",
-      "Bash(echo \"started pid $!\")"
+      "Bash(echo \"started pid $!\")",
+      "Bash(sed -i \"s/SKETCH_INTERSECT_PICK/INTERSECT_PICK/g\" src/hooks/useCADSketchIntersectPick.ts)",
+      "Bash(sed -i \"s/SKETCH_PROJECT_PICK/PROJECT_PICK/g; s/SKETCH_INTERSECT_PICK/INTERSECT_PICK/g\" src/components/Ribbon.tsx)"
     ]
   }
 }

@@ -89,8 +89,8 @@ export function useCADDatumSketchPick(
       const wp = st.nodes[id]?.params?.workplane as Workplane | undefined;
       if (!wp) { st.log('Datum plane has no workplane.', 'error'); return; }
       st.startSketchSession(wp);
-      st.setInteractionMode('SKETCH_LINE');
-      st.log(`Sketching on ${st.nodes[id]?.name ?? 'datum plane'}.`, 'success');
+      st.setInteractionMode('SELECT');      // no tool pre-selected — user picks a 2D shape
+      st.log(`Sketching on ${st.nodes[id]?.name ?? 'datum plane'} — pick a 2D tool to draw.`, 'success');
     };
 
     container.addEventListener('mousemove', onMove);

@@ -29,6 +29,17 @@ import { useCADAssemblyConcentric } from '../hooks/useCADAssemblyConcentric';
 import { useCADSketchTransformPick } from '../hooks/useCADSketchTransformPick';
 import { useCADExtrudeTargetPick } from '../hooks/useCADExtrudeTargetPick';
 import { useCADDatumSketchPick } from '../hooks/useCADDatumSketchPick';
+import { useCADDatumOffsetPick } from '../hooks/useCADDatumOffsetPick';
+import { useCADDatum3PointPick } from '../hooks/useCADDatum3PointPick';
+import { useCADDatumMidplanePick } from '../hooks/useCADDatumMidplanePick';
+import { useCADDatumAnglePick } from '../hooks/useCADDatumAnglePick';
+import { useCADDatumAxisPick } from '../hooks/useCADDatumAxisPick';
+import { useCADDatumPointPick } from '../hooks/useCADDatumPointPick';
+import { useCADDatumTangentPick } from '../hooks/useCADDatumTangentPick';
+import { useCADDatumCurveNormalPick } from '../hooks/useCADDatumCurveNormalPick';
+import { useCADDatum2EdgePick } from '../hooks/useCADDatum2EdgePick';
+import { useCADSketchProjectPick } from '../hooks/useCADSketchProjectPick';
+import { useCADSketchIntersectPick } from '../hooks/useCADSketchIntersectPick';
 import { CADCameraService }    from '../services/CADCameraService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
 import { SketchOverlay }       from './SketchOverlay';
@@ -72,6 +83,47 @@ function buildDatumPlaneGroup(id: string, wp: {
   group.applyMatrix4(new THREE.Matrix4().makeBasis(u, v, n).setPosition(o)); // local X→u, Y→v, Z→n
   group.userData.datumNodeId = id;
   face.userData.datumNodeId  = id;   // raycast target for DATUM_SKETCH pick (D9)
+  group.renderOrder = 997;
+  return group;
+}
+
+// Datum axis (Track D, D7): a long amber line through `origin` along `dir`, with
+// a small node marker at the anchor. Tagged datumNodeId so visibility/cleanup are
+// handled by the same datum sync, and so it can be a raycast target later.
+const AXIS_HALF = 60;
+function buildDatumAxisGroup(id: string, axis: {
+  origin: [number,number,number]; dir: [number,number,number];
+}): THREE.Group {
+  const o = new THREE.Vector3(...axis.origin);
+  const d = new THREE.Vector3(...axis.dir).normalize();
+  const a = o.clone().addScaledVector(d, -AXIS_HALF);
+  const b = o.clone().addScaledVector(d,  AXIS_HALF);
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([a, b]),
+    new THREE.LineBasicMaterial({ color: 0xf0a30a, transparent: true, opacity: 0.9, depthWrite: false }),
+  );
+  const dot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.6, 10, 10),
+    new THREE.MeshBasicMaterial({ color: 0xd47a00, depthWrite: false }),
+  );
+  dot.position.copy(o);
+  const group = new THREE.Group();
+  group.add(line, dot);
+  group.userData.datumNodeId = id;
+  group.renderOrder = 997;
+  return group;
+}
+
+// Datum point (Track D, D8): a small amber sphere marker at a world position.
+function buildDatumPointGroup(id: string, point: [number,number,number]): THREE.Group {
+  const dot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.9, 14, 14),
+    new THREE.MeshBasicMaterial({ color: 0xf0a30a, depthWrite: false }),
+  );
+  dot.position.set(point[0], point[1], point[2]);
+  const group = new THREE.Group();
+  group.add(dot);
+  group.userData.datumNodeId = id;
   group.renderOrder = 997;
   return group;
 }
@@ -141,6 +193,33 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── Sketch-on-datum-plane picking (DATUM_SKETCH — D9) ─────────────────────────
   useCADDatumSketchPick(containerRef, sceneRef, cameraRef);
+
+  // ─── Offset-plane reference picking (DATUM_OFFSET_PICK — D2) ───────────────────
+  useCADDatumOffsetPick(containerRef, sceneRef, cameraRef);
+
+  // ─── 3-point plane vertex picking (DATUM_3POINT_PICK — D4) ─────────────────────
+  useCADDatum3PointPick(containerRef, sceneRef, cameraRef);
+
+  // ─── Midplane two-face picking (DATUM_MIDPLANE_PICK — D5) ──────────────────────
+  useCADDatumMidplanePick(containerRef, sceneRef, cameraRef);
+
+  // ─── Plane-at-angle face+edge picking (DATUM_ANGLE_PICK — D3) ──────────────────
+  useCADDatumAnglePick(containerRef, sceneRef, cameraRef);
+
+  // ─── Datum-axis edge/cylinder picking (DATUM_AXIS_PICK — D7) ───────────────────
+  useCADDatumAxisPick(containerRef, sceneRef, cameraRef);
+
+  // ─── Datum-point vertex/edge picking (DATUM_POINT_PICK — D8) ───────────────────
+  useCADDatumPointPick(containerRef, sceneRef, cameraRef);
+
+  // ─── Advanced datum planes (D6): tangent / normal-to-curve / through-2-edges ───
+  useCADDatumTangentPick(containerRef, sceneRef, cameraRef);
+  useCADDatumCurveNormalPick(containerRef, sceneRef, cameraRef);
+  useCADDatum2EdgePick(containerRef, sceneRef, cameraRef);
+
+  // ─── Project (D11) / Intersect (D12) onto the active sketch ───────────────────
+  useCADSketchProjectPick(containerRef, sceneRef, cameraRef);
+  useCADSketchIntersectPick(containerRef, sceneRef, cameraRef);
 
   // ─── Camera: animate to view normal to workplane when sketch starts ──────────
   useEffect(() => {
@@ -278,12 +357,23 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
     for (const id in nodes) {
       const node = nodes[id];
-      if (node.type !== 'datum_plane') continue;
-      const wp = node.params?.workplane;
-      if (!wp) continue;
+      // Signature + builder per datum kind; the sig lets us rebuild when the
+      // geometry changes (e.g. D13 associative recompute moved the datum).
+      let sig = '';
+      let make: (() => THREE.Group) | null = null;
+      const wp = node.params?.workplane, ax = node.params?.axis, pt = node.params?.point;
+      if (node.type === 'datum_plane' && wp) {
+        sig = JSON.stringify(wp); make = () => buildDatumPlaneGroup(id, wp);
+      } else if (node.type === 'datum_axis' && ax) {
+        sig = JSON.stringify(ax); make = () => buildDatumAxisGroup(id, ax);
+      } else if (node.type === 'datum_point' && pt) {
+        sig = JSON.stringify(pt); make = () => buildDatumPointGroup(id, pt);
+      } else continue;
+
       seen.add(id);
       let g = groups.get(id);
-      if (!g) { g = buildDatumPlaneGroup(id, wp); scene.add(g); groups.set(id, g); }
+      if (g && g.userData.datumSig !== sig) { scene.remove(g); disposeGroup(g); groups.delete(id); g = undefined; }
+      if (!g) { g = make(); g.userData.datumSig = sig; scene.add(g); groups.set(id, g); }
       g.visible = node.visible;
     }
 

@@ -127,8 +127,8 @@ export const TreeContextMenu: React.FC = () => {
     const st = useCADStore.getState();
     if (st.sketchSession) { st.log('Quit the current sketch before starting a new one.', 'warn'); return; }
     st.startSketchSession(wp);
-    st.setInteractionMode('SKETCH_LINE');
-    st.log(`Sketching on ${node.name}.`, 'success');
+    st.setInteractionMode('SELECT');      // no tool pre-selected — user picks a 2D shape
+    st.log(`Sketching on ${node.name} — pick a 2D tool to draw.`, 'success');
   };
 
   // Per-edge fillet / chamfer on a solid → opens BlendActionPanel

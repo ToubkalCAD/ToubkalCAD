@@ -62,13 +62,14 @@ const RIBBON_TABS: RibbonTab[] = [
     { label: 'Advanced',    ids: ['roundrect', 'polygon'] },
     { label: 'Modify',      ids: ['trim', 'extend', 'split', 'powertrim', 'region'] },
     { label: 'Datum',       ids: ['sketch-face', 'sketch-datum'] },
+    { label: 'Reference',   ids: ['sketch-project', 'sketch-intersect'] },
     { label: 'Constrain',   ids: ['constraints'] },
   ] },
   { id: 'model', label: 'Model', groups: [
     { label: 'Primitives',  ids: ['box', 'cylinder', 'sphere', 'torus', 'cone'] },
     { label: 'From Sketch', ids: ['extrude', 'revolve', 'loft', 'sweep'] },
     { label: 'Transform',   ids: ['mirror', 'array-lin', 'array-circ'] },
-    { label: 'Datum',       ids: ['datum-origin', 'datum-offset'] },
+    { label: 'Datum',       ids: ['datum-origin', 'datum-offset', 'datum-3point', 'datum-midplane', 'datum-angle', 'datum-axis', 'datum-point', 'datum-tangent', 'datum-curvenormal', 'datum-2edge'] },
     { label: 'Assembly',    ids: ['mate', 'align', 'concentric'] },
   ] },
   { id: 'modify', label: 'Modify', groups: [
@@ -152,13 +153,97 @@ export const Ribbon: React.FC = () => {
     if (!hasDatum) { log('No reference planes yet — create one first (Model ▸ Datum).', 'warn'); return; }
     setMode('DATUM_SKETCH');
   };
-  const datumOffset = async () => {
-    const v = await showParamModal('Offset Plane (from XY)', [
-      { key: 'd', label: 'Distance', default: 20, unit: 'mm' },
-    ]);
-    if (!v) return;
-    const wp = { ...STANDARD_WORKPLANES.XY, label: 'Custom', origin: [0, 0, v.d] as [number, number, number] };
-    useCADStore.getState().createDatumPlane(wp, 'offset');
+  // D2 — pick a planar face or datum plane in the viewport, then offset it by a
+  // distance into a new datum plane (the pick + prompt live in useCADDatumOffsetPick).
+  // D11 / D12 — Project & Intersect onto the ACTIVE sketch (logic in their hooks).
+  const sketchProject = () => {
+    if (!useCADStore.getState().sketchSession) { log('Start or open a sketch first.', 'warn'); return; }
+    if (!hasAnySolid) { log('No solids to project from.', 'warn'); return; }
+    log('Click edges to project onto the sketch (Esc to finish).', 'info');
+    setMode('PROJECT_PICK');
+  };
+  const sketchIntersect = () => {
+    if (!useCADStore.getState().sketchSession) { log('Start or open a sketch first.', 'warn'); return; }
+    if (!hasAnySolid) { log('No solids to intersect.', 'warn'); return; }
+    log('Click a body to intersect with the sketch plane.', 'info');
+    setMode('INTERSECT_PICK');
+  };
+  const datumOffset = () => {
+    if (useCADStore.getState().sketchSession) { log('Quit the current sketch first.', 'warn'); return; }
+    const ns = Object.values(useCADStore.getState().nodes);
+    const hasSolid = ns.some((n) => !['sketch','sketch_wire','datum_plane','datum_axis','datum_point'].includes(n.type));
+    const hasDatum = ns.some((n) => n.type === 'datum_plane');
+    if (!hasSolid && !hasDatum) { log('Create a solid or origin planes first to offset from.', 'warn'); return; }
+    log('Pick a planar face or a datum plane to offset from.', 'info');
+    setMode('DATUM_OFFSET_PICK');
+  };
+  // D4 — pick 3 vertices in the viewport → plane through them (in useCADDatum3PointPick).
+  const datum3Point = () => {
+    if (useCADStore.getState().sketchSession) { log('Quit the current sketch first.', 'warn'); return; }
+    const hasSolid = Object.values(useCADStore.getState().nodes)
+      .some((n) => !['sketch','sketch_wire','datum_plane','datum_axis','datum_point'].includes(n.type));
+    if (!hasSolid) { log('Create a solid first — 3-point planes snap to its vertices.', 'warn'); return; }
+    log('Pick 3 vertices to define a plane.', 'info');
+    setMode('DATUM_3POINT_PICK');
+  };
+  // D5 — pick 2 planar faces / datums → plane midway between them (in useCADDatumMidplanePick).
+  const datumMidplane = () => {
+    if (useCADStore.getState().sketchSession) { log('Quit the current sketch first.', 'warn'); return; }
+    const ns = Object.values(useCADStore.getState().nodes);
+    const hasSolid = ns.some((n) => !['sketch','sketch_wire','datum_plane','datum_axis','datum_point'].includes(n.type));
+    const hasDatum = ns.some((n) => n.type === 'datum_plane');
+    if (!hasSolid && !hasDatum) { log('Create a solid or origin planes first.', 'warn'); return; }
+    log('Pick two planar faces or datums to find their midplane.', 'info');
+    setMode('DATUM_MIDPLANE_PICK');
+  };
+  // D3 — pick a planar face, then one of its straight edges → plane tilted by an
+  // angle about that edge (in useCADDatumAnglePick).
+  const datumAngle = () => {
+    if (useCADStore.getState().sketchSession) { log('Quit the current sketch first.', 'warn'); return; }
+    const hasSolid = Object.values(useCADStore.getState().nodes)
+      .some((n) => !['sketch','sketch_wire','datum_plane','datum_axis','datum_point'].includes(n.type));
+    if (!hasSolid) { log('Create a solid first — angled planes hinge about its edges.', 'warn'); return; }
+    log('Pick a planar face, then an edge to hinge about.', 'info');
+    setMode('DATUM_ANGLE_PICK');
+  };
+  // D7 — pick a straight edge or a cylindrical face → datum axis (in useCADDatumAxisPick).
+  const datumAxis = () => {
+    if (useCADStore.getState().sketchSession) { log('Quit the current sketch first.', 'warn'); return; }
+    const hasSolid = Object.values(useCADStore.getState().nodes)
+      .some((n) => !['sketch','sketch_wire','datum_plane','datum_axis','datum_point'].includes(n.type));
+    if (!hasSolid) { log('Create a solid first — axes snap to its edges / cylinders.', 'warn'); return; }
+    log('Pick a straight edge or a cylindrical face for the axis.', 'info');
+    setMode('DATUM_AXIS_PICK');
+  };
+  // D8 — pick a vertex or an edge (→ midpoint) → datum point (in useCADDatumPointPick).
+  const datumPoint = () => {
+    if (useCADStore.getState().sketchSession) { log('Quit the current sketch first.', 'warn'); return; }
+    const hasSolid = Object.values(useCADStore.getState().nodes)
+      .some((n) => !['sketch','sketch_wire','datum_plane','datum_axis','datum_point'].includes(n.type));
+    if (!hasSolid) { log('Create a solid first — points snap to its vertices / edges.', 'warn'); return; }
+    log('Pick a vertex or an edge for the point.', 'info');
+    setMode('DATUM_POINT_PICK');
+  };
+  // D6 — advanced planes. Each just enters a pick mode (logic in its hook).
+  const hasSolidNow = () => Object.values(useCADStore.getState().nodes)
+    .some((n) => !['sketch','sketch_wire','datum_plane','datum_axis','datum_point'].includes(n.type));
+  const datumTangent = () => {
+    if (useCADStore.getState().sketchSession) { log('Quit the current sketch first.', 'warn'); return; }
+    if (!hasSolidNow()) { log('Create a solid with a cylindrical face first.', 'warn'); return; }
+    log('Click a point on a cylindrical face for a tangent plane.', 'info');
+    setMode('DATUM_TANGENT_PICK');
+  };
+  const datumCurveNormal = () => {
+    if (useCADStore.getState().sketchSession) { log('Quit the current sketch first.', 'warn'); return; }
+    if (!hasSolidNow()) { log('Create a solid first — pick one of its edges.', 'warn'); return; }
+    log('Pick an edge to place a plane normal to it.', 'info');
+    setMode('DATUM_CURVE_NORMAL_PICK');
+  };
+  const datum2Edge = () => {
+    if (useCADStore.getState().sketchSession) { log('Quit the current sketch first.', 'warn'); return; }
+    if (!hasSolidNow()) { log('Create a solid first — pick two of its edges.', 'warn'); return; }
+    log('Pick two coplanar edges to define a plane.', 'info');
+    setMode('DATUM_2EDGE_PICK');
   };
 
   // ─── Helpers (verbatim from CADToolbar) ─────────────────────────────────────
@@ -674,8 +759,18 @@ export const Ribbon: React.FC = () => {
     region:    { id:'region', icon:'region', label:'Region', run:closeRegions, enabled:canConstrain, accent:'#33aa77' },
     'sketch-face':{id:'sketch-face',icon:'plane',label:'On Face', run:sketchOnFace, active: mode==='FACE_SKETCH', enabled:hasAnySolid && !sketchSession, accent:SK },
     'sketch-datum':{id:'sketch-datum',icon:'plane',label:'On Datum', run:sketchOnDatum, active: mode==='DATUM_SKETCH', enabled:!sketchSession, accent:SK },
+    'sketch-project':{id:'sketch-project',icon:'plane',label:'Project', run:sketchProject, active: mode==='PROJECT_PICK', enabled:!!sketchSession && hasAnySolid, accent:SK },
+    'sketch-intersect':{id:'sketch-intersect',icon:'plane',label:'Intersect', run:sketchIntersect, active: mode==='INTERSECT_PICK', enabled:!!sketchSession && hasAnySolid, accent:SK },
     'datum-origin':{id:'datum-origin',icon:'plane',label:'Origin Planes', run:datumOrigin, accent:'#f0a30a' },
-    'datum-offset':{id:'datum-offset',icon:'plane',label:'Offset Plane', run:datumOffset, accent:'#f0a30a' },
+    'datum-offset':{id:'datum-offset',icon:'plane',label:'Offset Plane', run:datumOffset, active: mode==='DATUM_OFFSET_PICK', accent:'#f0a30a' },
+    'datum-3point':{id:'datum-3point',icon:'plane',label:'3-Point Plane', run:datum3Point, active: mode==='DATUM_3POINT_PICK', accent:'#f0a30a' },
+    'datum-midplane':{id:'datum-midplane',icon:'plane',label:'Midplane', run:datumMidplane, active: mode==='DATUM_MIDPLANE_PICK', accent:'#f0a30a' },
+    'datum-angle':{id:'datum-angle',icon:'plane',label:'Plane at Angle', run:datumAngle, active: mode==='DATUM_ANGLE_PICK', accent:'#f0a30a' },
+    'datum-axis':{id:'datum-axis',icon:'plane',label:'Datum Axis', run:datumAxis, active: mode==='DATUM_AXIS_PICK', accent:'#f0a30a' },
+    'datum-point':{id:'datum-point',icon:'plane',label:'Datum Point', run:datumPoint, active: mode==='DATUM_POINT_PICK', accent:'#f0a30a' },
+    'datum-tangent':{id:'datum-tangent',icon:'plane',label:'Tangent Plane', run:datumTangent, active: mode==='DATUM_TANGENT_PICK', accent:'#f0a30a' },
+    'datum-curvenormal':{id:'datum-curvenormal',icon:'plane',label:'Normal to Curve', run:datumCurveNormal, active: mode==='DATUM_CURVE_NORMAL_PICK', accent:'#f0a30a' },
+    'datum-2edge':{id:'datum-2edge',icon:'plane',label:'Through 2 Edges', run:datum2Edge, active: mode==='DATUM_2EDGE_PICK', accent:'#f0a30a' },
     // primitives
     box:       { id:'box',       icon:'box',       label:'Box',      run:mkBox },
     cylinder:  { id:'cylinder',  icon:'cylinder',  label:'Cylinder', run:mkCyl },

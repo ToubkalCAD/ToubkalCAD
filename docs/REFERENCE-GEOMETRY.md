@@ -124,33 +124,83 @@ numbered overload** before each use.
   Right-click tree → "Create Sketch." This is the payoff of decoupling. Effort: M.
 
 ### Plane creation commands (each = a Construct entry + reference pick + OCC + a datum node)
-- **D2 — Offset Plane** (`Translated`/`gce_MakePln`). Most-used; do first. Effort: M.
-- **D4 — Plane through 3 Points** (`gce_MakePln(P1,P2,P3)`). Effort: M.
-- **D5 — Midplane** (average two faces). Effort: M.
-- **D3 — Plane at Angle** (`Rotated` about a picked edge). Effort: M.
-- **D6 — Tangent / Through-2-Edges / Along-Path / Normal-to-Curve.** Advanced
-  (`GeomLProp_SLProps`/`GeomLProp_CLProps`). Effort: L.
+- **D2 — Offset Plane.** ✅ **Done.** `useCADDatumOffsetPick` (`DATUM_OFFSET_PICK` mode):
+  pick a planar face (per-face overlay, S2-style) **or** an existing datum plane (amber
+  face, D9-style) → ParameterModal asks a signed distance → `createDatumPlane` with the
+  reference's workplane shifted `origin + normal·d` (pure data, no OCC), recording
+  `refs:[{kind,nodeId,distance}]` for D13. Negative distance flips sides.
+- **D4 — Plane through 3 Points.** ✅ **Done.** `useCADDatum3PointPick`
+  (`DATUM_3POINT_PICK` mode): every solid vertex (world-space, via
+  `OccDatumService.extractVertices` on `getPlacedShape`) becomes a raycastable
+  marker; click 3 → `OccDatumService.planeFrom3Points` (`gce_MakePln_6` →
+  `gp_Pln.Position()` → Ax3 → Workplane) → `createDatumPlane`. Collinear triples
+  rejected; Esc cancels; markers turn amber as locked in.
+- **D5 — Midplane.** ✅ **Done.** `useCADDatumMidplanePick` (`DATUM_MIDPLANE_PICK`):
+  pick two planar faces and/or datums (same overlay+amber pickable set as D2; first
+  locks amber) → `OccDatumService.midplane` aligns the normals (flip if opposed),
+  averages them, anchors at the midpoint of the two origins (`gce_MakePln_2(pnt,dir)`
+  → Ax3 → Workplane) → `createDatumPlane`. Exact for parallel faces, angle-bisector
+  otherwise. Esc cancels.
+- **D3 — Plane at Angle.** ✅ **Done.** `useCADDatumAnglePick` (`DATUM_ANGLE_PICK`),
+  two-phase: pick a planar face (overlays) → its straight boundary edges appear as
+  pickable lines (`OccDatumService.faceStraightEdges`, curved edges filtered out) →
+  pick one + enter an angle (ParameterModal) → `OccDatumService.planeAtAngle`
+  (`gp_Pln.Rotated(gp_Ax1(edge), rad)` → Ax3 → Workplane) → `createDatumPlane`.
+  Faces with no straight edge (round caps) stay in phase 1; Esc cancels.
+- **D6 — Tangent / Through-2-Edges / Normal-to-Curve.** ✅ **Done.** Three commands,
+  each its own pick mode + `OccDatumService` method:
+  • **Tangent** (`useCADDatumTangentPick`, `DATUM_TANGENT_PICK`) — click a point on a
+    cylindrical-face overlay → `tangentPlaneToCylinder` (normal = radial dir from axis).
+  • **Normal to Curve / Along Path** (`useCADDatumCurveNormalPick`, `DATUM_CURVE_NORMAL_PICK`)
+    — pick an edge + a % position → `planeNormalToPath` (arc-length point + tangent normal).
+  • **Through 2 Edges** (`useCADDatum2EdgePick`, `DATUM_2EDGE_PICK`) — pick two edges →
+    `planeThrough2Edges` (3 endpoints via `planeFrom3Points`).
+  *Deferred:* tangent to cone/sphere; true curve-evaluated (vs polyline) tangents.
 
 ### Reference axes & points
-- **D7 — Datum Axis** (`gp_Ax1`): 2 points · edge · cylinder axis · plane∩plane. Render
-  as a line; used as the rotation axis for D3, pattern axes, hole centerlines. Effort: M.
-- **D8 — Datum Point** (`gp_Pnt`): coords · vertex · edge-mid · intersection. Render as a
-  marker; used for D4/hole centers. Effort: S–M.
+- **D7 — Datum Axis.** ✅ **Done** (edge + cylinder methods). `useCADDatumAxisPick`
+  (`DATUM_AXIS_PICK`): one pick over straight edges (`OccDatumService.straightEdges`,
+  shown as lines) **and** cylindrical faces (`OccAxisService.extractCylindricalFaces`
+  overlays) → `createDatumAxis({origin,dir})`. New store action + `datum_axis` node;
+  rendered by `buildDatumAxisGroup` (long amber line + anchor dot) in the datum sync.
+  *Deferred:* 2-points and plane∩plane (`BRepAlgoAPI_Section`) methods.
+- **D8 — Datum Point.** ✅ **Done** (vertex + edge-midpoint methods). `useCADDatumPointPick`
+  (`DATUM_POINT_PICK`): one pick over vertex markers (`OccDatumService.extractVertices`)
+  and edge lines (`OccEdgeService.extractEdges`, point = curve-param midpoint sample) →
+  `createDatumPoint([x,y,z])`. New store action + `datum_point` node; rendered by
+  `buildDatumPointGroup` (amber sphere) in the datum sync. *Deferred:* coords entry,
+  circle/arc-centre, and intersection methods.
 
 ### Projected / derived geometry (Fusion's Project/Include/Intersect)
-- **D11 — Project / Include** edges/faces/points onto the active sketch
-  (`BRepProj_Projection`, `GeomAPI_ProjectPointOnSurf`); associative. Effort: L.
-- **D12 — Intersect** — sketch lines where the plane slices a body
-  (`BRepAlgoAPI_Section`). Effort: M.
+- **D11 — Project / Include.** ✅ **Done** (edges). `useCADSketchProjectPick`
+  (`PROJECT_PICK` mode, during a sketch): click body edges → each is orthographically
+  projected onto the active plane (`toLocal2D` per sample) and added as a polyline
+  `sketch_wire` via `createSketchEntityNode`. Stays in mode (project many); Esc finishes.
+  *Deferred:* face/point projection, true `BRepProj_Projection`, associativity.
+- **D12 — Intersect.** ✅ **Done.** `useCADSketchIntersectPick` (`INTERSECT_PICK`):
+  click a body → `OccDatumService.sectionPolylines` (`BRepAlgoAPI_Section_5` with the
+  sketch plane) → each section curve → `toLocal2D` → polyline `sketch_wire`. Esc finishes.
+  *Deferred:* associativity (D13).
+  Note: both pick modes are intentionally **not** named `SKETCH_*` so they don't trip the
+  `mode.startsWith('SKETCH_')` gates in useCADSketchTool / SketchOverlay.
 
 ### Parametric
-- **D13 — Associative recompute** (needs **P1** feature tree): re-run a datum's `method`
-  over its `refs` when referenced geometry changes. Effort: L.
+- **D13 — Associative recompute.** ✅ **Done** (rigid-transform scope). Each datum
+  records `params.bind = { id, transform }` — the source body + its pose at build time
+  (`findDatumBind` over the creation `refs`; every datum hook now passes the source
+  node id). On a gizmo move, `updateTransform` folds `computeDatumUpdates`
+  (`utils/recomputeDatums.ts`) into the same nodes-set + undo entry: the delta
+  transform `current ∘ bind⁻¹` is applied to the datum's plane/axis/point and the
+  bind is re-stamped. The datum visual rebuilds via a geometry signature on its group.
+  *Deferred (needs P1 / topological naming):* datum→datum chains, geometry-edit
+  (parameter-change) recompute, and projected/section sketch entities (D11/D12).
 
 ### Cleanup
-- **D10 — Retire the raw point+vector Custom tab.** `PlaneSelector` becomes "pick an
-  origin plane / existing datum"; all custom planes go through the D2–D6 Construct
-  commands. Effort: S.
+- **D10 — Retire the raw point+vector Custom tab.** ✅ **Done.** `PlaneSelector` now has
+  **Origin Planes** (XY/YZ/ZX) and **Datum Planes** (a live list of `datum_plane` nodes
+  to sketch on; double-click or select + confirm; empty-state points to the Construct
+  commands). The origin+normal number inputs and the `buildBasis`/`cross`/`normalizeTuple`
+  helpers are gone — custom planes are created via D2–D5 (Offset/3-Point/Midplane/At Angle).
 
 Effort: S ≈ ½ day · M ≈ 1–2 days · L ≈ 3+ days.
 

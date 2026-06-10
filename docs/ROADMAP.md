@@ -120,8 +120,12 @@ the boolean step reuses `OccBooleanService`.
   `BRepAlgoAPI_Cut`s the target out, then keeps the solid touching the sketch plane
   (min |projection| ≈ 0) — material fills base → first target surface. Reuses the E2
   target picker (`↥ Face` limit option); errors if the profile doesn't reach the target
-  (verified: target block z[20,30] → fill z[0,20], vol 2000). *Deferred:* Up-to-Plane
-  (datum) and multi-region up-to-face.
+  (verified: target block z[20,30] → fill z[0,20], vol 2000). *Deferred:* multi-region up-to-face.
+- **E8** ✅ *(done 2026-06-10)* Up-to-Plane (datum). `OccExtrusionService.extrudeUpToPlane`
+  trims the profile at an infinite datum plane (origin+normal): plane ⟂ axis → exact
+  blind extrude to the distance; tilted plane → over-extrude + half-space trim (slanted
+  cap), normal-offset reference like Up-to-Face. UI: `↥ Plane` Limit option + a datum-plane
+  dropdown in `Op3DPanel` (persisted as `targetDatumId`). Needs a Track-D datum plane.
 - **E6** ✅ *(done 2026-06-09)* Up-to-Next / Up-to-Last — no pick, considers every
   body in the scene automatically. `extrudeUpToNext` over-extrudes, cuts all bodies, and
   keeps the base piece (stops at the nearest surface, reusing `keepBaseSolid`).
@@ -164,7 +168,7 @@ depends on **P1**.
 4. **E1 → E2** (Pad/Pocket + end conditions) ✅ + **E4 Draft** ✅ + **E3 Thick** ✅ —
    extrusion is now a real additive/subtractive, taperable, hollowable feature.
 5. **R3 / R4** (contextual tabs + customization).
-6. **E5 Up-to-Face** ✅ + **E6 Up-to-Next/Last** ✅ + **E7 Multi-Pad** ✅ — the whole
-   Pad/Pocket limit family is done. Remaining extrusion polish: per-profile depths
-   (variable Multi-Pad), Up-to-Plane (datum).
+6. **E5 Up-to-Face** ✅ + **E6 Up-to-Next/Last** ✅ + **E7 Multi-Pad** ✅ + **E8 Up-to-Plane**
+   ✅ — the whole Pad/Pocket limit family is done. Remaining extrusion polish: per-profile
+   depths (variable Multi-Pad).
 7. **P1 feature tree** last (also fixes the E2 re-edit visibility gap).

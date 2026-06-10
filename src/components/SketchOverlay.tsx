@@ -26,6 +26,14 @@ type StepDef = {
 
 const XY: FieldDef[] = [{ key: 'x', label: 'X' }, { key: 'y', label: 'Y' }];
 
+/** Nearest world-axis name (X/Y/Z) that a unit direction points along. */
+const axisName = (v: [number, number, number]): string => {
+  const ax = Math.abs(v[0]), ay = Math.abs(v[1]), az = Math.abs(v[2]);
+  if (ax >= ay && ax >= az) return 'X';
+  if (ay >= az) return 'Y';
+  return 'Z';
+};
+
 const xyResolve = (v: Record<string, number>) => ({ x: v.x ?? 0, y: v.y ?? 0 });
 
 const radiusResolve = (v: Record<string, number>, p: { x: number; y: number }[]) => ({
@@ -101,6 +109,7 @@ export const SketchOverlay: React.FC = () => {
   const points       = useCADStore((s) => s.sketchPoints);
   const previewPt    = useCADStore((s) => s.sketchPreviewPoint);
   const polygonSides = useCADStore((s) => s.sketchPolygonSides);
+  const workplane    = useCADStore((s) => s.activeWorkplane);
 
   const [vals, setVals] = useState<Record<string, string>>({});
   const firstRef        = useRef<HTMLInputElement>(null);
@@ -137,6 +146,15 @@ export const SketchOverlay: React.FC = () => {
   const toolLabel  = TOOL_LABEL[mode as InteractionMode] ?? mode;
   const stepPrompt = isCurve ? `Point ${step + 1}` : stepDef.prompt;
   const canFinish  = isCurve && step >= 2;
+
+  // Label the in-plane inputs by the world axis each sketch axis follows
+  // (local x → uAxis, local y → vAxis): e.g. ZX plane shows "X" and "Z".
+  // Fall back to U/V if both collapse to the same world axis (tilted face plane).
+  let uLabel = axisName(workplane.uAxis);
+  let vLabel = axisName(workplane.vAxis);
+  if (uLabel === vLabel) { uLabel = 'U'; vLabel = 'V'; }
+  const fieldLabel = (f: FieldDef): string =>
+    f.key === 'x' ? uLabel : f.key === 'y' ? vLabel : f.label;
 
   // ── Submission ───────────────────────────────────────────────────────────────
 
@@ -246,7 +264,7 @@ export const SketchOverlay: React.FC = () => {
         {stepDef.fields.map((f, i) => (
           <label key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
             <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 700, minWidth: 14, textAlign: 'right' }}>
-              {f.label}
+              {fieldLabel(f)}
             </span>
             <input
               ref={i === 0 ? firstRef : undefined}

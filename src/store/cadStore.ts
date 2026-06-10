@@ -5,6 +5,19 @@
 // ============================================================
 
 import { create } from 'zustand';
+import { computeDatumUpdates } from '../utils/recomputeDatums';
+
+// D13 — capture the body a datum is derived from (first ref pointing to a solid),
+// so a later move of that body can rigidly recompute the datum. Datum-sourced
+// refs (datum→datum) are skipped (deferred to P1).
+function findDatumBind(nodes: Record<string, any>, refs: any[]): { id: string; transform: any } | undefined {
+  const r = (refs || []).find(
+    (x) => x && x.nodeId && nodes[x.nodeId] && !String(nodes[x.nodeId].type).startsWith('datum_'),
+  );
+  if (!r) return undefined;
+  const t = nodes[r.nodeId].transform;
+  return { id: r.nodeId, transform: { position: [...t.position], rotation: [...t.rotation], scale: [...t.scale] } };
+}
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -62,7 +75,18 @@ export type InteractionMode =
   | 'MIRROR_AXIS_PICK'    // pick 2 points on the sketch plane → mirror line for a 2D sketch mirror
   | 'ARRAY_CENTER_PICK'   // pick 1 point on the sketch plane → centre for a 2D circular array
   | 'EXTRUDE_TARGET_PICK' // pick an existing solid as the Pad/Pocket boolean target (one-shot)
-  | 'DATUM_SKETCH';       // pick a datum plane in the viewport → start a sketch on it (D9)
+  | 'DATUM_SKETCH'        // pick a datum plane in the viewport → start a sketch on it (D9)
+  | 'DATUM_OFFSET_PICK'   // pick a planar face / datum → offset it by a distance into a new datum plane (D2)
+  | 'DATUM_3POINT_PICK'   // pick 3 vertices → plane through them (D4)
+  | 'DATUM_MIDPLANE_PICK' // pick 2 planar faces / datums → plane midway between them (D5)
+  | 'DATUM_ANGLE_PICK'    // pick a planar face then one of its edges → plane at an angle about that edge (D3)
+  | 'DATUM_AXIS_PICK'     // pick a straight edge or a cylindrical face → datum axis along it (D7)
+  | 'DATUM_POINT_PICK'    // pick a vertex or an edge (→ its midpoint) → datum point (D8)
+  | 'DATUM_TANGENT_PICK'  // pick a point on a cylindrical face → tangent plane there (D6)
+  | 'DATUM_CURVE_NORMAL_PICK' // pick an edge → plane perpendicular to it at a position (D6)
+  | 'DATUM_2EDGE_PICK'    // pick 2 coplanar edges → plane through them (D6)
+  | 'PROJECT_PICK'   // pick edges of bodies → project them onto the active sketch (D11)
+  | 'INTERSECT_PICK'; // pick a body → section it with the active sketch plane into curves (D12)
 
 export type BooleanOp = 'CUT' | 'FUSE' | 'COMMON';
 
@@ -196,6 +220,10 @@ interface CADState {
   addNode:            (node: Omit<CADNode, 'children'>) => void;
   /** Create a reference (datum) plane node from a workplane. Returns its id. */
   createDatumPlane:   (wp: Workplane, method?: string, refs?: any[]) => string;
+  /** Create a reference (datum) axis node from an origin + unit direction (D7). */
+  createDatumAxis:    (axis: { origin: [number,number,number]; dir: [number,number,number] }, method?: string, refs?: any[]) => string;
+  /** Create a reference (datum) point node at a world position (D8). */
+  createDatumPoint:   (point: [number,number,number], method?: string, refs?: any[]) => string;
   deleteNode:         (id: string) => void;
   duplicateNode:      (id: string) => string;
   renameNode:         (id: string, name: string) => void;
@@ -249,10 +277,14 @@ interface CADState {
    *  while picking a Pad/Pocket boolean target. The Op3DPanel consumes and
    *  clears it. */
   op3DTargetPick: string | null;
+  /** World-space point on the clicked solid (the exact spot the ray hit). Used
+   *  by Up-to-Face to resolve WHICH face was clicked. Cleared with op3DTargetPick. */
+  op3DTargetPickPoint: [number, number, number] | null;
   /** Begin picking a Pad/Pocket target (enters EXTRUDE_TARGET_PICK mode). */
   startOp3DTargetPick: () => void;
-  /** Record the picked target solid (called by the pick hook) and exit. */
-  setOp3DTargetPick: (id: string | null) => void;
+  /** Record the picked target solid (called by the pick hook) and exit.
+   *  `point` is the world-space ray-hit on that solid (for Up-to-Face). */
+  setOp3DTargetPick: (id: string | null, point?: [number, number, number] | null) => void;
 
   /** Per-edge blend (fillet/chamfer) request — non-null while the panel is open. */
   blendReq: { targetId: string; op: 'fillet' | 'chamfer'; editNodeId?: string } | null;
@@ -401,6 +433,7 @@ export const useCADStore = create<CADState>((set, get) => ({
   treeContextMenu:    null,
   op3DPanelReq:       null,
   op3DTargetPick:     null,
+  op3DTargetPickPoint: null,
   blendReq:            null,
   selectedEdgeIndices: [],
   booleanReq:          null,
@@ -445,6 +478,9 @@ export const useCADStore = create<CADState>((set, get) => ({
     });
     set({ sketchSession: { id, name, plane }, sketchSessionCount: count, activeWorkplane: plane });
     get().log(`Sketch session "${name}" started.`, 'info');
+    // Animate the camera to the workplane-normal view immediately (don't wait for a
+    // tool to be picked). Viewport3D listens and stores the pre-sketch restore fn.
+    window.dispatchEvent(new CustomEvent('cad-session-resumed', { detail: { plane } }));
   },
 
   quitSketchSession: () => {
@@ -478,8 +514,8 @@ export const useCADStore = create<CADState>((set, get) => ({
   openOp3DPanel:  (op, targetIds, editNodeId) => set({ op3DPanelReq: { op, targetIds, editNodeId } }),
   closeOp3DPanel: ()                          => set({ op3DPanelReq: null }),
 
-  startOp3DTargetPick: () => set({ interactionMode: 'EXTRUDE_TARGET_PICK', op3DTargetPick: null }),
-  setOp3DTargetPick:   (id) => set({ op3DTargetPick: id, interactionMode: 'SELECT' }),
+  startOp3DTargetPick: () => set({ interactionMode: 'EXTRUDE_TARGET_PICK', op3DTargetPick: null, op3DTargetPickPoint: null }),
+  setOp3DTargetPick:   (id, point = null) => set({ op3DTargetPick: id, op3DTargetPickPoint: point, interactionMode: 'SELECT' }),
 
   openBlendPanel: (targetId, op, editNodeId, preEdges) => set({
     blendReq: { targetId, op, editNodeId },
@@ -641,7 +677,33 @@ export const useCADStore = create<CADState>((set, get) => ({
       visible: true, locked: false, parentId: null, notes: '',
       transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
       material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS.datum_plane },
-      params: { datum: 'plane', workplane: wp, method, refs },
+      params: { datum: 'plane', workplane: wp, method, refs, bind: findDatumBind(get().nodes, refs) },
+    });
+    return id;
+  },
+
+  createDatumAxis: (axis, method = 'custom', refs = []) => {
+    const id = makeId();
+    const count = Object.values(get().nodes).filter((n) => n.type === 'datum_axis').length + 1;
+    get().addNode({
+      id, name: `Axis ${count}`, type: 'datum_axis',
+      visible: true, locked: false, parentId: null, notes: '',
+      transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
+      material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS.datum_axis },
+      params: { datum: 'axis', axis, method, refs, bind: findDatumBind(get().nodes, refs) },
+    });
+    return id;
+  },
+
+  createDatumPoint: (point, method = 'custom', refs = []) => {
+    const id = makeId();
+    const count = Object.values(get().nodes).filter((n) => n.type === 'datum_point').length + 1;
+    get().addNode({
+      id, name: `Point ${count}`, type: 'datum_point',
+      visible: true, locked: false, parentId: null, notes: '',
+      transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
+      material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS.datum_point },
+      params: { datum: 'point', point, method, refs, bind: findDatumBind(get().nodes, refs) },
     });
     return id;
   },
@@ -764,13 +826,18 @@ export const useCADStore = create<CADState>((set, get) => ({
     const { nodes } = get();
     if (!nodes[id]) return;
     const nodesBefore  = JSON.parse(JSON.stringify(Object.values(nodes)));
-    const updatedNodes = {
+    const updatedNodes: Record<string, any> = {
       ...nodes,
       [id]: {
         ...nodes[id],
         transform: { position, rotation, scale: scale ?? nodes[id].transform.scale },
       },
     };
+    // D13 — datums derived from this body follow its move (same undo entry).
+    const datumUpdates = computeDatumUpdates(updatedNodes, id);
+    for (const did in datumUpdates) {
+      updatedNodes[did] = { ...updatedNodes[did], params: datumUpdates[did] };
+    }
     set({
       nodes: updatedNodes,
       past:  [...get().past, {

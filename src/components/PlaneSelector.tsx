@@ -2,39 +2,16 @@
 // ToubkalCAD – PlaneSelector.tsx
 // Draggable floating window for choosing the sketch workplane.
 // Opens automatically when a 2D sketch tool is activated.
+//
+// D10 — the old raw "origin + normal vector" Custom tab is retired. Custom planes
+// are now first-class datum features built via the Construct commands
+// (Model ▸ Datum ▸ Offset / 3-Point / Midplane / At Angle); this dialog just lets
+// you sketch on an origin plane or on any existing datum plane.
 // ============================================================
 
 import React, { useState, useEffect } from 'react';
 import { useCADStore, Workplane, STANDARD_WORKPLANES } from '../store/cadStore';
 import { useDragPanel } from '../hooks/useDragPanel';
-
-// ─── Helper: compute basis from a custom normal ───────────────────────────────
-
-function normalizeTuple(v: [number, number, number]): [number, number, number] {
-  const len = Math.sqrt(v[0]**2 + v[1]**2 + v[2]**2);
-  if (len < 1e-10) return [0, 0, 1];
-  return [v[0]/len, v[1]/len, v[2]/len];
-}
-
-function cross(a: [number,number,number], b: [number,number,number]): [number,number,number] {
-  return [
-    a[1]*b[2] - a[2]*b[1],
-    a[2]*b[0] - a[0]*b[2],
-    a[0]*b[1] - a[1]*b[0],
-  ];
-}
-
-function buildBasis(normal: [number,number,number]): {
-  uAxis: [number,number,number];
-  vAxis: [number,number,number];
-} {
-  const n = normalizeTuple(normal);
-  // Pick an arbitrary vector not parallel to n
-  const ref: [number,number,number] = Math.abs(n[1]) < 0.9 ? [0,1,0] : [1,0,0];
-  const u   = normalizeTuple(cross(ref, n));
-  const v   = normalizeTuple(cross(n, u));
-  return { uAxis: u, vAxis: v };
-}
 
 // ─── Sub-component: standard plane card ───────────────────────────────────────
 
@@ -82,44 +59,34 @@ export const PlaneSelector: React.FC = () => {
   const open                = useCADStore((s) => s.planeSelectorOpen);
   const pendingMode         = useCADStore((s) => s.pendingSketchMode);
   const activeWorkplane     = useCADStore((s) => s.activeWorkplane);
+  const nodes               = useCADStore((s) => s.nodes);
   const startSketchSession  = useCADStore((s) => s.startSketchSession);
   const setMode             = useCADStore((s) => s.setInteractionMode);
   const close               = useCADStore((s) => s.closePlaneSelector);
 
-  // Local state for the custom plane inputs
-  const [tab,       setTab]       = useState<'standard' | 'custom'>('standard');
-  const [selected,  setSelected]  = useState<string>(activeWorkplane.label);
-  const [origin,    setOrigin]    = useState<[string,string,string]>(['0','0','0']);
-  const [normalIn,  setNormalIn]  = useState<[string,string,string]>(['0','1','0']);
-  const [customErr, setCustomErr] = useState<string>('');
+  const datums = Object.values(nodes).filter((n) => n.type === 'datum_plane');
+
+  const [tab,      setTab]      = useState<'standard' | 'datum'>('standard');
+  const [selected, setSelected] = useState<string>(
+    STANDARD_WORKPLANES[activeWorkplane.label] ? activeWorkplane.label : 'XY',
+  );
+  const [datumId,  setDatumId]  = useState<string | null>(null);
   const { pos, onHandleMouseDown } = useDragPanel(200, 120);
 
   const confirm = () => {
-    let wp: Workplane;
-
+    let wp: Workplane | undefined;
     if (tab === 'standard') {
       wp = STANDARD_WORKPLANES[selected] ?? activeWorkplane;
     } else {
-      // Validate custom plane
-      const ox = parseFloat(origin[0]);  const oy = parseFloat(origin[1]);  const oz = parseFloat(origin[2]);
-      const nx = parseFloat(normalIn[0]); const ny = parseFloat(normalIn[1]); const nz = parseFloat(normalIn[2]);
-      if ([ox,oy,oz,nx,ny,nz].some(isNaN)) { setCustomErr('All fields must be numbers.'); return; }
-      const mag = Math.sqrt(nx**2 + ny**2 + nz**2);
-      if (mag < 1e-10) { setCustomErr('Normal vector must be non-zero.'); return; }
-      const norm = normalizeTuple([nx,ny,nz]);
-      const { uAxis, vAxis } = buildBasis(norm);
-      wp = { label: 'Custom', origin: [ox,oy,oz], normal: norm, uAxis, vAxis };
-      setCustomErr('');
+      wp = datumId ? (nodes[datumId]?.params?.workplane as Workplane | undefined) : undefined;
+      if (!wp) return;   // nothing picked → keep the dialog open
     }
-
     startSketchSession(wp);   // creates parent node, sets activeWorkplane + sketchSession
     if (pendingMode) setMode(pendingMode);
     close();
   };
 
-  const cancel = () => {
-    close();
-  };
+  const cancel = () => close();
 
   // Enter = confirm · Esc = cancel (global while open)
   useEffect(() => {
@@ -131,36 +98,11 @@ export const PlaneSelector: React.FC = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, tab, selected, origin, normalIn]);
+  }, [open, tab, selected, datumId]);
 
   if (!open) return null;
 
-  // Number input helper
-  const numInput = (
-    val: string,
-    onChange: (v: string) => void,
-    placeholder = '0',
-  ) => (
-    <input
-      type="number"
-      value={val}
-      placeholder={placeholder}
-      onChange={(e) => onChange(e.target.value)}
-      step="any"
-      style={{
-        width: '100%',
-        background: 'var(--surface-3)',
-        border:     '1px solid var(--border)',
-        borderRadius: 'var(--radius-sm)',
-        color:      'var(--text-primary)',
-        padding:    '5px 7px',
-        fontSize:   '11px',
-        outline:    'none',
-      }}
-      onFocus={(e) => { e.target.style.borderColor = 'var(--accent)'; }}
-      onBlur={(e)  => { e.target.style.borderColor = 'var(--border)'; }}
-    />
-  );
+  const canConfirm = tab === 'standard' || !!datumId;
 
   return (
       <div
@@ -205,7 +147,7 @@ export const PlaneSelector: React.FC = () => {
 
         {/* ── Tab bar ─────────────────────────────────────────────────────── */}
         <div style={{ display:'flex', borderBottom:'1px solid var(--border)' }}>
-          {(['standard','custom'] as const).map((t) => (
+          {(['standard','datum'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -217,7 +159,7 @@ export const PlaneSelector: React.FC = () => {
                 borderBottom: tab===t ? '2px solid var(--accent)' : '2px solid transparent',
               }}
             >
-              {t === 'standard' ? 'Standard Planes' : 'Custom Plane'}
+              {t === 'standard' ? 'Origin Planes' : `Datum Planes${datums.length ? ` (${datums.length})` : ''}`}
             </button>
           ))}
         </div>
@@ -238,7 +180,6 @@ export const PlaneSelector: React.FC = () => {
                 <PlaneCard label="ZX" desc="Y=0 (front)" color="#3aaa55"
                   active={selected==='ZX'} onClick={() => setSelected('ZX')} />
               </div>
-              {/* Info row */}
               <div style={{
                 background: 'var(--surface-3)', borderRadius:'var(--radius-sm)',
                 padding:'8px 10px', fontSize:'10px', color:'var(--text-dim)',
@@ -250,42 +191,46 @@ export const PlaneSelector: React.FC = () => {
             </div>
           )}
 
-          {tab === 'custom' && (
+          {tab === 'datum' && (
             <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
               <div style={{ fontSize:'10px', color:'var(--text-muted)', letterSpacing:'0.4px', textTransform:'uppercase' }}>
-                Define plane by origin + normal vector
+                Sketch on a reference plane
               </div>
 
-              <div>
-                <label style={{ fontSize:'10px', color:'var(--text-dim)', display:'block', marginBottom:'5px', textTransform:'uppercase', letterSpacing:'0.4px' }}>
-                  Origin (x, y, z)
-                </label>
-                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:'5px' }}>
-                  {(['x','y','z'] as const).map((ax,i) => (
-                    <div key={ax}>
-                      <div style={{ fontSize:'9px', color:'var(--text-muted)', marginBottom:'2px', textAlign:'center' }}>{ax.toUpperCase()}</div>
-                      {numInput(origin[i], (v) => setOrigin((p) => { const n=[...p] as [string,string,string]; n[i]=v; return n; }))}
-                    </div>
-                  ))}
+              {datums.length === 0 ? (
+                <div style={{
+                  background:'var(--surface-3)', borderRadius:'var(--radius-sm)',
+                  padding:'10px 12px', fontSize:'10px', color:'var(--text-dim)', lineHeight:1.6,
+                }}>
+                  No reference planes yet. Create one with the Construct commands —
+                  <strong> Model ▸ Datum ▸ Offset / 3-Point / Midplane / At Angle</strong> —
+                  then it will appear here to sketch on.
                 </div>
-              </div>
-
-              <div>
-                <label style={{ fontSize:'10px', color:'var(--text-dim)', display:'block', marginBottom:'5px', textTransform:'uppercase', letterSpacing:'0.4px' }}>
-                  Normal vector (nx, ny, nz)
-                </label>
-                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:'5px' }}>
-                  {(['nx','ny','nz'] as const).map((ax,i) => (
-                    <div key={ax}>
-                      <div style={{ fontSize:'9px', color:'var(--text-muted)', marginBottom:'2px', textAlign:'center' }}>{ax.toUpperCase()}</div>
-                      {numInput(normalIn[i], (v) => setNormalIn((p) => { const n=[...p] as [string,string,string]; n[i]=v; return n; }), i===1?'1':'0')}
-                    </div>
-                  ))}
+              ) : (
+                <div style={{ display:'flex', flexDirection:'column', gap:'5px', maxHeight:'180px', overflowY:'auto' }}>
+                  {datums.map((n) => {
+                    const active = n.id === datumId;
+                    return (
+                      <button
+                        key={n.id}
+                        onClick={() => setDatumId(n.id)}
+                        onDoubleClick={confirm}
+                        style={{
+                          display:'flex', alignItems:'center', gap:'8px', textAlign:'left',
+                          padding:'7px 10px', cursor:'pointer',
+                          background: active ? 'rgba(240,163,10,0.18)' : 'var(--surface-3)',
+                          border:`1px solid ${active ? '#f0a30a' : 'var(--border)'}`,
+                          borderRadius:'var(--radius-sm)',
+                          color:'var(--text-primary)', fontSize:'11px',
+                        }}
+                      >
+                        <span style={{ fontSize:'13px', color:'#f0a30a' }}>▱</span>
+                        <span style={{ fontWeight:600 }}>{n.name}</span>
+                      </button>
+                    );
+                  })}
                 </div>
-                {customErr && (
-                  <div style={{ fontSize:'10px', color:'var(--error)', marginTop:'5px' }}>{customErr}</div>
-                )}
-              </div>
+              )}
             </div>
           )}
         </div>
@@ -306,10 +251,14 @@ export const PlaneSelector: React.FC = () => {
           >Cancel</button>
           <button
             onClick={confirm}
+            disabled={!canConfirm}
             style={{
-              padding:'5px 18px', background:'var(--accent)', border:'none',
-              borderRadius:'var(--radius-sm)', color:'#fff',
-              cursor:'pointer', fontSize:'11px', fontWeight:700,
+              padding:'5px 18px',
+              background: canConfirm ? 'var(--accent)' : 'var(--surface-3)',
+              border:'none', borderRadius:'var(--radius-sm)',
+              color: canConfirm ? '#fff' : 'var(--text-muted)',
+              cursor: canConfirm ? 'pointer' : 'not-allowed',
+              fontSize:'11px', fontWeight:700,
             }}
           >Sketch on Plane</button>
         </div>

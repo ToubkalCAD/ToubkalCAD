@@ -151,8 +151,8 @@ export function useCADSketchFacePick(
       };
       const st = useCADStore.getState();
       st.startSketchSession(wp);            // sets activeWorkplane + sketchSession (camera follows)
-      st.setInteractionMode('SKETCH_LINE'); // drop straight into drawing
-      st.log(`Sketching on a face of ${st.nodes[f.nodeId]?.name ?? 'solid'}.`, 'success');
+      st.setInteractionMode('SELECT');      // no tool pre-selected — user picks a 2D shape
+      st.log(`Sketching on a face of ${st.nodes[f.nodeId]?.name ?? 'solid'} — pick a 2D tool to draw.`, 'success');
     };
 
     container.addEventListener('mousemove', onMove);

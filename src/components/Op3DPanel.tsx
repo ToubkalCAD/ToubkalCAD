@@ -137,7 +137,14 @@ function allSolidShapes(excludeIds: string[]): any[] {
 
 const EXTRUDE_END: ExtrudeEnd[] = ['blind', 'symmetric', 'twoSided'];
 
-function computeShape(op: Op3DType, ids: string[], p: Record<string, number>, targetSolidId?: string): any {
+function computeShape(
+  op: Op3DType,
+  ids: string[],
+  p: Record<string, number>,
+  targetSolidId?: string,
+  targetFacePoint?: [number, number, number],
+  targetDatumId?: string,
+): any {
   const oc = window.oc;
   switch (op) {
     case 'extrude': {
@@ -157,7 +164,13 @@ function computeShape(op: Op3DType, ids: string[], p: Record<string, number>, ta
         // where the user sees the solid, not at its origin pose.
         const tgt = targetSolidId ? getPlacedShape(targetSolidId) : null;
         if (!tgt) throw new Error('Up-to-Face needs a target solid — pick one.');
-        solid = OccExtrusionService.extrudeUpToFace(oc, wires[0], upToOpts, tgt);
+        solid = OccExtrusionService.extrudeUpToFace(oc, wires[0], upToOpts, tgt, targetFacePoint);
+      } else if (endMode === 6) {
+        // Up-to-Plane: trim the profile at a picked datum plane (D-track reference).
+        const datum = targetDatumId ? useCADStore.getState().nodes[targetDatumId] : null;
+        const wp = datum?.params?.workplane as Workplane | undefined;
+        if (!wp) throw new Error('Up-to-Plane needs a datum plane — pick one.');
+        solid = OccExtrusionService.extrudeUpToPlane(oc, wires[0], upToOpts, wp.origin, wp.normal);
       } else if (endMode === 4 || endMode === 5) {
         // Up-to-Next / Up-to-Last: trim against every other body in the scene.
         const editId = useCADStore.getState().op3DPanelReq?.editNodeId;
@@ -251,9 +264,10 @@ const ToggleRow: React.FC<{label:string;k:string;opts:{label:string;v:number}[];
 const TargetPickRow: React.FC<{
   targetName: string | null;
   isPicking:  boolean;
+  noun?:      string;   // what the user is picking: 'solid' (default) or 'face'
   onPick:     () => void;
   onClear:    () => void;
-}> = ({ targetName, isPicking, onPick, onClear }) => (
+}> = ({ targetName, isPicking, noun = 'solid', onPick, onClear }) => (
   <div style={{ display:'flex', alignItems:'center', gap:8 }}>
     <span style={{ fontSize:10, color:'var(--text-dim)', textTransform:'uppercase', letterSpacing:'0.4px', minWidth:55 }}>Target</span>
     <div style={{ display:'flex', alignItems:'center', gap:6, flex:1, minWidth:0 }}>
@@ -263,7 +277,7 @@ const TargetPickRow: React.FC<{
         borderRadius:'var(--radius-sm)',
         background: isPicking ? 'var(--accent)' : 'var(--surface-3)',
         color: isPicking ? '#fff' : 'var(--text-primary)',
-      }}>{isPicking ? 'Click a solid…' : (targetName ? 'Re-pick' : 'Pick target')}</button>
+      }}>{isPicking ? `Click a ${noun}…` : (targetName ? 'Re-pick' : `Pick ${noun}`)}</button>
       {targetName && (
         <span title={targetName} style={{
           fontSize:11, color:'var(--accent)', fontFamily:'monospace',
@@ -309,6 +323,19 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
       ? (useCADStore.getState().nodes[req.editNodeId]?.params?.targetSolidId ?? null)
       : null),
   );
+  // E5 — Up-to-Face: world-space point on the picked solid identifying the face.
+  const [targetFacePoint, setTargetFacePoint] = useState<[number, number, number] | null>(
+    () => (req.editNodeId
+      ? (useCADStore.getState().nodes[req.editNodeId]?.params?.targetFacePoint ?? null)
+      : null),
+  );
+  // Up-to-Plane: id of the datum plane to extrude up to.
+  const [targetDatumId, setTargetDatumId] = useState<string | null>(
+    () => (req.editNodeId
+      ? (useCADStore.getState().nodes[req.editNodeId]?.params?.targetDatumId ?? null)
+      : null),
+  );
+  const datumPlanes = Object.values(useCADStore.getState().nodes).filter((n) => n.type === 'datum_plane');
   const previewRef    = useRef<THREE.Mesh | null>(null);
   const debounceRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Committed meshes hidden while the preview is live (edited node + boolean target).
@@ -324,6 +351,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
   useEffect(() => {
     if (pickedTarget) {
       setTargetSolidId(pickedTarget);
+      setTargetFacePoint(useCADStore.getState().op3DTargetPickPoint);
       useCADStore.getState().setOp3DTargetPick(null);
     }
   }, [pickedTarget]);
@@ -362,7 +390,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     return () => window.removeEventListener('cad-remove-mesh', h);
   }, [clearPreview]);
 
-  const buildPreview = useCallback((liveReq: Op3DRequest, liveParams: Record<string, number>, liveTarget: string | null) => {
+  const buildPreview = useCallback((liveReq: Op3DRequest, liveParams: Record<string, number>, liveTarget: string | null, liveFacePoint: [number, number, number] | null, liveDatum: string | null) => {
     const sc = (window as any).cadScene as THREE.Scene | null;
     if (!window.oc || !sc) return;
     clearPreview();
@@ -380,7 +408,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     if (boolActive) hideById(liveTarget);
 
     try {
-      const shape = computeShape(liveReq.op, liveReq.targetIds, liveParams, liveTarget ?? undefined);
+      const shape = computeShape(liveReq.op, liveReq.targetIds, liveParams, liveTarget ?? undefined, liveFacePoint ?? undefined, liveDatum ?? undefined);
       const geo   = OccConverter.shapeToThreeGeometry(window.oc, shape, 0.2);
       const mat   = new THREE.MeshStandardMaterial({ color:0x4488ee, opacity:0.70, transparent:true, roughness:0.25, metalness:0.15, side:THREE.DoubleSide });
       const mesh  = new THREE.Mesh(geo, mat);
@@ -397,9 +425,26 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
   // Debounce preview on param change
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => buildPreview(req, params, targetSolidId), 250);
+    debounceRef.current = setTimeout(() => buildPreview(req, params, targetSolidId, targetFacePoint, targetDatumId), 250);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-  }, [params, req, targetSolidId, buildPreview]);
+  }, [params, req, targetSolidId, targetFacePoint, targetDatumId, buildPreview]);
+
+  // While picking a target/face, hide the in-progress geometry (live preview +
+  // the edited operation's committed mesh) so the target solid's faces are fully
+  // visible and clickable. Restored when picking ends (the debounce rebuilds it).
+  useEffect(() => {
+    if (!isPicking) return;
+    const sc = (window as any).cadScene as THREE.Scene | null;
+    if (!sc) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current); // cancel any pending preview
+    clearPreview();
+    const hidden: THREE.Object3D[] = [];
+    if (req.editNodeId) {
+      const obj = sc.children.find((c) => c.userData?.cadNodeId === req.editNodeId);
+      if (obj && obj.visible) { obj.visible = false; hidden.push(obj); }
+    }
+    return () => { for (const o of hidden) o.visible = true; };
+  }, [isPicking, req.editNodeId, clearPreview]);
 
   // Cleanup on unmount
   useEffect(() => () => {
@@ -468,6 +513,15 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     }
     store.log('Op3D: all input shapes found in registry ✓', 'info');
 
+    // ── Validate Up-to-Plane datum (needs a datum plane) ─────────────────────
+    if (req.op === 'extrude' && Math.round(snap.endMode ?? 0) === 6) {
+      if (!targetDatumId || !useCADStore.getState().nodes[targetDatumId]) {
+        const msg = 'Pick an Up-to-Plane datum plane first.';
+        setApplyErr(msg); store.log(`Op3D FAIL: ${msg}`, 'error');
+        return;
+      }
+    }
+
     // ── Validate Pad/Pocket + Up-to-Face target (E2 / E5) ────────────────────
     const boolOp  = req.op === 'extrude' ? Math.round(snap.op ?? 0) : 0;
     const upToFace = req.op === 'extrude' && Math.round(snap.endMode ?? 0) === 3;
@@ -489,7 +543,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
 
     try {
       // ── Compute OCC shape ──────────────────────────────────────────────────
-      const shape = computeShape(req.op, req.targetIds, snap, targetSolidId ?? undefined);
+      const shape = computeShape(req.op, req.targetIds, snap, targetSolidId ?? undefined, targetFacePoint ?? undefined, targetDatumId ?? undefined);
       store.log(`Op3D: OCC shape computed ✓`, 'info');
 
       if (req.editNodeId) {
@@ -500,7 +554,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         window.dispatchEvent(new CustomEvent('cad-update-mesh', { detail: { id, material: old?.material } }));
         const idx = Number(old?.name?.match(/\d+$/)?.[0] ?? nextIdx(OP_NTYPE[req.op]));
         store.renameNode(id, `${OP_LABEL[req.op]}${idx}`);
-        store.setNodeParams(id, { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined });
+        store.setNodeParams(id, { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetDatumId: targetDatumId ?? undefined });
         store.log(`${old?.name ?? id} updated ✓`, 'success');
       } else {
         // ── CREATE ────────────────────────────────────────────────────────────
@@ -516,7 +570,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
           id, name, type, visible: true, locked: false, parentId: null, notes: '',
           transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
           material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS[type] ?? 0x5588cc },
-          params:    { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined },
+          params:    { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetDatumId: targetDatumId ?? undefined },
         });
 
         // Verify the node is actually in the store
@@ -590,15 +644,29 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
             const endM = Math.round(params.endMode ?? 0);
             const isUpTo = endM >= 3;                       // ↥Face / Next / Last
             const needTarget = endM === 3 || Math.round(params.op ?? 0) !== 0;
-            const upToHint = endM === 3 ? 'Extrudes up to the first surface of the picked target solid.'
+            const upToHint = endM === 3 ? 'Click a face of a solid — the extrusion stops exactly on that surface.'
               : endM === 4 ? 'Extrudes up to the next body it meets in the model.'
+              : endM === 6 ? 'Extrudes up to the chosen datum plane (extended infinitely).'
               : 'Extrudes up to the last (furthest) surface in the model.';
             return (
             <>
-              <ToggleRow label="Limit" k="endMode" opts={[{label:'Blind',v:0},{label:'Sym',v:1},{label:'2-Sided',v:2},{label:'↥ Face',v:3},{label:'Next',v:4},{label:'Last',v:5}]} params={params} onChange={set} />
+              <ToggleRow label="Limit" k="endMode" opts={[{label:'Blind',v:0},{label:'Sym',v:1},{label:'2-Sided',v:2},{label:'↥ Face',v:3},{label:'Next',v:4},{label:'Last',v:5},{label:'↥ Plane',v:6}]} params={params} onChange={set} />
               {!isUpTo && <SliderRow label={endM===1 ? 'Length (mm)' : 'Limit 1 (mm)'} k="h" min={0.01} max={500} step={0.5} params={params} onChange={set} />}
               {endM===2 && <SliderRow label="Limit 2 (mm)" k="h2" min={0.01} max={500} step={0.5} params={params} onChange={set} />}
               {isUpTo && <div style={{ fontSize:10, color:'var(--text-muted)', fontStyle:'italic' }}>{upToHint}</div>}
+              {endM===6 && (
+                <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                  <span style={{ fontSize:10, color:'var(--text-dim)', textTransform:'uppercase', letterSpacing:'0.4px', minWidth:55 }}>Plane</span>
+                  <select
+                    value={targetDatumId ?? ''}
+                    onChange={(e) => setTargetDatumId(e.target.value || null)}
+                    style={{ flex:1, background:'var(--surface-3)', border:`1px solid ${targetDatumId ? '#f0a30a' : 'var(--border)'}`, borderRadius:'var(--radius-sm)', color:'var(--text-primary)', padding:'3px 6px', fontSize:11, outline:'none' }}
+                  >
+                    <option value="">{datumPlanes.length ? '— pick a datum plane —' : 'No datum planes — create one first'}</option>
+                    {datumPlanes.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
+                  </select>
+                </div>
+              )}
               <ToggleRow label="Reverse" k="reverse" opts={[{label:'Off',v:0},{label:'On',v:1}]} params={params} onChange={set} />
               {!isUpTo && <SliderRow label="Draft (°)" k="draft" min={-30} max={30} step={0.5} params={params} onChange={set} />}
               {!isUpTo && <SliderRow label="Wall (mm)" k="thick" min={0} max={20} step={0.5} params={params} onChange={set} />}
@@ -608,8 +676,9 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
                 <TargetPickRow
                   targetName={targetSolidId ? (useCADStore.getState().nodes[targetSolidId]?.name ?? '—') : null}
                   isPicking={isPicking}
+                  noun={endM === 3 ? 'face' : 'solid'}
                   onPick={() => useCADStore.getState().startOp3DTargetPick()}
-                  onClear={() => setTargetSolidId(null)}
+                  onClear={() => { setTargetSolidId(null); setTargetFacePoint(null); }}
                 />
               )}
             </>
