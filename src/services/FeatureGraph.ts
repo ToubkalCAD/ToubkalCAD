@@ -119,7 +119,10 @@ export function nodeToFeature(node: CADNode): Feature {
         for (const w of (p.targetWireIds as string[] | undefined) ?? []) push(inputs, refOf(w, 'profile'));
         push(inputs, refOf(p.targetSolidId, 'base'));     // pad/pocket boolean target (E2/E5)
         push(inputs, refOf(p.targetDatumId, 'plane'));    // up-to-datum limit
-        params = { ...(p.opParams ?? {}) };
+        // opParams hold the value knobs; the up-to-face target selection lives in
+        // top-level node params — carry it through so the op replays (targetFaceRef
+        // is the step-4 stable signature, targetFacePoint the positional fallback).
+        params = { ...(p.opParams ?? {}), targetFacePoint: p.targetFacePoint, targetFaceRef: p.targetFaceRef };
         complete = inputs.some((i) => i.role === 'profile');
         if (!complete) note = 'no profile input';
       } else {
@@ -145,7 +148,9 @@ export function nodeToFeature(node: CADNode): Feature {
       if (p.blendOp || p.sourceId) {
         op = (p.blendOp as FeatureOp) === 'chamfer' ? 'chamfer' : 'fillet';
         push(inputs, refOf(p.sourceId, 'base'));
-        params = pick(p, ['edgeIndices', 'blendValue', 'blendOp']);   // edgeIndices: legacy positional, migrates in step 4
+        // edgeRefs: Phase 1a stable signatures (step 4); edgeIndices: legacy
+        // positional fallback. The evaluator prefers refs, falls back to indices.
+        params = pick(p, ['edgeIndices', 'edgeRefs', 'blendValue', 'blendOp']);
         complete = !!p.sourceId;
         if (!complete) note = 'missing source input';
       } else if (p.featureOp === 'torus' || p.featureOp === 'cone') {

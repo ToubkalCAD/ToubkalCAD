@@ -1,10 +1,14 @@
 # Parametric Feature Tree & Recompute Engine — Design (Phase 1)
 
-Status: **steps 1–3 shipped** (see §10). The feature graph, the evaluator
-registry, and the recompute engine (topo replay + dirty propagation + rollback +
-per-feature error isolation) exist and are validated headlessly. Still to do:
-StableRef migration (4), graph-delta undo (5), timeline UI (6), persistence (7).
-Read `docs/ROADMAP.md` and `CLAUDE.md` first.
+Status: **steps 1–3 shipped, step 4 underway** (see §10). The feature graph, the
+evaluator registry, and the recompute engine (topo replay + dirty propagation +
+rollback + per-feature error isolation) exist, are validated headlessly, and are
+wired into the param-edit call sites. Step 4 (StableRef) has migrated the
+fillet/chamfer **edge** selection and the extrude **up-to-face** target onto
+geometric signatures (and fixed an up-to-face replay bug). Remaining for step 4:
+re-derive the BAKED face frames that still go stale — sketch-on-face workplanes
+and datum-from-face frames. Still to do: finish 4, graph-delta undo (5), timeline
+UI (6), persistence (7). Read `docs/ROADMAP.md` and `CLAUDE.md` first.
 
 ## 1. Why
 
@@ -241,8 +245,42 @@ The DAG can be introduced **without** a big-bang rewrite by wrapping what exists
    - **Still direct (not yet through the engine):** create paths (no descendants yet) and
      **gizmo body-moves** — automatic move-propagation needs placement modeled as a
      recomputed input (§4.2), a later change.
-4. **`StableRef` (signature resolver)** for faces/edges; migrate blend/boolean/sketch-
-   on-face refs off raw indices. Captured at pick time via `FacePicker`.
+4. 🚧 **`StableRef` (signature resolver)** for faces/edges; migrate sub-entity refs off
+   raw indices. **Done: fillet/chamfer edges.**
+   - `StableRef.captureEdge/captureEdges` capture a geometric signature (curve kind +
+     centre-of-mass + length + axis/radius) per picked edge in `BlendActionPanel.doApply`,
+     against the same placed source the evaluator resolves against. Stored as
+     `params.edgeRefs`, parallel to the legacy `params.edgeIndices`.
+   - `FeatureEvaluators.resolveBlendEdges` maps the stored selection onto the CURRENT
+     base's ordinals: signature resolves confidently → use it (survives edge RENUMBERING,
+     the index-shuffle case raw ordinals get wrong); rejects → fall back to the stored raw
+     ordinal (no regression vs. step 3); nothing resolves → throw (feature errors rather
+     than fillet an empty set). Legacy nodes (no `edgeRefs`) use raw indices unchanged.
+   - Validated by `npm run test:stableref` (10 assertions: identity round-trip; a bottom
+     edge keeps its identity across a top-boss fuse that shifts its ordinal 8→4, so the
+     signature picks 4 not the stale 8; raw-index fallback; hard-error; legacy passthrough).
+   - **Also done: up-to-face.** `StableRef.captureFaceAtPoint` captures a FaceSig of the
+     picked target face (nearest-face to the click, mirroring OccExtrusionService so it
+     matches what the extrude terminates on) in `Op3DPanel`, stored as `params.targetFaceRef`.
+     `FeatureEvaluators.resolveTargetFacePoint` re-resolves it on the live base and feeds
+     the resolved face's current centroid to `extrudeUpToFace`; falls back to the stored
+     `targetFacePoint` world point. This ALSO fixed a replay bug: the adapter dropped
+     `targetFacePoint` (only copied opParams), so up-to-face lost its limit on recompute —
+     it now carries targetFacePoint + targetFaceRef. Validated by `npm run test:stableref-face`
+     (9 assertions: round-trip, top-face survives a renumbering fuse 5→2, replay correctness,
+     limit-follows-on-renumbered-base, legacy point fallback).
+   - **Remaining (a distinct sub-project): re-derive BAKED face frames.** sketch-on-face
+     stores its `workplane` baked at creation, and datum-from-face methods (offset / angle /
+     tangent) pass their STORED frame through `evaluateDatum` unchanged — neither re-derives
+     from the source face on recompute, so both go stale if the underlying body changes. The
+     fix is to store a FaceSig on the source-face input and resolve it during recompute to
+     rebuild the frame (the datum evaluator is the natural home; sketch-on-face has no
+     evaluator yet and needs one). Boolean base/tool are whole-body NODE refs by id — already
+     stable. `FacePicker` already yields the world point + face group a FaceSig needs.
+   - Known limit (§6 Phase 1a): a signature is absolute-position based, so a reference on
+     a feature that TRANSLATES far (e.g. a fillet on a face of a growing extrude) may
+     reject and fall back rather than track — that's what OCC `Generated()`/`Modified()`
+     history threading (Phase 1b) is for.
 5. **Switch undo/redo to graph deltas**; drop the shape-retention GC hack.
 6. **Timeline UI** (`rollbackId` + bottom bar). Pure payoff once 1–5 exist.
 7. **Persistence** serializes the graph; **parallel recompute** as a later optimization.

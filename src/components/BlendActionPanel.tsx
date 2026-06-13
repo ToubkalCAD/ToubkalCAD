@@ -23,6 +23,7 @@ import { OccConverter }        from '../services/OccConverter';
 import { OccFilletService }    from '../services/OccFilletService';
 import { OccEdgeService }      from '../services/OccEdgeService';
 import { getPlacedShape }      from '../utils/placedShape';
+import { captureEdges }        from '../services/StableRef';
 import { propagateFromStore }  from '../services/RecomputeEngine.live';
 import { useDragPanel }        from '../hooks/useDragPanel';
 
@@ -218,7 +219,12 @@ export const BlendActionPanel: React.FC = () => {
     try {
       const result = computeBlend(op, shape, selEdges, value);
       const label  = op === 'fillet' ? 'Fillet' : 'Chamfer';
-      const params = { blendOp: op, sourceId: blendReq.targetId, edgeIndices: [...selEdges], blendValue: value };
+      // Capture a stable geometric signature per picked edge against the SAME
+      // placed source the evaluator will resolve against (step 4). These let the
+      // selection survive upstream edits that renumber edges; edgeIndices stays
+      // as the positional fallback. captureEdges is parallel to selEdges.
+      const edgeRefs = captureEdges(window.oc, shape, selEdges);
+      const params = { blendOp: op, sourceId: blendReq.targetId, edgeIndices: [...selEdges], edgeRefs, blendValue: value };
 
       if (blendReq.editNodeId) {
         const id  = blendReq.editNodeId;

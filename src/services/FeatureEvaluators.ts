@@ -16,7 +16,7 @@
 // ============================================================
 
 import type { FeatureOp } from './FeatureGraph';
-import type { StableRef } from './StableRef';
+import { resolveEdge, resolveFace, captureFace, type StableRef } from './StableRef';
 import { OccPrimitivesService } from './OccPrimitivesService';
 import { OccRevolutionService } from './OccRevolutionService';
 import { OccLoftService }       from './OccLoftService';
@@ -159,7 +159,8 @@ export const EVALUATORS: Partial<Record<FeatureOp, Evaluator>> = {
     if (endMode === 3) {                                   // up-to-face
       const base = firstRole(inputs, 'base');
       if (!base) throw new Error('extrude up-to-face: needs a base solid input');
-      solid = OccExtrusionService.extrudeUpToFace(oc, wires[0], upTo, base.shape, p.targetFacePoint);
+      const hitPoint = resolveTargetFacePoint(oc, base.shape, p);
+      solid = OccExtrusionService.extrudeUpToFace(oc, wires[0], upTo, base.shape, hitPoint);
     } else if (endMode === 6) {                            // up-to-plane (datum)
       const pwp = firstRole(inputs, 'plane')?.meta?.workplane;
       if (!pwp) throw new Error('extrude up-to-plane: needs a datum plane input');
@@ -201,12 +202,68 @@ export const EVALUATORS: Partial<Record<FeatureOp, Evaluator>> = {
 function blend(oc: any, inputs: ResolvedInput[], p: Record<string, any>, kind: 'fillet' | 'chamfer'): any {
   const base = firstRole(inputs, 'base') ?? inputs[0];
   if (!base) throw new Error(`${kind}: no source input`);
-  const edges: number[] = Array.isArray(p.edgeIndices) ? p.edgeIndices : [];
+  const edges = resolveBlendEdges(oc, base.shape, p);
   if (!edges.length) throw new Error(`${kind}: no edges selected`);
   const value = num(p, 'blendValue', 1);
   return kind === 'fillet'
     ? OccFilletService.filletEdges(oc, base.shape, edges, value)
     : OccFilletService.chamferEdges(oc, base.shape, edges, value);
+}
+
+/**
+ * Map a blend's stored edge selection onto edge ordinals of the CURRENT base.
+ *
+ * Phase 1a stable references (docs/PARAMETRIC.md §6): `params.edgeRefs` holds a
+ * geometric SIGNATURE per selected edge (captured at pick time), parallel to the
+ * legacy positional `params.edgeIndices`. We resolve each signature against the
+ * live base shape so a selection survives an upstream edit that RENUMBERS edges
+ * (the index-shuffle case the raw ordinals get wrong). Resolution policy:
+ *   • signature resolves confidently      → use the resolved ordinal (the win)
+ *   • signature rejects (geometry moved /  → fall back to the stored raw ordinal
+ *     ambiguous) but a raw index exists       (no regression vs. the legacy path)
+ *   • neither                              → drop that edge
+ * Throws only if NOTHING resolves (→ the feature errors instead of filleting an
+ * empty set). Legacy nodes with no `edgeRefs` use the raw indices unchanged.
+ */
+export function resolveBlendEdges(oc: any, baseShape: any, p: Record<string, any>): number[] {
+  const raw: number[] = Array.isArray(p.edgeIndices) ? p.edgeIndices : [];
+  const refs: any[]   = Array.isArray(p.edgeRefs) ? p.edgeRefs : [];
+  if (!refs.length) return raw;                                   // legacy node — unchanged
+
+  const out: number[] = [];
+  for (let i = 0; i < refs.length; i++) {
+    const ref = refs[i];
+    if (ref && ref.kind === 'edge') {
+      const r = resolveEdge(oc, baseShape, ref);
+      if (!r.rejected && r.index >= 0) { out.push(r.index); continue; }
+    }
+    if (typeof raw[i] === 'number') out.push(raw[i]);             // fall back to stored ordinal
+  }
+  if (!out.length) throw new Error('blend: no edge reference resolved on the updated body — re-select the edges');
+  return [...new Set(out)];                                       // dedupe
+}
+
+/**
+ * The hit point that selects the up-to-face target face on the CURRENT base.
+ *
+ * Stable-ref path (step 4): `params.targetFaceRef` is a FaceSig captured at pick
+ * time. We resolve it against the live base and return that face's current
+ * centroid, so the limit follows the target face across an upstream edit that
+ * renumbers or moves it. On reject (or legacy nodes with no ref) we fall back to
+ * the stored raw world point `params.targetFacePoint` — unchanged behaviour.
+ */
+export function resolveTargetFacePoint(
+  oc: any, baseShape: any, p: Record<string, any>,
+): [number, number, number] | undefined {
+  const ref = p.targetFaceRef;
+  if (ref && ref.kind === 'face') {
+    const r = resolveFace(oc, baseShape, ref);
+    if (!r.rejected && r.index >= 0) {
+      const cur = captureFace(oc, baseShape, r.index);
+      if (cur) return cur.centroid;
+    }
+  }
+  return p.targetFacePoint;                                       // fallback (legacy / unresolved)
 }
 
 /** Evaluate one feature. Throws if the op has no evaluator yet (sketch container / datum). */

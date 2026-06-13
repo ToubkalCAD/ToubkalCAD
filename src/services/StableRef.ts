@@ -70,11 +70,48 @@ export function captureFace(oc: any, shape: any, faceIndex: number): FaceSig | n
   try { return faceSig(oc, face); } finally { try { face.delete(); } catch {} }
 }
 
+/** Signature of the face on `shape` nearest `point` — i.e. the face a click
+ *  landed on. Mirrors OccExtrusionService.nearestFaceIndex (BRepExtrema over the
+ *  deduped face map) so a captured up-to-face ref matches the face the extrude
+ *  actually terminates on. Returns null if no face is measurable. */
+export function captureFaceAtPoint(oc: any, shape: any, point: [number, number, number]): FaceSig | null {
+  const idx = nearestFaceIndex(oc, shape, point);
+  return idx >= 0 ? captureFace(oc, shape, idx) : null;
+}
+
+/** 0-based ordinal of the face on `shape` nearest `point` (deduped face map). */
+function nearestFaceIndex(oc: any, shape: any, point: [number, number, number]): number {
+  const map = subMap(oc, shape, oc.TopAbs_ShapeEnum.TopAbs_FACE);
+  const s0 = new WasmScope();
+  let best = -1, bestD = Infinity;
+  try {
+    const pnt = s0.keep(new oc.gp_Pnt_3(point[0], point[1], point[2]));
+    const vtx = s0.keep(new oc.BRepBuilderAPI_MakeVertex(pnt)).Vertex();
+    const n = map.Extent();
+    for (let i = 1; i <= n; i++) {
+      const s = new WasmScope();
+      try {
+        const face = oc.TopoDS.Face_1(map.FindKey(i));
+        const dss  = s.keep(new oc.BRepExtrema_DistShapeShape_1());
+        dss.LoadS1(vtx); dss.LoadS2(face);
+        dss.Perform(new oc.Message_ProgressRange_1());
+        if (dss.IsDone() && dss.Value() < bestD) { bestD = dss.Value(); best = i - 1; }
+      } catch { /* unmeasurable face */ } finally { s.free(); }
+    }
+  } finally { s0.free(); map.delete(); }
+  return best;
+}
+
 /** Signature of the edge at TopExp_Explorer ordinal `edgeIndex` (0-based). */
 export function captureEdge(oc: any, shape: any, edgeIndex: number): EdgeSig | null {
   const edge = nthSub(oc, shape, oc.TopAbs_ShapeEnum.TopAbs_EDGE, edgeIndex, (c: any) => oc.TopoDS.Edge_1(c));
   if (!edge) return null;
   try { return edgeSig(oc, edge); } finally { try { edge.delete(); } catch {} }
+}
+
+/** Signatures for several edges (parallel to `indices`; null where capture failed). */
+export function captureEdges(oc: any, shape: any, indices: number[]): (EdgeSig | null)[] {
+  return indices.map((i) => captureEdge(oc, shape, i));
 }
 
 // ─── Resolve ────────────────────────────────────────────────────────────────

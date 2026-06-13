@@ -16,6 +16,7 @@ import type { NodeType, Workplane } from '../store/cadStore';
 import { CADGeometryRegistry }  from '../services/CADGeometryRegistry';
 import { OccConverter }         from '../services/OccConverter';
 import { getPlacedShape }       from '../utils/placedShape';
+import { captureFaceAtPoint }   from '../services/StableRef';
 import { propagateFromStore }   from '../services/RecomputeEngine.live';
 import { OccExtrusionService, ExtrudeEnd } from '../services/OccExtrusionService';
 import { OccBooleanService }    from '../services/OccBooleanService';
@@ -547,6 +548,16 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
       const shape = computeShape(req.op, req.targetIds, snap, targetSolidId ?? undefined, targetFacePoint ?? undefined, targetDatumId ?? undefined);
       store.log(`Op3D: OCC shape computed ✓`, 'info');
 
+      // Up-to-face: capture a stable signature of the picked target face (step 4)
+      // against the same placed target the evaluator resolves against, so the
+      // limit follows that face across upstream edits. targetFacePoint stays as
+      // the positional fallback.
+      let targetFaceRef: any;
+      if (targetFacePoint && targetSolidId && window.oc) {
+        const placedTarget = getPlacedShape(targetSolidId);
+        if (placedTarget) targetFaceRef = captureFaceAtPoint(window.oc, placedTarget, targetFacePoint);
+      }
+
       if (req.editNodeId) {
         // ── RE-EDIT ──────────────────────────────────────────────────────────
         const id  = req.editNodeId;
@@ -555,7 +566,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         window.dispatchEvent(new CustomEvent('cad-update-mesh', { detail: { id, material: old?.material } }));
         const idx = Number(old?.name?.match(/\d+$/)?.[0] ?? nextIdx(OP_NTYPE[req.op]));
         store.renameNode(id, `${OP_LABEL[req.op]}${idx}`);
-        store.setNodeParams(id, { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetDatumId: targetDatumId ?? undefined });
+        store.setNodeParams(id, { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined });
         store.log(`${old?.name ?? id} updated ✓`, 'success');
         // Propagate to anything downstream (fillet / boolean / pad on this op).
         propagateFromStore(id);
@@ -573,7 +584,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
           id, name, type, visible: true, locked: false, parentId: null, notes: '',
           transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
           material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS[type] ?? 0x5588cc },
-          params:    { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetDatumId: targetDatumId ?? undefined },
+          params:    { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined },
         });
 
         // Verify the node is actually in the store
