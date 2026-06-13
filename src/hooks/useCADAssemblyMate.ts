@@ -2,28 +2,29 @@
 // ToubkalCAD – useCADAssemblyMate.ts
 //
 // One-shot assembly mate (Coincident, planar faces). Active while
-// interactionMode === 'ASSEMBLY_MATE'.
+// interactionMode === 'ASSEMBLY_MATE' or 'ASSEMBLY_ALIGN'.
 //
-// For every visible solid it builds a transparent, raycastable overlay mesh per
-// planar face — extracted from the PLACED shape so the overlay sits where the
+// Face picking rides the REAL solid meshes via FacePicker — no per-face overlay
+// clones, and the planes are read from the PLACED shape so they sit where the
 // solid is actually drawn. Two-step pick:
 //   1) click a reference face (stays highlighted) — the part that won't move,
 //   2) click a face on ANOTHER solid — that solid snaps so the two faces are
 //      coplanar & touching (normals opposed, centroids aligned).
-// After a mate the moved solid's overlays are rebuilt; the mode stays active so
-// you can keep mating. Pick another tool to leave.
+// The mode stays active so you can keep mating. Pick another tool to leave.
+// Only PLANAR faces qualify; clicking a curved face is rejected with a hint.
 // ============================================================
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
 import { getPlacedShape } from '../utils/placedShape';
-import { OccFaceService, PlanarFace } from '../services/OccFaceService';
+import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
+import { OccFaceService } from '../services/OccFaceService';
+import { FacePicker, FaceHit } from '../services/FacePicker';
 import { computeMateTransform } from '../services/AssemblyMate';
 
-const COLOR_IDLE = 0x2a7fd4;
 const COLOR_HOVER = 0x00e0a0;
-const COLOR_REF  = 0xff8800;   // chosen reference face
+const COLOR_REF   = 0xff8800;   // chosen reference face
 const CLICK_SLOP_PX = 5;
 const FACE_MODES = new Set(['ASSEMBLY_MATE', 'ASSEMBLY_ALIGN']);
 
@@ -31,7 +32,24 @@ const FACE_MODES = new Set(['ASSEMBLY_MATE', 'ASSEMBLY_ALIGN']);
 let alignOffset = 0;
 export const setAlignOffset = (v: number) => { alignOffset = v; };
 
-interface FaceMeta extends PlanarFace { nodeId: string; }
+interface FacePlane {
+  nodeId: string; faceIndex: number;
+  origin: [number,number,number]; normal: [number,number,number];
+  uAxis: [number,number,number]; vAxis: [number,number,number];
+}
+
+/** World-space plane of one face, read from the placed shape (null if curved). */
+function facePlane(nodeId: string, faceIndex: number): FacePlane | null {
+  const reg    = CADGeometryRegistry.getInstance();
+  const placed = getPlacedShape(nodeId);
+  if (!placed) return null;
+  try {
+    const p = OccFaceService.planeFromFaceIndex(window.oc, placed, faceIndex);
+    return p ? { nodeId, faceIndex, ...p } : null;
+  } finally {
+    if (placed !== reg.getShape(nodeId)) { try { placed.delete(); } catch {} }
+  }
+}
 
 export function useCADAssemblyMate(
   containerRef: React.RefObject<HTMLDivElement | null>,
@@ -39,103 +57,65 @@ export function useCADAssemblyMate(
   cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
-  const meshesRef = useRef<THREE.Mesh[]>([]);
-  const hoverRef  = useRef<THREE.Mesh | null>(null);
-  const refFaceRef = useRef<FaceMeta | null>(null);
-  const refMeshRef = useRef<THREE.Mesh | null>(null);
-  const [rebuild, setRebuild] = useState(0);
+  const hoverHlRef  = useRef<THREE.Mesh | null>(null);
+  const hoverKeyRef = useRef<string | null>(null);
+  const refHlRef    = useRef<THREE.Mesh | null>(null);
+  const refDataRef  = useRef<FacePlane | null>(null);
 
-  // ─── Build / tear down face overlays ─────────────────────────────────────────
-  useEffect(() => {
-    const scene = sceneRef.current;
-    if (!scene) return;
-
-    const dispose = () => {
-      for (const m of meshesRef.current) {
-        scene.remove(m); m.geometry.dispose(); (m.material as THREE.Material).dispose();
-      }
-      meshesRef.current = [];
-      hoverRef.current = null;
-      refMeshRef.current = null;
-    };
-
-    dispose();
-    if (!FACE_MODES.has(mode) || !window.oc) return;
-
-    const st = useCADStore.getState();
-    let solids = 0, faceTotal = 0;
-    for (const id of Object.keys(st.nodes)) {
-      const node = st.nodes[id];
-      if (!node || !node.visible) continue;
-      if (node.type === 'sketch' || node.type === 'sketch_wire') continue;
-      const shape = getPlacedShape(id);
-      if (!shape) continue;
-      solids++;
-      try {
-        for (const f of OccFaceService.extractPlanarFaces(window.oc, shape)) {
-          const geo = new THREE.BufferGeometry();
-          geo.setAttribute('position', new THREE.Float32BufferAttribute(f.positions, 3));
-          geo.computeVertexNormals();
-          const mat = new THREE.MeshBasicMaterial({
-            color: COLOR_IDLE, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false,
-          });
-          const mesh = new THREE.Mesh(geo, mat);
-          mesh.renderOrder = 998;
-          mesh.userData = { isMateFace: true, face: { ...f, nodeId: id } as FaceMeta };
-          scene.add(mesh);
-          meshesRef.current.push(mesh);
-          // Re-highlight the still-pending reference face after a rebuild.
-          const r = refFaceRef.current;
-          if (r && r.nodeId === id && r.index === f.index) {
-            mat.color.setHex(COLOR_REF); mat.opacity = 0.32; refMeshRef.current = mesh;
-          }
-          faceTotal++;
-        }
-      } catch { /* skip unusable faces */ }
-    }
-
-    const verb = mode === 'ASSEMBLY_ALIGN' ? 'Align' : 'Mate';
-    if (solids < 2) useCADStore.getState().log(`Assembly ${verb.toLowerCase()} needs at least two solids.`, 'warn');
-    else if (!refFaceRef.current) useCADStore.getState().log(`${verb}: pick a reference face (${faceTotal} available).`, 'info');
-
-    return dispose;
-  }, [mode, sceneRef, rebuild]);
-
-  // ─── Hover + two-step pick ───────────────────────────────────────────────────
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+
+    const scene = () => sceneRef.current;
+
+    const disposeMesh = (m: THREE.Mesh | null) => {
+      const s = scene();
+      if (m && s) { s.remove(m); m.geometry.dispose(); (m.material as THREE.Material).dispose(); }
+    };
+    const clearHover = () => {
+      if (hoverHlRef.current) disposeMesh(hoverHlRef.current);
+      hoverHlRef.current = null; hoverKeyRef.current = null;
+    };
+    const clearRef = () => {
+      if (refHlRef.current) disposeMesh(refHlRef.current);
+      refHlRef.current = null; refDataRef.current = null;
+    };
+
+    if (!FACE_MODES.has(mode)) { clearHover(); clearRef(); container.style.cursor = 'default'; return; }
 
     const raycaster = new THREE.Raycaster();
     const ndc = new THREE.Vector2();
     const downPos = { x: 0, y: 0, active: false };
 
-    const pick = (e: MouseEvent): THREE.Mesh | null => {
+    const cast = (e: MouseEvent): FaceHit | null => {
       const camera = cameraRef.current;
-      if (!camera) return null;
+      const s = scene();
+      if (!camera || !s) return null;
       const rect = container.getBoundingClientRect();
       ndc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
       raycaster.setFromCamera(ndc, camera);
-      const hits = raycaster.intersectObjects(meshesRef.current, false);
-      return hits.length ? (hits[0].object as THREE.Mesh) : null;
+      return FacePicker.raycast(raycaster, s);
     };
 
-    const setHover = (m: THREE.Mesh | null) => {
-      if (hoverRef.current === m) return;
-      const prev = hoverRef.current;
-      if (prev && prev !== refMeshRef.current) {
-        const pm = prev.material as THREE.MeshBasicMaterial; pm.color.setHex(COLOR_IDLE); pm.opacity = 0.12;
+    const setHover = (hit: FaceHit | null) => {
+      const s = scene();
+      const ref = refDataRef.current;
+      // Don't draw a hover over the locked reference face.
+      const isRef = hit && ref && hit.nodeId === ref.nodeId && hit.faceIndex === ref.faceIndex;
+      const key = hit && !isRef ? `${hit.nodeId}#${hit.faceIndex}` : null;
+      if (key === hoverKeyRef.current) { container.style.cursor = hit ? 'pointer' : 'default'; return; }
+      clearHover();
+      hoverKeyRef.current = key;
+      if (hit && !isRef && s) {
+        const hl = FacePicker.makeHighlight(hit.mesh, hit.group, { color: COLOR_HOVER });
+        s.add(hl); hoverHlRef.current = hl;
       }
-      hoverRef.current = m;
-      if (m && m !== refMeshRef.current) {
-        const mm = m.material as THREE.MeshBasicMaterial; mm.color.setHex(COLOR_HOVER); mm.opacity = 0.32;
-      }
-      container.style.cursor = m ? 'pointer' : 'default';
+      container.style.cursor = hit ? 'pointer' : 'default';
     };
 
     const onMove = (e: MouseEvent) => {
       if (!FACE_MODES.has(useCADStore.getState().interactionMode)) return;
-      setHover(pick(e));
+      setHover(cast(e));
     };
     const onDown = (e: MouseEvent) => {
       if (e.button !== 0 || !FACE_MODES.has(useCADStore.getState().interactionMode)) return;
@@ -146,80 +126,66 @@ export function useCADAssemblyMate(
       downPos.active = false;
       if (!FACE_MODES.has(useCADStore.getState().interactionMode)) return;
       if (Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > CLICK_SLOP_PX) return;
-      const m = pick(e);
-      if (!m) return;
+      const hit = cast(e);
+      if (!hit) return;
       e.stopPropagation();
-      const f = m.userData.face as FaceMeta;
       const st = useCADStore.getState();
 
+      const plane = facePlane(hit.nodeId, hit.faceIndex);
+      if (!plane) { st.log('That face is not planar — pick a flat face.', 'warn'); return; }
+
       // Step 1 — set the reference face.
-      if (!refFaceRef.current) {
-        refFaceRef.current = f;
-        refMeshRef.current = m;
-        const mat = m.material as THREE.MeshBasicMaterial; mat.color.setHex(COLOR_REF); mat.opacity = 0.32;
-        hoverRef.current = null;
-        st.log(`Reference set on ${st.nodes[f.nodeId]?.name ?? 'solid'}. Now pick a face on the part to move.`, 'info');
+      if (!refDataRef.current) {
+        refDataRef.current = plane;
+        clearHover();
+        const s = scene();
+        if (s) { const hl = FacePicker.makeHighlight(hit.mesh, hit.group, { color: COLOR_REF }); s.add(hl); refHlRef.current = hl; }
+        st.log(`Reference set on ${st.nodes[plane.nodeId]?.name ?? 'solid'}. Now pick a face on the part to move.`, 'info');
         return;
       }
 
       // Step 2 — mate the second face's solid onto the reference.
-      const ref = refFaceRef.current;
-      if (f.nodeId === ref.nodeId) { st.log('Pick a face on a different solid to move.', 'warn'); return; }
-      const movNode = st.nodes[f.nodeId];
+      const ref = refDataRef.current;
+      if (plane.nodeId === ref.nodeId) { st.log('Pick a face on a different solid to move.', 'warn'); return; }
+      const movNode = st.nodes[plane.nodeId];
       if (!movNode) return;
 
       const align = st.interactionMode === 'ASSEMBLY_ALIGN';
       // Both keep the faces FACING each other (opposed normals); Align just adds
       // a gap so the parts end up parallel `offset` mm apart instead of touching.
       const t = computeMateTransform(
-        { origin: ref.origin, normal: ref.normal, uAxis: ref.uAxis },
-        { origin: f.origin,   normal: f.normal,   uAxis: f.uAxis },
+        { origin: ref.origin,   normal: ref.normal,   uAxis: ref.uAxis },
+        { origin: plane.origin, normal: plane.normal, uAxis: plane.uAxis },
         movNode.transform,
         { opposed: true, offset: align ? alignOffset : 0 },
       );
-      st.updateTransform(f.nodeId, t.position, t.rotation, t.scale);
+      st.updateTransform(plane.nodeId, t.position, t.rotation, t.scale);
       window.dispatchEvent(new CustomEvent('cad-apply-transform', {
-        detail: { id: f.nodeId, position: t.position, rotation: t.rotation },
+        detail: { id: plane.nodeId, position: t.position, rotation: t.rotation },
       }));
       st.log(`${align ? 'Aligned' : 'Mated'} ${movNode.name} to ${st.nodes[ref.nodeId]?.name ?? 'reference'}.`, 'success');
 
-      // Reset for the next mate; rebuild overlays so moved faces are current.
-      refFaceRef.current = null;
-      refMeshRef.current = null;
-      hoverRef.current = null;
-      setRebuild((n) => n + 1);
+      clearHover(); clearRef();   // ready for the next mate
     };
+
+    // If a pending reference's solid is deleted, drop the stale highlight.
+    const unsub = useCADStore.subscribe((curr, prev) => {
+      if (curr.nodes === prev.nodes) return;
+      const ref = refDataRef.current;
+      if (ref && !curr.nodes[ref.nodeId]) clearRef();
+      clearHover();   // a transform/visibility change may have moved the hovered face
+    });
 
     container.addEventListener('mousemove', onMove);
     container.addEventListener('mousedown', onDown, true);
     container.addEventListener('mouseup',   onUp,   true);
     return () => {
+      clearHover(); clearRef();
+      unsub();
+      container.style.cursor = 'default';
       container.removeEventListener('mousemove', onMove);
       container.removeEventListener('mousedown', onDown, true);
       container.removeEventListener('mouseup',   onUp,   true);
     };
-  }, [containerRef, cameraRef]);
-
-  // Clear the pending reference when leaving the face-mate modes.
-  useEffect(() => {
-    if (!FACE_MODES.has(mode)) { refFaceRef.current = null; refMeshRef.current = null; }
-  }, [mode]);
-
-  // Rebuild overlays when solids are added/removed/hidden so deleted bodies
-  // don't leave orphaned face overlays floating in the viewport.
-  useEffect(() => {
-    const unsub = useCADStore.subscribe((curr, prev) => {
-      if (curr.nodes === prev.nodes) return;
-      if (!FACE_MODES.has(useCADStore.getState().interactionMode)) return;
-      const a = Object.keys(curr.nodes), b = Object.keys(prev.nodes);
-      const changed = a.length !== b.length
-        || a.some((id) => !prev.nodes[id] || prev.nodes[id].visible !== curr.nodes[id].visible);
-      if (!changed) return;
-      if (refFaceRef.current && !curr.nodes[refFaceRef.current.nodeId]) {
-        refFaceRef.current = null; refMeshRef.current = null;
-      }
-      setRebuild((n) => n + 1);
-    });
-    return unsub;
-  }, []);
+  }, [mode, containerRef, sceneRef, cameraRef]);
 }

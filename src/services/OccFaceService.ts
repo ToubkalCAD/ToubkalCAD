@@ -86,6 +86,79 @@ export class OccFaceService {
     return out;
   }
 
+  /** Derive a workplane from ONE face, addressed by its 0-based TopExp_Explorer
+   *  ordinal (the same index OccConverter stamps into `geometry.userData.faceGroups`
+   *  and that extractPlanarFaces reports as `index`). Returns null if the face is
+   *  not planar — you can only start a flat sketch on a flat face. No re-tessellation:
+   *  the shape was already meshed when its viewport mesh was built, so the cached
+   *  triangulation supplies the centroid origin (falls back to the plane location). */
+  static planeFromFaceIndex(
+    oc: any, shape: any, faceIndex: number,
+  ): { origin: [number,number,number]; normal: [number,number,number]; uAxis: [number,number,number]; vAxis: [number,number,number] } | null {
+    // Walk the explorer to the Nth face (same order as OccConverter).
+    const exp = new oc.TopExp_Explorer_2(
+      shape, oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE,
+    );
+    let i = 0; let face: any = null;
+    while (exp.More()) {
+      if (i === faceIndex) { face = oc.TopoDS.Face_1(exp.Current()); break; }
+      i++; exp.Next();
+    }
+    exp.delete();
+    if (!face) return null;
+
+    const scope = new WasmScope();
+    try {
+      const surfH = scope.keep(oc.BRep_Tool.Surface_2(face));
+      if (surfH.IsNull()) return null;
+      const adaptor = scope.keep(new oc.GeomAdaptor_Surface_2(surfH));
+      if (adaptor.GetType() !== oc.GeomAbs_SurfaceType.GeomAbs_Plane) return null;
+
+      const pln      = scope.keep(adaptor.Plane());
+      const reversed = face.Orientation_1() === oc.TopAbs_Orientation.TopAbs_REVERSED;
+      const nDir = scope.keep(scope.keep(pln.Axis()).Direction());
+      let n: [number,number,number] = [nDir.X(), nDir.Y(), nDir.Z()];
+      if (reversed) n = [-n[0], -n[1], -n[2]];
+      const xDir = scope.keep(scope.keep(pln.XAxis()).Direction());
+      const yDir = scope.keep(scope.keep(pln.YAxis()).Direction());
+      const uAxis: [number,number,number] = [xDir.X(), xDir.Y(), xDir.Z()];
+      const vAxis: [number,number,number] = [yDir.X(), yDir.Y(), yDir.Z()];
+
+      // Origin = centroid of the cached triangulation; fallback = plane location.
+      let origin: [number,number,number];
+      const location = scope.keep(new oc.TopLoc_Location_1());
+      const polyH    = oc.BRep_Tool.Triangulation(face, location, 0);
+      if (!polyH.IsNull()) {
+        const poly = polyH.get();
+        const trsf = scope.keep(location.Transformation());
+        const isId = location.IsIdentity();
+        const nb   = poly.NbNodes();
+        let cx = 0, cy = 0, cz = 0;
+        for (let k = 1; k <= nb; k++) {
+          const node = poly.Node(k);
+          let px = node.X(), py = node.Y(), pz = node.Z();
+          if (!isId) { const p = node.Transformed(trsf); px = p.X(); py = p.Y(); pz = p.Z(); p.delete(); }
+          node.delete();
+          cx += px; cy += py; cz += pz;
+        }
+        origin = nb > 0 ? [cx / nb, cy / nb, cz / nb] : null as any;
+      } else {
+        origin = null as any;
+      }
+      if (!origin) {
+        const loc = scope.keep(pln.Location());
+        origin = [loc.X(), loc.Y(), loc.Z()];
+      }
+
+      return { origin, normal: n, uAxis, vAxis };
+    } catch {
+      return null;
+    } finally {
+      scope.free();
+      face.delete();
+    }
+  }
+
   /** All planar faces of `shape`, with triangulation + derived workplane. */
   static extractPlanarFaces(oc: any, shape: any, deflection = 0.1): PlanarFace[] {
     const out: PlanarFace[] = [];

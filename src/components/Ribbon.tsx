@@ -247,12 +247,15 @@ export const Ribbon: React.FC = () => {
   };
 
   // ─── Helpers (verbatim from CADToolbar) ─────────────────────────────────────
-  const create = (id: string, name: string, type: any, shape: any) => {
+  // `params` is the feature RECIPE (op knobs + input ids) — persisted so the
+  // parametric graph (FeatureGraph) can recover inputs and, later, replay the op.
+  const create = (id: string, name: string, type: any, shape: any, params?: Record<string, any>) => {
     reg.registerShape(id, shape);
     addNode({
       id, name, type, visible: true, locked: false, parentId: null, notes: '',
       transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
       material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS[type as keyof typeof NODE_TYPE_COLORS] ?? 0x5588cc },
+      ...(params ? { params } : {}),
     });
     window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }));
     log(`${name} created.`, 'success');
@@ -272,7 +275,7 @@ export const Ribbon: React.FC = () => {
     ]);
     if (!v) return;
     create(crypto.randomUUID(), `Box ${v.w}×${v.h}×${v.d}`, 'box',
-      OccPrimitivesService.createBox(window.oc, v.w, v.h, v.d));
+      OccPrimitivesService.createBox(window.oc, v.w, v.h, v.d), { w: v.w, h: v.h, d: v.d });
   });
 
   const mkCyl = () => withOC(async () => {
@@ -282,7 +285,7 @@ export const Ribbon: React.FC = () => {
     ]);
     if (!v) return;
     create(crypto.randomUUID(), `Cylinder r${v.r}h${v.h}`, 'cylinder',
-      OccPrimitivesService.createCylinder(window.oc, v.r, v.h));
+      OccPrimitivesService.createCylinder(window.oc, v.r, v.h), { r: v.r, h: v.h });
   });
 
   const mkSph = () => withOC(async () => {
@@ -291,7 +294,7 @@ export const Ribbon: React.FC = () => {
     ]);
     if (!v) return;
     create(crypto.randomUUID(), `Sphere r${v.r}`, 'sphere',
-      OccPrimitivesService.createSphere(window.oc, v.r));
+      OccPrimitivesService.createSphere(window.oc, v.r), { r: v.r });
   });
 
   const mkTorus = () => withOC(async () => {
@@ -301,7 +304,7 @@ export const Ribbon: React.FC = () => {
     ]);
     if (!v) return;
     create(crypto.randomUUID(), `Torus R${v.R}r${v.r}`, 'compound',
-      OccRevolutionService.createTorus(window.oc, v.R, v.r));
+      OccRevolutionService.createTorus(window.oc, v.R, v.r), { featureOp: 'torus', R: v.R, r: v.r });
   });
 
   const mkCone = () => withOC(async () => {
@@ -312,7 +315,7 @@ export const Ribbon: React.FC = () => {
     ]);
     if (!v) return;
     create(crypto.randomUUID(), `Cone r${v.r1}/r${v.r2}h${v.h}`, 'compound',
-      OccRevolutionService.createCone(window.oc, v.r1, v.r2, v.h));
+      OccRevolutionService.createCone(window.oc, v.r1, v.r2, v.h), { featureOp: 'cone', r1: v.r1, r2: v.r2, h: v.h });
   });
 
   // ─── Modifications (per-edge blend panel) ───────────────────────────────────
@@ -481,7 +484,8 @@ export const Ribbon: React.FC = () => {
       try {
         const id = crypto.randomUUID();
         create(id, `Revolve${v.angle.toFixed(0)}°/${axisLabels[idx]}`, 'revolve',
-          OccRevolutionService.revolveProfile(window.oc, wire, [0,0,0], axisVecs[idx], v.angle));
+          OccRevolutionService.revolveProfile(window.oc, wire, [0,0,0], axisVecs[idx], v.angle),
+          { opType: 'revolve', targetWireIds: [wireId], opParams: { axis: idx, angle: v.angle } });
         useCADStore.getState().adoptSketchSources(id, [wireId]);
       } finally { setProc(false); }
     });
@@ -503,7 +507,8 @@ export const Ribbon: React.FC = () => {
       try {
         const id = crypto.randomUUID();
         create(id, `Loft(${sketchIds.length})`, 'loft',
-          OccLoftService.loftProfiles(window.oc, wires, v.solid >= 0.5, v.ruled >= 0.5));
+          OccLoftService.loftProfiles(window.oc, wires, v.solid >= 0.5, v.ruled >= 0.5),
+          { opType: 'loft', targetWireIds: [...sketchIds], opParams: { solid: v.solid >= 0.5 ? 1 : 0, ruled: v.ruled >= 0.5 ? 1 : 0 } });
         useCADStore.getState().adoptSketchSources(id, sketchIds);
       } finally { setProc(false); }
     });
@@ -520,7 +525,8 @@ export const Ribbon: React.FC = () => {
       setProc(true, 'Sweeping…');
       try {
         const id = crypto.randomUUID();
-        create(id, 'Sweep', 'sweep', OccSweepService.sweepProfile(window.oc, profile, spine));
+        create(id, 'Sweep', 'sweep', OccSweepService.sweepProfile(window.oc, profile, spine),
+          { opType: 'sweep', targetWireIds: [sketchIds[0], sketchIds[1]], opParams: { spineIndex: 1 } });
         useCADStore.getState().adoptSketchSources(id, [sketchIds[0], sketchIds[1]]);
       } finally { setProc(false); }
     });
@@ -620,7 +626,7 @@ export const Ribbon: React.FC = () => {
       try {
         const id = crypto.randomUUID();
         create(id, `Mirror/${plane} (${nodes[srcId]?.name ?? srcId.slice(0,6)})`, 'mirror',
-          OccTransformService.mirror(window.oc, placed, plane));
+          OccTransformService.mirror(window.oc, placed, plane), { sourceId: srcId, plane });
       } finally { setProc(false); }
     });
   };
@@ -646,7 +652,8 @@ export const Ribbon: React.FC = () => {
       try {
         const id = crypto.randomUUID();
         create(id, `Linear×${count}/${AXIS_LABEL[idx]}`, 'pattern',
-          OccTransformService.linearPattern(window.oc, placed, AXIS_VEC[idx], v.spacing, count));
+          OccTransformService.linearPattern(window.oc, placed, AXIS_VEC[idx], v.spacing, count),
+          { sourceId: srcId, mode: 'linear', axis: idx, spacing: v.spacing, count });
       } finally { setProc(false); }
     });
   };
@@ -672,7 +679,8 @@ export const Ribbon: React.FC = () => {
       try {
         const id = crypto.randomUUID();
         create(id, `Circular×${count}/${AXIS_LABEL[idx]}`, 'pattern',
-          OccTransformService.circularPattern(window.oc, placed, [0,0,0], AXIS_VEC[idx], v.angle, count));
+          OccTransformService.circularPattern(window.oc, placed, [0,0,0], AXIS_VEC[idx], v.angle, count),
+          { sourceId: srcId, mode: 'circular', axis: idx, angle: v.angle, count });
       } finally { setProc(false); }
     });
   };

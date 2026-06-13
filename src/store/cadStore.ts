@@ -405,6 +405,33 @@ function makeLog(msg: string, level: LogEntry['level'] = 'info'): LogEntry {
   return { id: makeId(), timestamp: Date.now(), level, message: msg };
 }
 
+/** Cap on retained undo steps. Bounds both the JS history arrays and the WASM
+ *  shapes the registry keeps alive for undo: a deleted node's OCC shape survives
+ *  exactly as long as its delete action stays in this window, then ages out and
+ *  is freed (see CADGeometryRegistry's reachability GC). */
+const HISTORY_LIMIT = 100;
+
+/** Append an action to `past`, trimming the oldest entries past HISTORY_LIMIT.
+ *  Only new actions (which also clear `future`) grow the stack — undo/redo just
+ *  shuffle between past/future, so capping here bounds the total. */
+function pushPast(past: CADAction[], action: CADAction): CADAction[] {
+  const next = [...past, action];
+  return next.length > HISTORY_LIMIT ? next.slice(next.length - HISTORY_LIMIT) : next;
+}
+
+/** After an undo/redo, push each restored node's transform back onto its mesh so
+ *  the viewport matches the metadata. Nodes with no mesh (sketches) are no-ops in
+ *  the Viewport handler. Must run AFTER the cad-add-mesh events so re-added
+ *  meshes already exist in the scene. */
+function syncTransforms(nodes: Record<string, CADNode>): void {
+  for (const id in nodes) {
+    const t = nodes[id].transform;
+    window.dispatchEvent(new CustomEvent('cad-apply-transform', {
+      detail: { id, position: t.position, rotation: t.rotation },
+    }));
+  }
+}
+
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 export const useCADStore = create<CADState>((set, get) => ({
@@ -664,7 +691,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       nodesAfter:  Object.values(updatedNodes),
     };
     set({ nodes: updatedNodes, rootIds: updatedRootIds,
-          past: [...get().past, action], future: [] });
+          past: pushPast(get().past, action), future: [] });
     get().log(`Created: ${newNode.name} (${newNode.type})`, 'success');
   },
 
@@ -709,7 +736,7 @@ export const useCADStore = create<CADState>((set, get) => ({
   },
 
   deleteNode: (id) => {
-    const { nodes, rootIds } = get();
+    const { nodes, rootIds, sketchSession } = get();
     if (!nodes[id]) return;
 
     const nodesBefore  = Object.values(nodes);
@@ -756,15 +783,25 @@ export const useCADStore = create<CADState>((set, get) => ({
       };
     }
 
+    // If the active sketch (or an ancestor of it) was just deleted, end the
+    // sketch session — otherwise the app stays "in" a sketch that no longer
+    // exists, blocking starting another sketch or extruding a different one.
+    const activeSketchDeleted = !!sketchSession && deletedIds.includes(sketchSession.id);
+
     set({
       nodes: updatedNodes, rootIds: updatedRootIds,
       selectedIds: get().selectedIds.filter((s) => s !== id),
-      past: [...get().past, {
+      past: pushPast(get().past, {
         type: 'DELETE', description: `Delete "${deletedName}"`,
         nodesBefore, nodesAfter: Object.values(updatedNodes),
-      }],
+      }),
       future: [],
+      ...(activeSketchDeleted ? { sketchSession: null, interactionMode: 'SELECT' as InteractionMode } : {}),
     });
+
+    if (activeSketchDeleted) {
+      get().log(`Sketch "${sketchSession!.name}" was deleted — sketch mode ended.`, 'info');
+    }
 
     // Notify the viewport to remove all deleted Three.js objects
     deletedIds.forEach((did) =>
@@ -813,10 +850,10 @@ export const useCADStore = create<CADState>((set, get) => ({
     const updatedNodes = { ...nodes, [id]: { ...nodes[id], name } };
     set({
       nodes: updatedNodes,
-      past: [...get().past, {
+      past: pushPast(get().past, {
         type: 'RENAME', description: `Rename → "${name}"`,
         nodesBefore, nodesAfter: Object.values(updatedNodes),
-      }],
+      }),
       future: [],
     });
   },
@@ -840,10 +877,10 @@ export const useCADStore = create<CADState>((set, get) => ({
     }
     set({
       nodes: updatedNodes,
-      past:  [...get().past, {
+      past:  pushPast(get().past, {
         type: 'TRANSFORM', description: 'Transform',
         nodesBefore, nodesAfter: Object.values(updatedNodes),
-      }],
+      }),
       future: [],
     });
   },
@@ -876,10 +913,10 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
     set({
       nodes: updatedNodes,
-      past:  [...get().past, {
+      past:  pushPast(get().past, {
         type: 'MATERIAL', description: 'Change material',
         nodesBefore, nodesAfter: Object.values(updatedNodes),
-      }],
+      }),
       future: [],
     });
     get().log(`Material updated: ${nodes[id].name}`, 'info');
@@ -928,13 +965,19 @@ export const useCADStore = create<CADState>((set, get) => ({
       future:      [prev, ...future],
     });
 
-    // Sync 3D scene (best-effort — OCC shapes that were deleted won't re-appear)
+    // Sync 3D scene. Deleted OCC shapes DO re-appear now — the registry keeps a
+    // shape alive while its id is still reachable through history (see
+    // CADGeometryRegistry), so a re-added node rebuilds its mesh from getShape.
     removed.forEach((id) =>
       window.dispatchEvent(new CustomEvent('cad-remove-mesh', { detail: { id } }))
     );
     added.forEach((id) =>
       window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }))
     );
+    // Re-meshed nodes rebuild at their LOCAL pose, and a plain transform-undo
+    // moves no mesh on its own — so push every restored node's transform back
+    // onto its mesh to match the metadata we just restored.
+    syncTransforms(restoredNodes);
 
     get().log(`Undo: ${prev.description}`, 'info');
   },
@@ -965,6 +1008,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     added.forEach((id) =>
       window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }))
     );
+    syncTransforms(restoredNodes);
 
     get().log(`Redo: ${next.description}`, 'info');
   },

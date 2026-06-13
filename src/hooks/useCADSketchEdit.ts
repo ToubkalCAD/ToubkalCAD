@@ -21,7 +21,7 @@ import { useCADStore, InteractionMode } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccSketchService, fromLocal2D, toLocal2D } from '../services/OccSketchService';
 import {
-  Entity2D, Pt, Line2D, Arc2D, paramOnLine, splitLine, trimLine, extendLine,
+  Entity2D, Pt, Line2D, Arc2D, paramOnLine, pointAt, splitLine, trimLine, extendLine,
   splitCircle, trimCircle, splitArc, trimArc, extendArc,
   lineCutParams, circleCutAngles, arcCutAngles,
 } from '../services/SketchEdit2D';
@@ -230,8 +230,8 @@ function applyEdit(mode: InteractionMode, hit: THREE.Intersection) {
 
   const targetId = (hit.object.userData.cadNodeId as string);
   const tg = st.nodes[targetId]?.params?.sketchGeom;
-  if (!tg || (tg.kind !== 'line' && tg.kind !== 'circle' && tg.kind !== 'arc')) {
-    st.log('Trim/Extend/Split works on line, circle and arc entities.', 'warn');
+  if (!tg || (tg.kind !== 'line' && tg.kind !== 'circle' && tg.kind !== 'arc' && tg.kind !== 'polyline')) {
+    st.log('Trim/Extend/Split works on line, circle, arc and rectangle/polygon entities.', 'warn');
     return;
   }
 
@@ -263,6 +263,49 @@ function applyEdit(mode: InteractionMode, hit: THREE.Intersection) {
     }
     deleteWireNode(targetId);
     newIds = results.map((seg) => createLineNode(oc, seg, wp, sketchId));
+  } else if (tg.kind === 'polyline') {
+    // Rectangle / polygon / sampled curve: a chain of straight segments. Edit the
+    // segment nearest the click, then explode the whole chain into line entities
+    // (the clicked one replaced by its trim/split result). The chain's own other
+    // segments act as cutters too, so corners bound the edit.
+    const pts: Pt[] = Array.isArray(tg.pts) ? tg.pts : [];
+    if (pts.length < 2) { st.log('This entity has no segments to edit.', 'warn'); return; }
+    const click: Pt = [loc.u, loc.v];
+    let best = -1, bestD = Infinity;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const seg: Line2D = { a: pts[i], b: pts[i + 1] };
+      const t = Math.max(0, Math.min(1, paramOnLine(seg, click)));
+      const p = pointAt(seg, t);
+      const d = Math.hypot(p[0] - click[0], p[1] - click[1]);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best < 0) return;
+
+    const clickedSeg: Line2D = { a: pts[best], b: pts[best + 1] };
+    const ownSegs: Entity2D[] = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (i !== best) ownSegs.push({ kind: 'line', a: pts[i], b: pts[i + 1] });
+    }
+    const segCutters = [...cutters, ...ownSegs];
+
+    let clickedResult: Line2D[];
+    if (mode === 'EDIT_SPLIT') {
+      clickedResult = splitLine(clickedSeg, segCutters);
+      if (clickedResult.length <= 1) { st.log('No intersections to split this segment at.', 'warn'); return; }
+    } else if (mode === 'EDIT_TRIM') {
+      const clickT = Math.max(0, Math.min(1, paramOnLine(clickedSeg, click)));
+      clickedResult = trimLine(clickedSeg, segCutters, clickT);
+    } else {
+      st.log('Extend does not apply to a rectangle/polygon segment.', 'warn'); return;
+    }
+
+    deleteWireNode(targetId);
+    const survivors: Line2D[] = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      if (i === best) survivors.push(...clickedResult);
+      else survivors.push({ a: pts[i], b: pts[i + 1] });
+    }
+    newIds = survivors.map((seg) => createLineNode(oc, seg, wp, sketchId));
   } else {
     // circle / arc → angle-space ops, results are arcs.
     const clickAngle = Math.atan2(loc.v - tg.c[1], loc.u - tg.c[0]);
@@ -322,13 +365,29 @@ function applyPowerTrim(strokeWorld: THREE.Vector3[]) {
   let trimmed = 0;
   for (const ent of entities) {
     const tg = ent.geom;
-    if (!tg || (tg.kind !== 'line' && tg.kind !== 'circle' && tg.kind !== 'arc')) continue;
+    if (!tg || (tg.kind !== 'line' && tg.kind !== 'circle' && tg.kind !== 'arc' && tg.kind !== 'polyline')) continue;
     const cutters: Entity2D[] = entities
       .filter((e) => e.id !== ent.id)
       .map((e) => toEntity2D(e.geom))
       .filter((e): e is Entity2D => !!e);
 
-    if (tg.kind === 'line') {
+    if (tg.kind === 'polyline') {
+      const pts: Pt[] = Array.isArray(tg.pts) ? tg.pts : [];
+      if (pts.length < 2) continue;
+      const survivors: Line2D[] = [];
+      let anyHit = false;
+      for (let i = 0; i < pts.length - 1; i++) {
+        const seg: Line2D = { a: pts[i], b: pts[i + 1] };
+        const cross = lineCutParams(seg, [pathCutter]);   // where the stroke hits this segment
+        if (!cross.length) { survivors.push(seg); continue; }
+        anyHit = true;
+        trimLine(seg, cutters, cross[0]).forEach((s) => survivors.push(s));
+      }
+      if (!anyHit) continue;
+      deleteWireNode(ent.id);
+      survivors.forEach((s) => createLineNode(oc, s, wp, sketchId));
+      trimmed++;
+    } else if (tg.kind === 'line') {
       const target: Line2D = { a: tg.a, b: tg.b };
       const cross = lineCutParams(target, [pathCutter]);   // where the stroke hits this line
       if (!cross.length) continue;

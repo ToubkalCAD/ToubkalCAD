@@ -395,7 +395,7 @@ export class OccSketchService {
    * the wire and whether the faceted fallback was used.
    */
   static buildRegionProfileWire(
-    oc: any, region: { members: { id: string }[]; loop: number[][] },
+    oc: any, region: { members: { id: string }[]; loop: number[][]; area?: number },
     geomOf: (id: string) => any, wp: Workplane,
   ): { wire: any; faceted: boolean } {
     if (region.members.length === 1) {
@@ -404,7 +404,14 @@ export class OccSketchService {
     try {
       const exact  = OccSketchService.createRegionWire(oc, region.members, geomOf, wp);
       const healed = OccSketchService.healWire(oc, exact, 1e-2);
-      if (OccSketchService.wireMakesFace(oc, healed)) return { wire: healed, faceted: false };
+      // Accept the exact (smooth-arc) wire ONLY if the face it makes has the area
+      // the detector measured for this region. A wire whose edges OCC connected
+      // in a bad order can self-intersect: it still "makes a face", but OCC fills
+      // only one lobe (e.g. the chord-bounded rectangle, dropping arc bumps),
+      // which would extrude a partial profile. The area check rejects that and
+      // falls back to the faceted loop, which is built from the correctly-traced
+      // boundary and is always the full region.
+      if (OccSketchService.wireFaceAreaOk(oc, healed, region.area)) return { wire: healed, faceted: false };
     } catch { /* fall through to facet */ }
     return { wire: OccSketchService.createRegionWireFromLoop(oc, region.loop, wp), faceted: true };
   }
@@ -415,6 +422,25 @@ export class OccSketchService {
     const ok = fm.IsDone();
     fm.delete();
     return ok;
+  }
+
+  /**
+   * True if the wire makes a planar face whose area matches `expected` (the
+   * detector's analytic region area) within tolerance. When `expected` is
+   * unavailable, falls back to a plain makes-a-face check. Guards against
+   * self-intersecting wires that fill only part of the intended profile.
+   */
+  static wireFaceAreaOk(oc: any, wire: any, expected?: number): boolean {
+    const fm = new oc.BRepBuilderAPI_MakeFace_15(wire, true);
+    if (!fm.IsDone()) { fm.delete(); return false; }
+    if (expected === undefined || !(expected > 0)) { fm.delete(); return true; }
+    const face  = fm.Face();
+    const props = new oc.GProp_GProps_1();
+    oc.BRepGProp.SurfaceProperties_1(face, props, false, false);
+    const area = props.Mass();
+    props.delete(); face.delete(); fm.delete();
+    // Allow 5% slack (arc tessellation in the expected/analytic area, OCC rounding).
+    return Math.abs(area - expected) <= 0.05 * expected + 1e-6;
   }
 
   /**

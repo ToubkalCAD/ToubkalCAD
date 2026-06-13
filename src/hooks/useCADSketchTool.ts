@@ -323,8 +323,11 @@ export function useCADSketchTool(
           if (clicks.length === 2) {
             const [c1, c2] = clicks;
             const wire = OccSketchService.createRectangleWire(oc, c1, c2, wp);
-            addCommitted(sampleRect3D(c1, c2, wp));
-            registerWire(oc, wire, 'Rectangle', wp);
+            const samp = sampleRect3D(c1, c2, wp);
+            addCommitted(samp);
+            // Closed polyline geom → rectangle becomes a trim/extend/split target
+            // and a cutter for other entities (its 4 edges).
+            registerWire(oc, wire, 'Rectangle', wp, { kind: 'polyline', pts: localPts2D(samp, wp) });
           }
           break;
         }
@@ -374,8 +377,9 @@ export function useCADSketchTool(
           if (clicks.length === 2) {
             const [c, rim] = clicks;
             const wire  = OccSketchService.createPolygonWire(oc, c, rim, sides, wp);
-            addCommitted(samplePolygon3D(c, rim, sides, wp));
-            registerWire(oc, wire, `Polygon-${sides}`, wp);
+            const samp = samplePolygon3D(c, rim, sides, wp);
+            addCommitted(samp);
+            registerWire(oc, wire, `Polygon-${sides}`, wp, { kind: 'polyline', pts: localPts2D(samp, wp) });
           }
           break;
         }

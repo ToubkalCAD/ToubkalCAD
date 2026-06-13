@@ -5,15 +5,15 @@
 //
 // Active only while interactionMode === 'DATUM_OFFSET_PICK'. The user clicks a
 // reference to offset from:
-//   • a PLANAR face of any solid  (transparent overlay per face, like S2), or
+//   • a PLANAR face of any solid  (picked on the REAL mesh via FacePicker), or
 //   • an existing datum plane     (the persistent amber faces, like D9).
 // On click we capture that reference's Workplane, drop back to SELECT, ask for a
 // signed distance (ParameterModal), and create a new datum plane parallel to the
 // reference, shifted `distance` along its normal. Negative distance flips sides.
 //
-// Pure data — no OCC: the offset workplane is origin + normal·d, same axes. The
-// source id + distance are stored in the datum's `refs` for future associativity
-// (D13). Mirrors useCADSketchFacePick / useCADDatumSketchPick.
+// Pure data — no OCC math here: the offset workplane is origin + normal·d, same
+// axes. The source id + distance are stored in the datum's `refs` for future
+// associativity (D13).
 // ============================================================
 
 import { useEffect, useRef } from 'react';
@@ -21,17 +21,27 @@ import * as THREE from 'three';
 import { useCADStore, Workplane } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccFaceService } from '../services/OccFaceService';
+import { FacePicker } from '../services/FacePicker';
 import { getPlacedShape } from '../utils/placedShape';
 import { showParamModal } from '../components/ParameterModal';
 
-const COLOR_IDLE     = 0x2a7fd4;
-const COLOR_HOVER    = 0x00e0a0;
 const DATUM_OPACITY  = 0.16;   // resting opacity of the persistent amber datum face
 const CLICK_SLOP_PX  = 5;
 
 interface RefMeta { workplane: Workplane; sourceId: string; kind: 'face' | 'datum'; }
 
-const NON_SOLID = new Set(['sketch', 'sketch_wire', 'datum_plane', 'datum_axis', 'datum_point']);
+/** World-space workplane of one solid face (null if curved). */
+function facePlaneWp(nodeId: string, faceIndex: number): Workplane | null {
+  const reg    = CADGeometryRegistry.getInstance();
+  const placed = getPlacedShape(nodeId);
+  if (!placed) return null;
+  try {
+    const p = OccFaceService.planeFromFaceIndex(window.oc, placed, faceIndex);
+    return p ? { label: 'Face', origin: p.origin, normal: p.normal, uAxis: p.uAxis, vAxis: p.vAxis } : null;
+  } finally {
+    if (placed !== reg.getShape(nodeId)) { try { placed.delete(); } catch {} }
+  }
+}
 
 export function useCADDatumOffsetPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
@@ -39,61 +49,10 @@ export function useCADDatumOffsetPick(
   cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
-  const overlaysRef   = useRef<THREE.Mesh[]>([]);                  // per-planar-face overlays
-  const faceHoverRef  = useRef<THREE.Mesh | null>(null);
-  const datumHoverRef = useRef<THREE.MeshBasicMaterial | null>(null);
+  const hoverHlRef    = useRef<THREE.Mesh | null>(null);                 // solid-face hover highlight
+  const hoverKeyRef   = useRef<string | null>(null);
+  const datumHoverRef = useRef<THREE.MeshBasicMaterial | null>(null);    // tinted persistent datum mat
 
-  // ─── Build / tear down planar-face overlays ──────────────────────────────────
-  useEffect(() => {
-    const scene = sceneRef.current;
-    if (!scene) return;
-
-    const dispose = () => {
-      for (const m of overlaysRef.current) {
-        scene.remove(m);
-        m.geometry.dispose();
-        (m.material as THREE.Material).dispose();
-      }
-      overlaysRef.current = [];
-      faceHoverRef.current = null;
-    };
-
-    dispose();
-    if (mode !== 'DATUM_OFFSET_PICK' || !window.oc) return;
-
-    const st  = useCADStore.getState();
-    const reg = CADGeometryRegistry.getInstance();
-    for (const id of Object.keys(st.nodes)) {
-      const node = st.nodes[id];
-      if (!node || !node.visible || NON_SOLID.has(node.type)) continue;
-      const placed = getPlacedShape(id);
-      if (!placed) continue;
-      try {
-        const faces = OccFaceService.extractPlanarFaces(window.oc, placed);
-        for (const f of faces) {
-          const geo = new THREE.BufferGeometry();
-          geo.setAttribute('position', new THREE.Float32BufferAttribute(f.positions, 3));
-          geo.computeVertexNormals();
-          const mat = new THREE.MeshBasicMaterial({
-            color: COLOR_IDLE, transparent: true, opacity: 0.12,
-            side: THREE.DoubleSide, depthWrite: false,
-          });
-          const mesh = new THREE.Mesh(geo, mat);
-          mesh.renderOrder = 998;
-          const wp: Workplane = { label: 'Face', origin: f.origin, normal: f.normal, uAxis: f.uAxis, vAxis: f.vAxis };
-          mesh.userData = { datumOffsetRef: { workplane: wp, sourceId: id, kind: 'face' } as RefMeta };
-          scene.add(mesh);
-          overlaysRef.current.push(mesh);
-        }
-      } catch {
-        /* solid without usable planar faces — datum planes are still pickable */
-      } finally {
-        if (placed !== reg.getShape(id)) { try { placed.delete(); } catch {} }
-      }
-    }
-  }, [mode, sceneRef]);
-
-  // ─── Hover + click ───────────────────────────────────────────────────────────
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -102,56 +61,54 @@ export function useCADDatumOffsetPick(
     const ndc       = new THREE.Vector2();
     const downPos   = { x: 0, y: 0, active: false };
 
-    const clearHover = () => {
-      if (faceHoverRef.current) {
-        const mat = faceHoverRef.current.material as THREE.MeshBasicMaterial;
-        mat.color.setHex(COLOR_IDLE); mat.opacity = 0.12;
+    const clearFaceHover = () => {
+      const scene = sceneRef.current;
+      if (hoverHlRef.current && scene) {
+        scene.remove(hoverHlRef.current);
+        hoverHlRef.current.geometry.dispose();
+        (hoverHlRef.current.material as THREE.Material).dispose();
       }
-      faceHoverRef.current = null;
+      hoverHlRef.current = null; hoverKeyRef.current = null;
+    };
+    const clearDatumHover = () => {
       if (datumHoverRef.current) { datumHoverRef.current.opacity = DATUM_OPACITY; datumHoverRef.current = null; }
     };
+    const clearHover = () => { clearFaceHover(); clearDatumHover(); };
 
     if (mode !== 'DATUM_OFFSET_PICK') { clearHover(); container.style.cursor = 'default'; return; }
 
-    // The persistent amber datum faces (tagged in Viewport3D) are also pickable.
-    const datumFaces = (): THREE.Mesh[] => {
-      const scene = sceneRef.current;
-      if (!scene) return [];
-      const out: THREE.Mesh[] = [];
-      scene.traverse((o) => { if (o instanceof THREE.Mesh && o.userData?.datumNodeId) out.push(o); });
-      return out;
-    };
+    useCADStore.getState().log('Pick a planar face or datum to offset from.', 'info');
 
-    const pick = (e: MouseEvent): THREE.Mesh | null => {
+    const cast = (e: MouseEvent) => {
       const camera = cameraRef.current;
-      if (!camera) return null;
+      const scene  = sceneRef.current;
+      if (!camera || !scene) return null;
       const rect = container.getBoundingClientRect();
-      ndc.set(
-        ((e.clientX - rect.left) / rect.width)  * 2 - 1,
-        -((e.clientY - rect.top) / rect.height) * 2 + 1,
-      );
+      ndc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
       raycaster.setFromCamera(ndc, camera);
-      const hits = raycaster.intersectObjects([...overlaysRef.current, ...datumFaces()], false);
-      return hits.length ? (hits[0].object as THREE.Mesh) : null;
+      return FacePicker.raycastFacesAndDatums(raycaster, scene);
     };
 
-    const setHover = (m: THREE.Mesh | null) => {
-      clearHover();
-      if (!m) { container.style.cursor = 'default'; return; }
-      const mat = m.material as THREE.MeshBasicMaterial;
-      if (m.userData?.datumOffsetRef) { mat.color.setHex(COLOR_HOVER); mat.opacity = 0.32; faceHoverRef.current = m; }
-      else if (m.userData?.datumNodeId) { mat.opacity = 0.4; datumHoverRef.current = mat; }
-      container.style.cursor = 'pointer';
-    };
-
-    const resolveRef = (m: THREE.Mesh): RefMeta | null => {
-      if (m.userData?.datumOffsetRef) return m.userData.datumOffsetRef as RefMeta;
-      const did = m.userData?.datumNodeId as string | undefined;
-      if (did) {
-        const wp = useCADStore.getState().nodes[did]?.params?.workplane as Workplane | undefined;
-        if (wp) return { workplane: wp, sourceId: did, kind: 'datum' };
+    const onMove = (e: MouseEvent) => {
+      if (useCADStore.getState().interactionMode !== 'DATUM_OFFSET_PICK') return;
+      const res = cast(e);
+      if (!res) { clearHover(); container.style.cursor = 'default'; return; }
+      if (res.kind === 'face') {
+        clearDatumHover();
+        const key = `${res.hit.nodeId}#${res.hit.faceIndex}`;
+        if (key !== hoverKeyRef.current) {
+          clearFaceHover();
+          hoverKeyRef.current = key;
+          const scene = sceneRef.current!;
+          const hl = FacePicker.makeHighlight(res.hit.mesh, res.hit.group);
+          scene.add(hl); hoverHlRef.current = hl;
+        }
+      } else {
+        clearFaceHover();
+        const mat = res.mesh.material as THREE.MeshBasicMaterial;
+        if (mat !== datumHoverRef.current) { clearDatumHover(); mat.opacity = 0.4; datumHoverRef.current = mat; }
       }
-      return null;
+      container.style.cursor = 'pointer';
     };
 
     const createOffset = async (ref: RefMeta) => {
@@ -173,10 +130,6 @@ export function useCADDatumOffsetPick(
       st.log(`Offset plane: ${d} mm from ${sourceName}.`, 'success');
     };
 
-    const onMove = (e: MouseEvent) => {
-      if (useCADStore.getState().interactionMode !== 'DATUM_OFFSET_PICK') return;
-      setHover(pick(e));
-    };
     const onDown = (e: MouseEvent) => {
       if (e.button !== 0) return;
       downPos.x = e.clientX; downPos.y = e.clientY; downPos.active = true;
@@ -185,13 +138,24 @@ export function useCADDatumOffsetPick(
       if (e.button !== 0 || !downPos.active) return;
       downPos.active = false;
       if (Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > CLICK_SLOP_PX) return;
-      const m = pick(e);
-      if (!m) return;
+      const res = cast(e);
+      if (!res) return;
       e.stopPropagation();
-      const ref = resolveRef(m);
+      const st = useCADStore.getState();
+
+      let ref: RefMeta | null = null;
+      if (res.kind === 'face') {
+        const wp = facePlaneWp(res.hit.nodeId, res.hit.faceIndex);
+        if (!wp) { st.log('That face is not planar — pick a flat face.', 'warn'); return; }
+        ref = { workplane: wp, sourceId: res.hit.nodeId, kind: 'face' };
+      } else {
+        const wp = st.nodes[res.nodeId]?.params?.workplane as Workplane | undefined;
+        if (wp) ref = { workplane: wp, sourceId: res.nodeId, kind: 'datum' };
+      }
+
       clearHover();
       container.style.cursor = 'default';
-      useCADStore.getState().setInteractionMode('SELECT');  // exit pick (overlays dispose)
+      st.setInteractionMode('SELECT');   // exit pick
       if (ref) void createOffset(ref);
     };
     const onKey = (e: KeyboardEvent) => {

@@ -51,10 +51,12 @@ first argument; call sites pull it from `window.oc`. `window` also holds the liv
 Three.js scene/camera/controls (`window.cadScene`, `cadCamera`, `cadControls`) so panels
 can reach the viewport imperatively.
 
-`src/workers/cad.worker.ts` + `CADWorkerClient` are a **separate, partial** worker path
-that re-inits its own OCC and only implements a handful of ops (box/cylinder/sphere,
-boolean, extrude, STEP import). The real feature set runs through the main-thread
-services. Don't assume an operation goes through the worker — most don't.
+There is **no Web Worker** — the kernel runs entirely on the main thread, so every
+operation goes through the main-thread `Occ*Service`s. (A dead `cad.worker.ts` +
+`CADWorkerClient` partial worker path was removed in 2026-06; it was never instantiated
+and re-inited a second 48 MB OCC kernel. Heavy ops that block the UI should be addressed
+per-op, not by reviving a blanket worker that loses synchronous shape access for
+picking/measure.)
 
 ### The create-an-object pipeline (the core pattern)
 
@@ -99,8 +101,9 @@ events to the right tool — the `useCAD*` hooks each activate for specific mode
   extrusion, revolution, loft, sweep, fillet, transform/mirror/pattern, sketch, face,
   edge, measure, STEP/IGES exchange). Each returns a `TopoDS_Shape` to be registered.
 - `services/` non-Occ — `CADGeometryRegistry`, `ThreeMeshCache`, `OccConverter`
-  (shape→Three.js geometry tessellation), `CADWorkerClient`, `CADCameraService`,
-  `CADPersistenceService`, `SketchConstraintSolver` (Levenberg-Marquardt 2D solver),
+  (shape→Three.js indexed geometry tessellation), `FacePicker` (raycast→OCC face via
+  `geometry.userData.faceGroups`), `CADCameraService`, `CADPersistenceService`,
+  `SketchConstraintSolver` (Levenberg-Marquardt 2D solver),
   `SketchEdit2D`/`SketchTransform2D`/`SketchRegions` (pure 2D analytic geometry).
 - `hooks/useCAD*.ts` — pointer/raycast interaction handlers, one per tool family
   (sketch tool, sketch edit, face pick, edge select, boolean pick, constraint pick,
