@@ -3,11 +3,15 @@
 //
 // Track S2 — "sketch on a face".
 //
-// Active only while interactionMode === 'FACE_SKETCH'. For every visible
-// solid in the scene it builds a transparent, raycastable overlay mesh per
-// PLANAR face (mirrors the per-edge overlay approach of useCADEdgeSelect).
-// Hovering highlights a face; clicking derives a workplane from that face's
-// gp_Pln and starts a sketch session on it, then drops into the Line tool.
+// Active only while interactionMode === 'FACE_SKETCH'. Raycasts directly
+// against the REAL solid meshes and resolves the hit to an OCC face via the
+// per-face draw groups OccConverter stamps into geometry.userData.faceGroups
+// (see FacePicker). Hovering highlights the exact face under the cursor —
+// planar OR curved; clicking a PLANAR face derives its workplane and starts a
+// sketch session on it. Clicking a curved face is rejected with a hint.
+//
+// This replaces the old approach of cloning one transparent overlay mesh per
+// planar face: no duplicate tessellation, and curved faces now highlight too.
 //
 // Click-vs-drag: a press that releases within a few pixels is a pick; a larger
 // movement is an OrbitControls rotation and is ignored.
@@ -17,13 +21,11 @@ import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { useCADStore, Workplane } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
-import { OccFaceService, PlanarFace } from '../services/OccFaceService';
+import { OccFaceService } from '../services/OccFaceService';
+import { FacePicker, FaceHit } from '../services/FacePicker';
 
-const COLOR_IDLE  = 0x2a7fd4;
-const COLOR_HOVER = 0x00e0a0;
+const COLOR_HOVER   = 0x00e0a0;
 const CLICK_SLOP_PX = 5;
-
-interface FaceMeta extends PlanarFace { nodeId: string; }
 
 export function useCADSketchFacePick(
   containerRef: React.RefObject<HTMLDivElement | null>,
@@ -32,67 +34,39 @@ export function useCADSketchFacePick(
 ) {
   const mode = useCADStore((s) => s.interactionMode);
 
-  const meshesRef = useRef<THREE.Mesh[]>([]);
-  const hoverRef  = useRef<THREE.Mesh | null>(null);
+  const highlightRef = useRef<THREE.Mesh | null>(null);
+  const lastKeyRef   = useRef<string | null>(null);
 
-  // ─── Build / tear down face overlays when entering/leaving FACE_SKETCH ────────
+  // ─── Enter / leave FACE_SKETCH ───────────────────────────────────────────────
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
 
-    const dispose = () => {
-      for (const m of meshesRef.current) {
-        scene.remove(m);
-        m.geometry.dispose();
-        (m.material as THREE.Material).dispose();
+    const clearHighlight = () => {
+      if (highlightRef.current) {
+        scene.remove(highlightRef.current);
+        highlightRef.current.geometry.dispose();
+        (highlightRef.current.material as THREE.Material).dispose();
+        highlightRef.current = null;
       }
-      meshesRef.current = [];
-      hoverRef.current = null;
+      lastKeyRef.current = null;
     };
 
-    dispose();
-    if (mode !== 'FACE_SKETCH' || !window.oc) return;
+    clearHighlight();
+    if (mode !== 'FACE_SKETCH' || !window.oc) return clearHighlight;
 
-    const st  = useCADStore.getState();
-    const reg = CADGeometryRegistry.getInstance();
-    let faceTotal = 0;
+    const hasSolids = FacePicker.pickableMeshes(scene).length > 0;
+    useCADStore.getState().log(
+      hasSolids
+        ? 'Pick a planar face to sketch on (hover to preview).'
+        : 'No solids in the scene — create one first.',
+      hasSolids ? 'info' : 'warn',
+    );
 
-    for (const id of Object.keys(st.nodes)) {
-      const node = st.nodes[id];
-      if (!node || !node.visible) continue;
-      if (node.type === 'sketch' || node.type === 'sketch_wire') continue;
-      const shape = reg.getShape(id);
-      if (!shape) continue;
-
-      try {
-        const faces = OccFaceService.extractPlanarFaces(window.oc, shape);
-        for (const f of faces) {
-          const geo = new THREE.BufferGeometry();
-          geo.setAttribute('position', new THREE.Float32BufferAttribute(f.positions, 3));
-          geo.computeVertexNormals();
-          const mat = new THREE.MeshBasicMaterial({
-            color: COLOR_IDLE, transparent: true, opacity: 0.12,
-            side: THREE.DoubleSide, depthWrite: false,
-          });
-          const mesh = new THREE.Mesh(geo, mat);
-          mesh.renderOrder = 998;
-          mesh.userData = { isSketchFace: true, face: { ...f, nodeId: id } as FaceMeta };
-          scene.add(mesh);
-          meshesRef.current.push(mesh);
-          faceTotal++;
-        }
-      } catch (err: any) {
-        useCADStore.getState().log(`Face extraction failed for ${node.name}: ${err?.message ?? err}`, 'warn');
-      }
-    }
-
-    if (faceTotal === 0) useCADStore.getState().log('No planar faces found — create or select a solid first.', 'warn');
-    else useCADStore.getState().log(`Pick a planar face to sketch on (${faceTotal} available).`, 'info');
-
-    return dispose;
+    return clearHighlight;
   }, [mode, sceneRef]);
 
-  // ─── Hover + click-to-start ──────────────────────────────────────────────────
+  // ─── Hover highlight + click-to-start ────────────────────────────────────────
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -101,34 +75,52 @@ export function useCADSketchFacePick(
     const ndc       = new THREE.Vector2();
     const downPos   = { x: 0, y: 0, active: false };
 
-    const pick = (e: MouseEvent): THREE.Mesh | null => {
+    const castFace = (e: MouseEvent): FaceHit | null => {
       const camera = cameraRef.current;
-      if (!camera) return null;
+      const scene  = sceneRef.current;
+      if (!camera || !scene) return null;
       const rect = container.getBoundingClientRect();
       ndc.set(
         ((e.clientX - rect.left) / rect.width)  * 2 - 1,
         -((e.clientY - rect.top) / rect.height) * 2 + 1,
       );
       raycaster.setFromCamera(ndc, camera);
-      const hits = raycaster.intersectObjects(meshesRef.current, false);
-      return hits.length ? (hits[0].object as THREE.Mesh) : null;
+      return FacePicker.raycast(raycaster, scene);
     };
 
-    const setHover = (m: THREE.Mesh | null) => {
-      if (hoverRef.current === m) return;
-      if (hoverRef.current) (hoverRef.current.material as THREE.MeshBasicMaterial).color.setHex(COLOR_IDLE),
-        ((hoverRef.current.material as THREE.MeshBasicMaterial).opacity = 0.12);
-      hoverRef.current = m;
-      if (m) {
-        const mat = m.material as THREE.MeshBasicMaterial;
-        mat.color.setHex(COLOR_HOVER); mat.opacity = 0.32;
+    const setHighlight = (hit: FaceHit | null) => {
+      const scene = sceneRef.current;
+      if (!scene) return;
+      const key = hit ? `${hit.nodeId}#${hit.faceIndex}` : null;
+      if (key === lastKeyRef.current) return;   // same face — nothing to rebuild
+      lastKeyRef.current = key;
+
+      if (highlightRef.current) {
+        scene.remove(highlightRef.current);
+        highlightRef.current.geometry.dispose();
+        (highlightRef.current.material as THREE.Material).dispose();
+        highlightRef.current = null;
       }
-      container.style.cursor = m ? 'pointer' : 'default';
+
+      if (hit) {
+        const geo = FacePicker.faceHighlightGeometry(hit.mesh, hit.group);
+        const mat = new THREE.MeshBasicMaterial({
+          color: COLOR_HOVER, transparent: true, opacity: 0.32,
+          side: THREE.DoubleSide, depthWrite: false,
+          polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.renderOrder = 999;
+        mesh.matrixAutoUpdate = false;   // geometry is already baked in world space
+        highlightRef.current = mesh;
+        scene.add(mesh);
+      }
+      container.style.cursor = hit ? 'pointer' : 'default';
     };
 
     const onMove = (e: MouseEvent) => {
       if (useCADStore.getState().interactionMode !== 'FACE_SKETCH') return;
-      setHover(pick(e));
+      setHighlight(castFace(e));
     };
 
     const onDown = (e: MouseEvent) => {
@@ -142,17 +134,27 @@ export function useCADSketchFacePick(
       downPos.active = false;
       if (useCADStore.getState().interactionMode !== 'FACE_SKETCH') return;
       if (Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > CLICK_SLOP_PX) return;
-      const m = pick(e);
-      if (!m) return;
+
+      const hit = castFace(e);
+      if (!hit) return;
       e.stopPropagation();
-      const f = m.userData.face as FaceMeta;
+
+      const st    = useCADStore.getState();
+      const shape = CADGeometryRegistry.getInstance().getShape(hit.nodeId);
+      if (!shape) return;
+
+      const plane = OccFaceService.planeFromFaceIndex(window.oc, shape, hit.faceIndex);
+      if (!plane) {
+        st.log('That face is not planar — pick a flat face to sketch on.', 'warn');
+        return;
+      }
+
       const wp: Workplane = {
-        label: 'Face', origin: f.origin, normal: f.normal, uAxis: f.uAxis, vAxis: f.vAxis,
+        label: 'Face', origin: plane.origin, normal: plane.normal, uAxis: plane.uAxis, vAxis: plane.vAxis,
       };
-      const st = useCADStore.getState();
-      st.startSketchSession(wp);            // sets activeWorkplane + sketchSession (camera follows)
-      st.setInteractionMode('SELECT');      // no tool pre-selected — user picks a 2D shape
-      st.log(`Sketching on a face of ${st.nodes[f.nodeId]?.name ?? 'solid'} — pick a 2D tool to draw.`, 'success');
+      st.startSketchSession(wp);          // sets activeWorkplane + sketchSession (camera follows)
+      st.setInteractionMode('SELECT');    // no tool pre-selected — user picks a 2D shape
+      st.log(`Sketching on a face of ${st.nodes[hit.nodeId]?.name ?? 'solid'} — pick a 2D tool to draw.`, 'success');
     };
 
     container.addEventListener('mousemove', onMove);
@@ -163,5 +165,5 @@ export function useCADSketchFacePick(
       container.removeEventListener('mousedown', onDown, true);
       container.removeEventListener('mouseup',   onUp,   true);
     };
-  }, [containerRef, cameraRef]);
+  }, [containerRef, cameraRef, sceneRef]);
 }

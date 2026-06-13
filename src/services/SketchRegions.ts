@@ -117,12 +117,17 @@ export function findRegions(entities: RegionEntity[]): Region[] {
   // 2. Planar face-tracing over the open edges.
   const open = entities.filter((e) => e.kind !== 'circle' && !isClosedPoly(e) && endpoints(e) !== null);
 
-  const vid = new Map<string, number>();
+  // Merge endpoints by true distance (≤ VTOL), NOT by snapping to a grid: two
+  // coincident endpoints that straddle a grid-cell boundary would otherwise get
+  // distinct ids, leaving their shared corner un-welded so the face never closes
+  // (this is what dropped the arc side of a trimmed circle+rectangle profile).
+  const verts: Pt[] = [];
   const getV = (p: Pt): number => {
-    const k = `${Math.round(p[0] / VTOL)},${Math.round(p[1] / VTOL)}`;
-    let i = vid.get(k);
-    if (i === undefined) { i = vid.size; vid.set(k, i); }
-    return i;
+    for (let i = 0; i < verts.length; i++) {
+      if (Math.hypot(verts[i][0] - p[0], verts[i][1] - p[1]) <= VTOL) return i;
+    }
+    verts.push(p);
+    return verts.length - 1;
   };
 
   interface HE { from: number; to: number; member: RegionMember; angle: number; ent: RegionEntity }

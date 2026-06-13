@@ -2,13 +2,18 @@ import { useCADStore } from '../store/cadStore';
 
 /**
  * Centralized registry for OpenCascade shapes.
- * Manages WASM heap lifetime: every registered shape must eventually
- * be .delete()'d. The store subscription does that automatically when
- * a node is removed.
+ * Manages WASM heap lifetime: every registered shape must eventually be
+ * .delete()'d. The store subscription does that automatically.
  *
- * Optimization: the subscription caches the previous node set and only
- * runs the deletion loop when the nodes object reference changes
- * (i.e. on ADD/DELETE actions — not on selection, logs, snap, etc.).
+ * Lifetime rule (NOT "free as soon as the node leaves the scene"): a shape is
+ * freed only once its id is unreachable from BOTH the current scene AND the
+ * entire undo/redo history. This is what lets `undo` after a delete rebuild the
+ * mesh — the node comes back and its OCC shape is still alive. A deleted shape
+ * is finally freed when its delete action ages out of the HISTORY_LIMIT window.
+ *
+ * Perf: the subscription only does the (history-scanning) GC when a node id has
+ * actually disappeared from `nodes`. Pure transform/selection/log updates — and
+ * gizmo live-drag, which rewrites `nodes` every frame — take the cheap path.
  */
 export class CADGeometryRegistry {
   private static instance: CADGeometryRegistry | null = null;
@@ -50,16 +55,35 @@ export class CADGeometryRegistry {
     let prevNodes = useCADStore.getState().nodes;
 
     useCADStore.subscribe((state) => {
-      // Only process when the nodes map itself changes (not on every state update)
+      // Only react when the nodes map reference changes.
       if (state.nodes === prevNodes) return;
+      const prev = prevNodes;
+      prevNodes = state.nodes;
 
-      const curr = state.nodes;
-      for (const id in prevNodes) {
-        if (!curr[id]) {
-          this.deleteShape(id);
+      // Cheap guard: a shape can only become freeable when its node leaves the
+      // scene. If nothing was removed (add / live-drag / rename), skip the GC.
+      let removed = false;
+      for (const id in prev) { if (!state.nodes[id]) { removed = true; break; } }
+      if (!removed) return;
+
+      // GC: an id is still needed if it's in the scene OR reachable by undo/redo
+      // (present in any retained history action's before/after snapshot).
+      const reachable = new Set<string>();
+      for (const id in state.nodes) reachable.add(id);
+      const scan = (actions: Array<{ nodesBefore: { id: string }[]; nodesAfter: { id: string }[] }>) => {
+        for (const a of actions) {
+          for (const n of a.nodesBefore) reachable.add(n.id);
+          for (const n of a.nodesAfter)  reachable.add(n.id);
         }
+      };
+      scan(state.past as any);
+      scan(state.future as any);
+
+      const toFree: string[] = [];
+      for (const id of this.geometryMap.keys()) {
+        if (!reachable.has(id)) toFree.push(id);
       }
-      prevNodes = curr;
+      for (const id of toFree) this.deleteShape(id);
     });
   }
 }

@@ -47,7 +47,7 @@ export function resolveProfileWire(sketchId: string, childIds: string[]): string
     visible: true, locked: false, parentId: sketchId, notes: '',
     transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
     material:  { color: 0x00aa66, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
-    params: { workplane: wp, region: true },
+    params: { workplane: wp, region: true, memberIds: rg.members.map((m) => m.id) },
   });
   return id;
 }
@@ -92,7 +92,7 @@ export function resolveAllProfileWires(sketchId: string, childIds: string[]): st
       visible: true, locked: false, parentId: sketchId, notes: '',
       transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
       material:  { color: 0x00aa66, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
-      params: { workplane: wp, region: true },
+      params: { workplane: wp, region: true, memberIds: rg.members.map((m) => m.id) },
     });
     ids.push(id);
   });

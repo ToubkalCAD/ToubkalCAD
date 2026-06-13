@@ -9,23 +9,20 @@
 //   • Pocket      → cut (target, prism)
 //   • Up-to-Face  → trim the prism at the clicked face's surface
 //
-// To make face selection precise (instead of "the whole box lights up"), every
-// face (planar OR curved) of each targetable solid gets a transparent,
-// raycastable overlay. Hovering highlights just that face; a click records the
-// solid id + the exact world-space hit point (which identifies the face for
-// OccExtrusionService.extrudeUpToFace). Solids whose faces can't be tessellated
-// fall back to whole-body picking so Pad/Pocket still works on any shape.
+// Face selection rides the REAL solid mesh via FacePicker: hovering highlights
+// exactly the face under the cursor (planar OR curved) using the per-face draw
+// groups OccConverter stamps into the geometry — no per-face overlay clones.
+// A click records the solid id + the exact world-space hit point (which
+// identifies the face for OccExtrusionService.extrudeUpToFace). A mesh without
+// face groups falls back to whole-body highlight so Pad/Pocket stays general.
 // ============================================================
 
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
-import { OccFaceService } from '../services/OccFaceService';
-import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
-import { getPlacedShape } from '../utils/placedShape';
+import { FacePicker, FaceHit } from '../services/FacePicker';
 
 const EMISSIVE_HOVER = 0x118844; // whole-solid fallback highlight (green emissive)
-const FACE_HOVER     = 0x00e0a0; // per-face overlay highlight (green)
 const CLICK_SLOP_PX  = 5;
 
 // Node types that are NOT valid boolean / limit targets.
@@ -37,9 +34,9 @@ export function useCADExtrudeTargetPick(
   cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
 ) {
   const interactionMode = useCADStore((s) => s.interactionMode);
-  const litRef       = useRef<THREE.MeshStandardMaterial | null>(null); // solid fallback hover
-  const faceMeshesRef = useRef<THREE.Mesh[]>([]);                       // per-face overlays
-  const faceHoverRef  = useRef<THREE.Mesh | null>(null);
+  const litRef          = useRef<THREE.MeshStandardMaterial | null>(null); // solid fallback hover
+  const hoverHlRef      = useRef<THREE.Mesh | null>(null);                  // per-face hover highlight
+  const hoverKeyRef     = useRef<string | null>(null);
 
   /** Is this node id a valid boolean / limit target? */
   const isTargetable = (id: string | undefined): id is string => {
@@ -52,60 +49,13 @@ export function useCADExtrudeTargetPick(
     return true;
   };
 
-  // ─── Build / tear down per-face overlays ─────────────────────────────────────
-  useEffect(() => {
-    const scene = sceneRef.current;
-    if (!scene) return;
-
-    const dispose = () => {
-      for (const m of faceMeshesRef.current) {
-        scene.remove(m);
-        m.geometry.dispose();
-        (m.material as THREE.Material).dispose();
-      }
-      faceMeshesRef.current = [];
-      faceHoverRef.current = null;
-    };
-
-    dispose();
-    if (interactionMode !== 'EXTRUDE_TARGET_PICK' || !window.oc) return;
-
-    const st  = useCADStore.getState();
-    const reg = CADGeometryRegistry.getInstance();
-    for (const id of Object.keys(st.nodes)) {
-      const node = st.nodes[id];
-      if (!node || !node.visible || !isTargetable(id)) continue;
-      const placed = getPlacedShape(id);
-      if (!placed) continue;
-      try {
-        const faces = OccFaceService.extractFaceMeshes(window.oc, placed);
-        for (const f of faces) {
-          const geo = new THREE.BufferGeometry();
-          geo.setAttribute('position', new THREE.Float32BufferAttribute(f.positions, 3));
-          geo.computeVertexNormals();
-          const mat = new THREE.MeshBasicMaterial({
-            color: FACE_HOVER, transparent: true, opacity: 0, // idle = invisible, raycastable
-            side: THREE.DoubleSide, depthWrite: false,
-          });
-          const mesh = new THREE.Mesh(geo, mat);
-          mesh.renderOrder = 999;
-          mesh.userData = { cadNodeId: id, faceOverlay: true };
-          scene.add(mesh);
-          faceMeshesRef.current.push(mesh);
-        }
-      } catch {
-        /* solid without usable planar faces — whole-body fallback still works */
-      } finally {
-        // getPlacedShape returns a fresh transformed shape for moved bodies; free it.
-        if (placed !== reg.getShape(id)) { try { placed.delete(); } catch {} }
-      }
-    }
-  }, [interactionMode, sceneRef]);
-
-  // ─── Hover + click ───────────────────────────────────────────────────────────
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+
+    const raycaster = new THREE.Raycaster();
+    const ndc       = new THREE.Vector2();
+    const downPos   = { x: 0, y: 0, active: false };
 
     const clearSolidHover = () => {
       const m = litRef.current;
@@ -113,18 +63,19 @@ export function useCADExtrudeTargetPick(
       litRef.current = null;
     };
     const clearFaceHover = () => {
-      const m = faceHoverRef.current;
-      if (m) (m.material as THREE.MeshBasicMaterial).opacity = 0;
-      faceHoverRef.current = null;
+      const scene = sceneRef.current;
+      if (hoverHlRef.current && scene) {
+        scene.remove(hoverHlRef.current);
+        hoverHlRef.current.geometry.dispose();
+        (hoverHlRef.current.material as THREE.Material).dispose();
+      }
+      hoverHlRef.current = null;
+      hoverKeyRef.current = null;
     };
 
     if (interactionMode !== 'EXTRUDE_TARGET_PICK') { clearSolidHover(); clearFaceHover(); return; }
 
-    const raycaster = new THREE.Raycaster();
-    const ndc       = new THREE.Vector2();
-    const downPos   = { x: 0, y: 0, active: false };
-
-    interface Pick { id: string; point: THREE.Vector3; mesh: THREE.Mesh; isFace: boolean; }
+    interface Pick { id: string; point: THREE.Vector3; mesh: THREE.Mesh; faceHit: FaceHit | null; }
 
     const pick = (e: MouseEvent): Pick | null => {
       const camera = cameraRef.current;
@@ -137,36 +88,38 @@ export function useCADExtrudeTargetPick(
       );
       raycaster.setFromCamera(ndc, camera);
 
-      // Per-face overlays take priority (precise selection).
-      const fHits = raycaster.intersectObjects(faceMeshesRef.current, false);
-      if (fHits.length) {
-        const m = fHits[0].object as THREE.Mesh;
-        return { id: m.userData.cadNodeId as string, point: fHits[0].point, mesh: m, isFace: true };
-      }
-
-      // Fallback: whole-solid pick (covers non-planar faces, keeps Pad/Pocket general).
       const meshes = scene.children.filter(
-        (c): c is THREE.Mesh =>
-          c instanceof THREE.Mesh && isTargetable(c.userData?.cadNodeId),
+        (c): c is THREE.Mesh => c instanceof THREE.Mesh && isTargetable(c.userData?.cadNodeId),
       );
       const hits = raycaster.intersectObjects(meshes, false);
-      if (hits.length) {
-        const m = hits[0].object as THREE.Mesh;
-        return { id: m.userData.cadNodeId as string, point: hits[0].point, mesh: m, isFace: false };
+      for (const h of hits) {
+        const fh = FacePicker.resolveHit(h);
+        if (fh) return { id: fh.nodeId, point: h.point.clone(), mesh: fh.mesh, faceHit: fh };
+        // Mesh predates face groups → whole-body fallback (still precise enough for Pad/Pocket).
+        const id = (h.object as THREE.Mesh).userData?.cadNodeId as string | undefined;
+        if (isTargetable(id)) return { id, point: h.point.clone(), mesh: h.object as THREE.Mesh, faceHit: null };
       }
       return null;
+    };
+
+    const setFaceHover = (hit: FaceHit) => {
+      const scene = sceneRef.current;
+      if (!scene) return;
+      const key = `${hit.nodeId}#${hit.faceIndex}`;
+      if (key === hoverKeyRef.current) return;
+      clearFaceHover();
+      hoverKeyRef.current = key;
+      const hl = FacePicker.makeHighlight(hit.mesh, hit.group, { opacity: 0.4 });
+      scene.add(hl);
+      hoverHlRef.current = hl;
     };
 
     const onMove = (e: MouseEvent) => {
       const r = pick(e);
       if (!r) { clearFaceHover(); clearSolidHover(); container.style.cursor = 'default'; return; }
-      if (r.isFace) {
+      if (r.faceHit) {
         clearSolidHover();
-        if (faceHoverRef.current !== r.mesh) {
-          clearFaceHover();
-          (r.mesh.material as THREE.MeshBasicMaterial).opacity = 0.4;
-          faceHoverRef.current = r.mesh;
-        }
+        setFaceHover(r.faceHit);
       } else {
         clearFaceHover();
         const mat = r.mesh.material instanceof THREE.MeshStandardMaterial ? r.mesh.material : null;
