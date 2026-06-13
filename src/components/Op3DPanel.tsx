@@ -16,6 +16,7 @@ import type { NodeType, Workplane } from '../store/cadStore';
 import { CADGeometryRegistry }  from '../services/CADGeometryRegistry';
 import { OccConverter }         from '../services/OccConverter';
 import { getPlacedShape }       from '../utils/placedShape';
+import { propagateFromStore }   from '../services/RecomputeEngine.live';
 import { OccExtrusionService, ExtrudeEnd } from '../services/OccExtrusionService';
 import { OccBooleanService }    from '../services/OccBooleanService';
 import { OccRevolutionService } from '../services/OccRevolutionService';
@@ -556,6 +557,8 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         store.renameNode(id, `${OP_LABEL[req.op]}${idx}`);
         store.setNodeParams(id, { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetDatumId: targetDatumId ?? undefined });
         store.log(`${old?.name ?? id} updated ✓`, 'success');
+        // Propagate to anything downstream (fillet / boolean / pad on this op).
+        propagateFromStore(id);
       } else {
         // ── CREATE ────────────────────────────────────────────────────────────
         const type = OP_NTYPE[req.op];

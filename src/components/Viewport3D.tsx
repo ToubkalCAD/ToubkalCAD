@@ -683,6 +683,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       const { id } = (e as CustomEvent).detail;
       const scene = sceneRef.current;
       if (!scene) return;
+      // If the gizmo is attached to this mesh (e.g. a selected feature freed by
+      // suppress / rollback), detach before disposing so it isn't left pointing
+      // at a removed object.
+      const tc = transformRef.current;
+      if (tc && (tc.object as THREE.Object3D | undefined)?.userData?.cadNodeId === id) tc.detach();
       // Remove tessellated mesh (3D shapes)
       ThreeMeshCache.getInstance().disposeMesh(id, scene);
       // Remove any sketch wire lines (Three.Line objects) that are still in the scene
@@ -745,7 +750,16 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       if (!scene || !window.oc) return;
       try {
         const node = useCADStore.getState().nodes[id];
-        ThreeMeshCache.getInstance().invalidateMesh(id, scene, window.oc, material ?? node?.material);
+        const newMesh = ThreeMeshCache.getInstance().invalidateMesh(id, scene, window.oc, material ?? node?.material);
+        // invalidateMesh disposes the old mesh and builds a fresh one. If the
+        // gizmo was attached to that (now-removed) mesh — e.g. recompute
+        // propagated an upstream edit onto the selected downstream feature —
+        // re-attach it to the new mesh so TransformControls keeps a live target.
+        const tc = transformRef.current;
+        if (tc && (tc.object as THREE.Object3D | undefined)?.userData?.cadNodeId === id) {
+          tc.detach();
+          tc.attach(newMesh);
+        }
       } catch (err: any) {
         console.error('[Viewport] update mesh:', err);
         useCADStore.getState().log(`Viewport update error: ${err?.message}`, 'error');

@@ -18,6 +18,7 @@ import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
 import type { SketchConstraint, SketchConstraintType, SketchRef, Workplane } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
+import { propagateFromStore }  from '../services/RecomputeEngine.live';
 import { OccSketchService, workplaneBasis, fromLocal2D } from '../services/OccSketchService';
 import {
   solveConstraints, canApply, computeDoF,
@@ -149,10 +150,14 @@ export const ConstraintPanel: React.FC = () => {
     try {
       const res = solveConstraints(before, next);
       let rebuilt = 0;
+      const changed: string[] = [];
       for (const g of Object.values(res.geoms)) {
-        if (beforeKey.get(g.id) !== geomKey(g)) { rebuildEntity(g.id, g); rebuilt++; }
+        if (beforeKey.get(g.id) !== geomKey(g)) { rebuildEntity(g.id, g); changed.push(g.id); rebuilt++; }
       }
       useCADStore.getState().setNodeParams(sketchId, { constraints: next });
+      // Propagate the moved sketch geometry to every dependent op (the region
+      // wire, the extrude/revolve/… built on it, and anything stacked above).
+      if (changed.length) propagateFromStore(changed);
       publishStatus(next, res.residual, res.converged);
       setMsg(res.converged
         ? `Solved · ${rebuilt} updated`

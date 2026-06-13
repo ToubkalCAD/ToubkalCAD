@@ -15,6 +15,7 @@ import { ThreeMeshCache }      from './services/ThreeMeshCache';
 import './services/StableRef.selftest';     // dev: registers window.stableRefSelfTest() — Phase 1 §6 de-risk
 import './services/FeatureGraph.selftest';     // dev: registers window.featureGraphSelfTest() — Phase 1 step 1
 import './services/FeatureEvaluators.selftest'; // dev: registers window.evaluatorSelfTest() — Phase 1 step 2
+import './services/RecomputeEngine.selftest';   // dev: registers window.recomputeSelfTest() — Phase 1 step 3
 import { initTheme }           from './utils/theme';
 import './styles/global.css';
 

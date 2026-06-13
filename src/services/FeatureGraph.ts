@@ -47,7 +47,10 @@ export interface Feature {
   params:  Record<string, any>;
   /** Recipe fully recoverable from the node? false → needs param capture (see header). */
   complete: boolean;
+  /** Feature is skipped during recompute (kept in the tree). */
   suppressed?: boolean;
+  /** Last recompute failure (set by RecomputeEngine), surfaced in the tree. null = ok. */
+  error?:  string | null;
   /** Human note on why incomplete / what's missing. */
   note?:   string;
 }

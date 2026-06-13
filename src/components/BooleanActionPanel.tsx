@@ -23,6 +23,7 @@ import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccConverter }        from '../services/OccConverter';
 import { OccBooleanService }   from '../services/OccBooleanService';
 import { getPlacedShape }      from '../utils/placedShape';
+import { propagateFromStore }  from '../services/RecomputeEngine.live';
 import { useDragPanel }        from '../hooks/useDragPanel';
 
 const reg = CADGeometryRegistry.getInstance();
@@ -212,6 +213,7 @@ export const BooleanActionPanel: React.FC = () => {
         window.dispatchEvent(new CustomEvent('cad-update-mesh', { detail: { id, material: store.nodes[id]?.material } }));
         store.setNodeParams(id, params);
         store.log(`${store.nodes[id]?.name ?? meta.label} updated ✓`, 'success');
+        propagateFromStore(id);   // rebuild anything stacked on this boolean
       } else {
         const id   = crypto.randomUUID();
         const name = `${meta.label}${nextIdx()}`;

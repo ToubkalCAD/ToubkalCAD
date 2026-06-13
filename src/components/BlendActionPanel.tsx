@@ -23,6 +23,7 @@ import { OccConverter }        from '../services/OccConverter';
 import { OccFilletService }    from '../services/OccFilletService';
 import { OccEdgeService }      from '../services/OccEdgeService';
 import { getPlacedShape }      from '../utils/placedShape';
+import { propagateFromStore }  from '../services/RecomputeEngine.live';
 import { useDragPanel }        from '../hooks/useDragPanel';
 
 type BlendOp = 'fillet' | 'chamfer';
@@ -225,6 +226,7 @@ export const BlendActionPanel: React.FC = () => {
         window.dispatchEvent(new CustomEvent('cad-update-mesh', { detail: { id, material: store.nodes[id]?.material } }));
         store.setNodeParams(id, params);
         store.log(`${store.nodes[id]?.name ?? label} updated ✓`, 'success');
+        propagateFromStore(id);   // rebuild anything stacked on this blend
       } else {
         const id   = crypto.randomUUID();
         const name = `${label}${nextIdx()}`;

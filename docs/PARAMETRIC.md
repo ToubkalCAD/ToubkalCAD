@@ -1,7 +1,10 @@
 # Parametric Feature Tree & Recompute Engine — Design (Phase 1)
 
-Status: **design / not yet implemented**. This is the Phase 1 build from the
-hardening roadmap. Read `docs/ROADMAP.md` and `CLAUDE.md` first.
+Status: **steps 1–3 shipped** (see §10). The feature graph, the evaluator
+registry, and the recompute engine (topo replay + dirty propagation + rollback +
+per-feature error isolation) exist and are validated headlessly. Still to do:
+StableRef migration (4), graph-delta undo (5), timeline UI (6), persistence (7).
+Read `docs/ROADMAP.md` and `CLAUDE.md` first.
 
 ## 1. Why
 
@@ -207,14 +210,37 @@ worker was correctly deleted; this would be a targeted, engine-driven offload.)
 
 The DAG can be introduced **without** a big-bang rewrite by wrapping what exists:
 
-1. **Define `Feature`/`FeatureRef`/`StableRef` types + a `FeatureGraph` store slice**
+1. ✅ **Define `Feature`/`FeatureRef`/`StableRef` types + a `FeatureGraph` store slice**
    that mirrors the existing nodes (one feature per geometry node). No behavior change
    yet — just record inputs explicitly (derive from today's params via an adapter).
-2. **Build `EVALUATORS`** by extracting each panel's "apply" body into a pure
+   → `services/FeatureGraph.ts` (+ `.selftest.ts`).
+2. ✅ **Build `EVALUATORS`** by extracting each panel's "apply" body into a pure
    `(oc, inputs, params) → shape`. Panels call the evaluator; output identical to now.
-3. **`RecomputeEngine.recompute(graph, dirty)`** with topo sort + dirty propagation.
-   Wire param-edits through it. Now upstream edits propagate downstream — the first
-   visible win.
+   → `services/FeatureEvaluators.ts` (+ `.selftest.ts`).
+3. ✅ **`RecomputeEngine.recompute(graph, dirty)`** with topo sort + dirty propagation,
+   **wired into the param-edit call sites** — upstream edits now propagate downstream
+   in the live app (the first visible win).
+   - PURE core in `services/RecomputeEngine.ts`: `recompute(host, graph, opts)` — no
+     store / registry / events, all injected via a `RecomputeHost`, so it's exercisable
+     headlessly. Supports rollback (`rollbackId`, the timeline needle — payoff in step 6),
+     datum FRAME threading, and per-feature error isolation (mark `feature.error`, keep
+     the last-good shape, continue).
+   - LIVE half in `services/RecomputeEngine.live.ts` (browser-only; static imports of the
+     registry / store / `cad-*-mesh` bus): `liveHost()`, `recomputeFromStore(editedId?)`,
+     and `propagateFromStore(editedIds)` — rebuild ONLY the descendants of the edited
+     feature(s) (the edited node is rebuilt by its own panel, whose special context —
+     up-to-next/last bodies etc. — the generic evaluator doesn't carry).
+   - Call sites: the **re-edit** branch of `Op3DPanel` (extrude/revolve/loft/sweep),
+     `BlendActionPanel` (fillet/chamfer), `BooleanActionPanel`, and `ConstraintPanel`'s
+     sketch-solve all call `propagateFromStore(...)` after committing their params, so a
+     fillet/boolean/pad stacked on an edited feature — or an op built on an edited
+     sketch — rebuilds automatically. Add/update is chosen by `ThreeMeshCache.hasMesh`.
+   - Validated by `npm run test:recompute` (compiles the real pure core to CJS, drives it
+     through a mock host against the kernel: 21 assertions — propagation, cache-skip,
+     datum follow, error isolation, rollback) and the in-browser `recomputeSelfTest()`.
+   - **Still direct (not yet through the engine):** create paths (no descendants yet) and
+     **gizmo body-moves** — automatic move-propagation needs placement modeled as a
+     recomputed input (§4.2), a later change.
 4. **`StableRef` (signature resolver)** for faces/edges; migrate blend/boolean/sketch-
    on-face refs off raw indices. Captured at pick time via `FacePicker`.
 5. **Switch undo/redo to graph deltas**; drop the shape-retention GC hack.
