@@ -8,6 +8,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useCADStore, CADNode, NodeType } from '../store/cadStore';
 import { show3DOpPanel } from './Op3DPanel';
 import type { Op3DType } from './Op3DPanel';
+import { editPrimitive, primitiveKind } from '../utils/editPrimitive';
 
 // Node types that MAY be re-editable via Op3DPanel (confirmed by node.params?.opType)
 // Note: fillet/chamfer produce 'compound' nodes, so 'compound' is included.
@@ -187,6 +188,10 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
           } else if (node.type === 'sketch') {
             e.stopPropagation();
             resumeSketch(nodeId);
+          } else if (primitiveKind(node)) {
+            // Re-edit a primitive's dimensions → rebuilds it + propagates downstream
+            e.stopPropagation();
+            void editPrimitive(nodeId);
           } else {
             setIsEditing(true);
           }
@@ -210,6 +215,8 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
             ? 'Double-click to re-edit this operation'
             : node.type === 'sketch'
             ? 'Double-click to resume · Right-click for 3D ops'
+            : primitiveKind(node)
+            ? 'Double-click to edit dimensions'
             : 'Double-click to rename'
         }
         style={{

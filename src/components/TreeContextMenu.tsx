@@ -14,6 +14,7 @@ import type { NodeType } from '../store/cadStore';
 import { show3DOpPanel, createAndEditOp } from './Op3DPanel';
 import type { Op3DType } from './Op3DPanel';
 import { showBlendPanel }      from './BlendActionPanel';
+import { editPrimitive, primitiveKind } from '../utils/editPrimitive';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { resolveProfileWire } from '../utils/sketchProfile';
 
@@ -60,6 +61,7 @@ export const TreeContextMenu: React.FC = () => {
   const isOp3D            = !isBlendResult && REEDITABLE_OP.has(node.type) && !!node.params?.opType;
   const hasShape          = SOLID_TYPES.has(node.type) && !!CADGeometryRegistry.getInstance().getShape(menu.nodeId);
   const isSolid           = hasShape; // eligible for per-edge fillet/chamfer + boolean
+  const isPrimitive       = !!primitiveKind(node); // box/cylinder/sphere/torus/cone → editable dims
   const isDatumPlane      = node.type === 'datum_plane';
 
   // Sketch wire IDs available for 3D operations (sketch container) or just this wire
@@ -132,6 +134,8 @@ export const TreeContextMenu: React.FC = () => {
   };
 
   // Per-edge fillet / chamfer on a solid → opens BlendActionPanel
+  const doEditPrimitive = () => { closeMenu(); void editPrimitive(menu.nodeId); };
+
   const doFilletEdges  = () => { closeMenu(); showBlendPanel(menu.nodeId, 'fillet'); };
   const doChamferEdges = () => { closeMenu(); showBlendPanel(menu.nodeId, 'chamfer'); };
 
@@ -251,10 +255,17 @@ export const TreeContextMenu: React.FC = () => {
         </div>
       )}
 
+      {/* ── Primitive: edit dimensions (rebuilds + propagates downstream) ──── */}
+      {isPrimitive && (
+        <div style={{ padding: '3px 0 1px' }}>
+          <Item icon="✏️" label="Edit dimensions…" accent="#cc6600" onClick={doEditPrimitive} />
+        </div>
+      )}
+
       {/* ── Solid: per-edge Fillet / Chamfer + Boolean ────────────────────── */}
       {isSolid && (
         <>
-          {(isOp3D || isBlendResult || isBooleanResult) && <Sep />}
+          {(isOp3D || isBlendResult || isBooleanResult || isPrimitive) && <Sep />}
           <div style={{ padding: '2px 12px 3px', fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.6px' }}>
             Modify Edges
           </div>

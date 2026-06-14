@@ -21,6 +21,7 @@ export interface ParamField {
 interface ModalState {
   title:   string;
   fields:  ParamField[];
+  confirmLabel: string;
   resolve: (v: Record<string, number> | null) => void;
 }
 
@@ -30,9 +31,10 @@ let _openModal: ((s: ModalState) => void) | null = null;
 export function showParamModal(
   title: string,
   fields: ParamField[],
+  confirmLabel = 'Create',
 ): Promise<Record<string, number> | null> {
   return new Promise((resolve) => {
-    _openModal?.({ title, fields, resolve });
+    _openModal?.({ title, fields, confirmLabel, resolve });
   });
 }
 
@@ -195,7 +197,7 @@ export const ParameterModal: React.FC = () => {
               fontWeight: 600,
             }}
           >
-            Create
+            {state.confirmLabel}
           </button>
         </div>
       </div>

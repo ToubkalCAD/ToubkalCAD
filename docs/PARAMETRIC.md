@@ -243,8 +243,12 @@ The DAG can be introduced **without** a big-bang rewrite by wrapping what exists
    - Validated by `npm run test:recompute` (compiles the real pure core to CJS, drives it
      through a mock host against the kernel: 21 assertions — propagation, cache-skip,
      datum follow, error isolation, rollback) and the in-browser `recomputeSelfTest()`.
-   - **Still direct (not yet through the engine):** create paths (no descendants yet) and
-     **gizmo body-moves** — automatic move-propagation needs placement modeled as a
+   - **Primitive dimension edits propagate** (`utils/editPrimitive.ts`): double-click /
+     right-click a box/cylinder/sphere/torus/cone → edit dialog → merge params + rename →
+     `recomputeFromStore(id)` rebuilds the primitive from its evaluator AND its descendants,
+     so a sketch-on-face (or any stacked op) follows when the solid is resized.
+   - **Still direct (not yet through the engine):** other create paths (no descendants yet)
+     and **gizmo body-moves** — automatic move-propagation needs placement modeled as a
      recomputed input (§4.2), a later change.
 4. 🚧 **`StableRef` (signature resolver)** for faces/edges; migrate sub-entity refs off
    raw indices. **Done: fillet/chamfer edges.**
