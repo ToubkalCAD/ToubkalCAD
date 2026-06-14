@@ -4,10 +4,11 @@ Status: **steps 1–3 shipped, step 4 underway** (see §10). The feature graph, 
 evaluator registry, and the recompute engine (topo replay + dirty propagation +
 rollback + per-feature error isolation) exist, are validated headlessly, and are
 wired into the param-edit call sites. Step 4 (StableRef) has migrated the
-fillet/chamfer **edge** selection and the extrude **up-to-face** target onto
-geometric signatures (and fixed an up-to-face replay bug). Remaining for step 4:
-re-derive the BAKED face frames that still go stale — sketch-on-face workplanes
-and datum-from-face frames. Still to do: finish 4, graph-delta undo (5), timeline
+fillet/chamfer **edge** selection, the extrude **up-to-face** target, the
+**datum offset-from-face** frame, and **sketch-on-face** workplanes onto geometric
+signatures (so each re-derives and follows its face on recompute; also fixed
+up-to-face + datum-offset replay bugs). Remaining for step 4: datum angle/tangent
+and 3-point face/vertex refs. Still to do: finish 4, graph-delta undo (5), timeline
 UI (6), persistence (7). Read `docs/ROADMAP.md` and `CLAUDE.md` first.
 
 ## 1. Why
@@ -269,14 +270,29 @@ The DAG can be introduced **without** a big-bang rewrite by wrapping what exists
      it now carries targetFacePoint + targetFaceRef. Validated by `npm run test:stableref-face`
      (9 assertions: round-trip, top-face survives a renumbering fuse 5→2, replay correctness,
      limit-follows-on-renumbered-base, legacy point fallback).
-   - **Remaining (a distinct sub-project): re-derive BAKED face frames.** sketch-on-face
-     stores its `workplane` baked at creation, and datum-from-face methods (offset / angle /
-     tangent) pass their STORED frame through `evaluateDatum` unchanged — neither re-derives
-     from the source face on recompute, so both go stale if the underlying body changes. The
-     fix is to store a FaceSig on the source-face input and resolve it during recompute to
-     rebuild the frame (the datum evaluator is the natural home; sketch-on-face has no
-     evaluator yet and needs one). Boolean base/tool are whole-body NODE refs by id — already
-     stable. `FacePicker` already yields the world point + face group a FaceSig needs.
+   - **Also done: datum offset-from-face.** `useCADDatumOffsetPick` captures a FaceSig of the
+     source face into the datum's `refs[].sel`. `evaluateDatum`'s offset path re-derives the
+     base frame from that signature against the live body (`deriveFaceWorkplane` → resolveFace
+     → `OccFaceService.planeFromFaceIndex`), so the offset plane FOLLOWS the face instead of
+     using its baked-at-creation frame; rejects → falls back to the baked `workplane`. ALSO
+     fixed a replay bug: the adapter dropped the datum's `refs`, so the offset DISTANCE
+     replayed as 0 — it now carries `refs`. Validated by `npm run test:stableref-datum`
+     (6 assertions: distance honoured; datum follows the +X face when the body widens 10→11
+     → plane x=15→16; reject→baked fallback on a large move; legacy/datum-source paths).
+   - **Also done: sketch-on-face.** A sketch created on a face is now a FRAME PRODUCER (like a
+     datum). `useCADSketchFacePick` captures a FaceSig of the picked face into the container's
+     `params.sourceFaceRef = { nodeId, sel }`. The graph adapter makes the source body an input
+     of the `sketch` container (role `source`) and makes each `sketch_wire` depend on its parent
+     container (role `frame`). The engine treats a sketch-with-`sourceFaceRef` like a datum:
+     `FeatureEvaluators.evaluateSketchFrame` re-derives the workplane from the FaceSig against the
+     live body (`deriveFaceWorkplane`), the frame is threaded into the child wires' meta, and
+     `sketchWire` now prefers that threaded frame over its baked `params.workplane` — so the
+     sketch (and everything extruded from it) FOLLOWS the face; rejects → baked fallback. The
+     live host's `onFrame` writes the re-derived `workplane` back to the container. Validated by
+     `npm run test:stableref-sketch` (7 assertions: capture; re-derive on face; follow d 10→11;
+     reject→baked fallback; no-sig passthrough; wire placed on threaded frame; wire baked fallback).
+   - **Remaining face-ref work: datum angle/tangent, 3-point-from-vertices.** Boolean base/tool
+     are whole-body NODE refs by id — already stable, nothing to migrate.
    - Known limit (§6 Phase 1a): a signature is absolute-position based, so a reference on
      a feature that TRANSLATES far (e.g. a fillet on a face of a growing extrude) may
      reject and fall back rather than track — that's what OCC `Generated()`/`Modified()`

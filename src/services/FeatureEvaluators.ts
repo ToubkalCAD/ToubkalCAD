@@ -26,6 +26,7 @@ import { OccFilletService }     from './OccFilletService';
 import { OccExtrusionService }  from './OccExtrusionService';
 import { OccSketchService }     from './OccSketchService';
 import { OccDatumService }      from './OccDatumService';
+import { OccFaceService }       from './OccFaceService';
 import { toRegionEntity, findRegions, RegionEntity } from './SketchRegions';
 import type { Workplane } from '../store/cadStore';
 
@@ -121,7 +122,11 @@ export const EVALUATORS: Partial<Record<FeatureOp, Evaluator>> = {
   //     ENTITY inputs (role 'entity', each carrying meta.sketchGeom). The engine
   //     supplies the siblings; we re-detect the region so a moved entity reshapes it.
   sketchWire: (oc, inputs, p) => {
-    const wp = p.workplane as Workplane | undefined;
+    // The parent 'sketch' container is a FRAME PRODUCER (step 4): when it sits on a
+    // solid face it re-derives its workplane each recompute and the engine threads
+    // the fresh frame in as a 'frame' input. Prefer it over the baked p.workplane so
+    // the wire FOLLOWS the face; fall back to the baked frame (plane / legacy sketch).
+    const wp = (firstRole(inputs, 'frame')?.meta?.workplane ?? p.workplane) as Workplane | undefined;
     if (!wp) throw new Error('sketchWire: no workplane');
     if (p.sketchGeom) return OccSketchService.buildEntityWire(oc, p.sketchGeom, wp);
     if (p.region) {
@@ -291,6 +296,16 @@ export type DatumFrame =
   | { kind: 'axis';  axis: { origin: V3; dir: V3 } }
   | { kind: 'point'; point: V3 };
 
+/** Re-derive a planar face's workplane on `bodyShape` by resolving the captured
+ *  face signature (step 4). Returns null if the face can't be confidently found
+ *  (→ caller falls back to the baked frame) or isn't planar. */
+function deriveFaceWorkplane(oc: any, bodyShape: any, faceSig: StableRef): Workplane | null {
+  const r = resolveFace(oc, bodyShape, faceSig as any);
+  if (r.rejected || r.index < 0) return null;
+  const pl = OccFaceService.planeFromFaceIndex(oc, bodyShape, r.index);
+  return pl ? { label: 'Face', origin: pl.origin, normal: pl.normal, uAxis: pl.uAxis, vAxis: pl.vAxis } : null;
+}
+
 export function evaluateDatum(
   oc: any, datumType: string, inputs: ResolvedInput[], params: Record<string, any>,
 ): DatumFrame | null {
@@ -298,8 +313,18 @@ export function evaluateDatum(
   if (datumType === 'datum_plane') {
     const m = p.method;
     if (m === 'offset') {
-      const base = inputs[0]?.meta?.workplane as Workplane | undefined;
-      const dist = Number(p.refs?.[0]?.distance ?? p.distance ?? 0);
+      const r0 = p.refs?.[0];
+      const dist = Number(r0?.distance ?? p.distance ?? 0);
+      // Base frame to offset from. A DATUM source already follows via its
+      // meta.workplane. A FACE source has no workplane in meta — re-derive it by
+      // resolving the captured face signature against the live body (step 4), so
+      // the offset datum tracks the face instead of using its baked-at-creation
+      // frame. On reject (face moved too far / gone) → fall through to passthrough.
+      let base = inputs[0]?.meta?.workplane as Workplane | undefined;
+      if (!base && r0?.sel?.kind === 'face') {
+        const src = inputs.find((i) => i.id === r0.nodeId) ?? inputs[0];
+        if (src?.shape) base = deriveFaceWorkplane(oc, src.shape, r0.sel) ?? undefined;
+      }
       if (base) {
         const o: V3 = [
           base.origin[0] + base.normal[0] * dist,
@@ -320,5 +345,29 @@ export function evaluateDatum(
   }
   if (datumType === 'datum_axis'  && p.axis)  return { kind: 'axis',  axis: p.axis };
   if (datumType === 'datum_point' && p.point) return { kind: 'point', point: p.point };
+  return null;
+}
+
+/** A sketch created on a solid FACE is a FRAME PRODUCER (step 4), like a datum:
+ *  re-derive its workplane from the captured face signature against the live
+ *  source body so the sketch — and everything built on it — FOLLOWS the face
+ *  instead of using the frame baked at creation. `params.sourceFaceRef =
+ *  { nodeId, sel }` carries the FaceSig; `inputs` holds the resolved source body
+ *  (role 'source'). Rejects (face moved too far / gone) or a plane/legacy sketch
+ *  with no signature → fall back to the baked `params.workplane`. Returns null
+ *  only when there is no frame at all (caller leaves the wires on their baked wp). */
+export function evaluateSketchFrame(
+  oc: any, inputs: ResolvedInput[], params: Record<string, any>,
+): DatumFrame | null {
+  const p = params ?? {};
+  const ref = p.sourceFaceRef as { nodeId?: string; sel?: StableRef } | undefined;
+  if (ref?.sel?.kind === 'face') {
+    const src = inputs.find((i) => i.id === ref.nodeId) ?? firstRole(inputs, 'source') ?? inputs[0];
+    if (src?.shape) {
+      const wp = deriveFaceWorkplane(oc, src.shape, ref.sel);
+      if (wp) return { kind: 'plane', workplane: { ...wp, label: (p.workplane as Workplane | undefined)?.label ?? 'Face' } };
+    }
+  }
+  if (p.workplane) return { kind: 'plane', workplane: p.workplane as Workplane };   // baked fallback
   return null;
 }

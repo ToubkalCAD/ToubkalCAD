@@ -32,7 +32,7 @@
 
 import type { FeatureGraph, Feature, FeatureRef, FeatureOp } from './FeatureGraph';
 import {
-  EVALUATORS, evaluateDatum, ResolvedInput, DatumFrame,
+  EVALUATORS, evaluateDatum, evaluateSketchFrame, ResolvedInput, DatumFrame,
 } from './FeatureEvaluators';
 
 // ─── Host: the injected boundary to registry / store / viewport ───────────────
@@ -104,6 +104,12 @@ const DATUM_NODE_TYPE: Record<string, string> = {
 // Ops with no shape AND no frame — the engine has nothing to (re)build for them.
 const INERT_OPS: FeatureOp[] = ['sketch', 'imported', 'unknown'];
 
+// A 'sketch' container is normally inert, but when it was created ON A FACE it
+// carries a sourceFaceRef and acts as a FRAME PRODUCER (like a datum): re-derive
+// its workplane and thread it to the child wires so the sketch follows the face.
+const isSketchFrame = (f: Feature): boolean =>
+  f.op === 'sketch' && !!(f.params as any)?.sourceFaceRef;
+
 // ─── The pure engine ──────────────────────────────────────────────────────────
 
 export function recompute(
@@ -153,18 +159,22 @@ export function recompute(
       continue;
     }
 
-    // 3 — inert (sketch container / import / unmapped) → nothing to build.
-    if (INERT_OPS.includes(f.op)) {
+    const sketchFrame = isSketchFrame(f);
+
+    // 3 — inert (sketch container / import / unmapped) → nothing to build. A
+    // sketch-on-face container is the exception: it produces a frame (see below).
+    if (INERT_OPS.includes(f.op) && !sketchFrame) {
       results.push({ id, op: f.op, status: 'noEvaluator' });
       continue;
     }
 
     const isDatum = DATUM_OPS.includes(f.op);
 
-    // 4 — incremental skip: clean feature reuses its cached output. Datums have
-    // no cached shape (their frame lives in stored params), so a clean datum is
-    // skipped without a shape check; clean solids must still have a live shape.
-    if (dirty && !dirty.has(id) && (isDatum || host.getShape(id))) {
+    // 4 — incremental skip: clean feature reuses its cached output. Datums and
+    // sketch-on-face frames have no cached shape (their frame lives in stored
+    // params), so a clean one is skipped without a shape check; clean solids must
+    // still have a live shape.
+    if (dirty && !dirty.has(id) && (isDatum || sketchFrame || host.getShape(id))) {
       results.push({ id, op: f.op, status: 'cached' });
       reused++;
       continue;
@@ -176,8 +186,10 @@ export function recompute(
     try {
       const inputs = resolveInputs(host, metaOf, graph, f, temps);
 
-      if (isDatum) {
-        const frame = evaluateDatum(oc, DATUM_NODE_TYPE[f.op], inputs, f.params);
+      if (isDatum || sketchFrame) {
+        const frame = isDatum
+          ? evaluateDatum(oc, DATUM_NODE_TYPE[f.op], inputs, f.params)
+          : evaluateSketchFrame(oc, inputs, f.params);
         if (frame) {
           frames.set(id, frame);
           host.onFrame?.(id, frame);

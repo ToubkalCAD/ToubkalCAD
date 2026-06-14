@@ -242,8 +242,10 @@ interface CADState {
   setActiveWorkplane:    (wp: Workplane) => void;
   openPlaneSelector:     (pendingMode: InteractionMode) => void;
   closePlaneSelector:    () => void;
-  /** Create the parent Sketch node, set activeWorkplane, and open the session. */
-  startSketchSession:    (plane: Workplane) => void;
+  /** Create the parent Sketch node, set activeWorkplane, and open the session.
+   *  `sourceFace` (sketch-on-face): the body node id + a StableRef FaceSig of the
+   *  picked face, so the sketch follows that face on recompute (step 4). */
+  startSketchSession:    (plane: Workplane, sourceFace?: { nodeId: string; sel: unknown }) => void;
   /** Finalize the session and return to SELECT mode. */
   quitSketchSession:     () => void;
 
@@ -491,17 +493,19 @@ export const useCADStore = create<CADState>((set, get) => ({
   openPlaneSelector:     (mode) => set({ planeSelectorOpen: true, pendingSketchMode: mode }),
   closePlaneSelector:    ()     => set({ planeSelectorOpen: false, pendingSketchMode: null }),
 
-  startSketchSession: (plane) => {
+  startSketchSession: (plane, sourceFace) => {
     const count = get().sketchSessionCount + 1;
     const name  = `Sketch ${count} [${plane.label}]`;
     const id    = crypto.randomUUID();
-    // Create the parent container node (no OCC shape — no cad-add-mesh dispatch)
+    // Create the parent container node (no OCC shape — no cad-add-mesh dispatch).
+    // sourceFace, when sketching on a solid face, makes this container a frame
+    // producer the recompute engine re-derives from (step 4); absent for plane sketches.
     get().addNode({
       id, name, type: 'sketch',
       visible: true, locked: false, parentId: null, notes: '',
       transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
       material:  { color: 0xff9900, roughness: 0.5, metalness: 0, wireframe: false, opacity: 1, transparent: false },
-      params: { workplane: plane },
+      params: sourceFace ? { workplane: plane, sourceFaceRef: sourceFace } : { workplane: plane },
     });
     set({ sketchSession: { id, name, plane }, sketchSessionCount: count, activeWorkplane: plane });
     get().log(`Sketch session "${name}" started.`, 'info');

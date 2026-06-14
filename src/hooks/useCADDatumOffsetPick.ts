@@ -22,22 +22,27 @@ import { useCADStore, Workplane } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccFaceService } from '../services/OccFaceService';
 import { FacePicker } from '../services/FacePicker';
+import { captureFace } from '../services/StableRef';
 import { getPlacedShape } from '../utils/placedShape';
 import { showParamModal } from '../components/ParameterModal';
 
 const DATUM_OPACITY  = 0.16;   // resting opacity of the persistent amber datum face
 const CLICK_SLOP_PX  = 5;
 
-interface RefMeta { workplane: Workplane; sourceId: string; kind: 'face' | 'datum'; }
+interface RefMeta { workplane: Workplane; sourceId: string; kind: 'face' | 'datum'; faceRef?: any; }
 
-/** World-space workplane of one solid face (null if curved). */
-function facePlaneWp(nodeId: string, faceIndex: number): Workplane | null {
+/** World-space workplane of one solid face (null if curved) PLUS a stable
+ *  signature of that face — captured against the same placed shape, so the
+ *  offset datum can re-derive its base frame on recompute (step 4). */
+function facePlaneAndSig(nodeId: string, faceIndex: number): { wp: Workplane; sig: any } | null {
   const reg    = CADGeometryRegistry.getInstance();
   const placed = getPlacedShape(nodeId);
   if (!placed) return null;
   try {
     const p = OccFaceService.planeFromFaceIndex(window.oc, placed, faceIndex);
-    return p ? { label: 'Face', origin: p.origin, normal: p.normal, uAxis: p.uAxis, vAxis: p.vAxis } : null;
+    if (!p) return null;
+    const sig = captureFace(window.oc, placed, faceIndex);
+    return { wp: { label: 'Face', origin: p.origin, normal: p.normal, uAxis: p.uAxis, vAxis: p.vAxis }, sig };
   } finally {
     if (placed !== reg.getShape(nodeId)) { try { placed.delete(); } catch {} }
   }
@@ -126,7 +131,9 @@ export function useCADDatumOffsetPick(
       ];
       const offsetWp: Workplane = { label: 'Offset', origin, normal: wp.normal, uAxis: wp.uAxis, vAxis: wp.vAxis };
       const st = useCADStore.getState();
-      st.createDatumPlane(offsetWp, 'offset', [{ kind: ref.kind, nodeId: ref.sourceId, distance: d }]);
+      // `sel` carries the face signature so the datum re-derives its base frame on
+      // recompute; `distance` is the (now graph-carried) offset value.
+      st.createDatumPlane(offsetWp, 'offset', [{ kind: ref.kind, nodeId: ref.sourceId, distance: d, sel: ref.faceRef }]);
       st.log(`Offset plane: ${d} mm from ${sourceName}.`, 'success');
     };
 
@@ -145,9 +152,9 @@ export function useCADDatumOffsetPick(
 
       let ref: RefMeta | null = null;
       if (res.kind === 'face') {
-        const wp = facePlaneWp(res.hit.nodeId, res.hit.faceIndex);
-        if (!wp) { st.log('That face is not planar — pick a flat face.', 'warn'); return; }
-        ref = { workplane: wp, sourceId: res.hit.nodeId, kind: 'face' };
+        const fp = facePlaneAndSig(res.hit.nodeId, res.hit.faceIndex);
+        if (!fp) { st.log('That face is not planar — pick a flat face.', 'warn'); return; }
+        ref = { workplane: fp.wp, sourceId: res.hit.nodeId, kind: 'face', faceRef: fp.sig };
       } else {
         const wp = st.nodes[res.nodeId]?.params?.workplane as Workplane | undefined;
         if (wp) ref = { workplane: wp, sourceId: res.nodeId, kind: 'datum' };

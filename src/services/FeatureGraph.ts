@@ -98,14 +98,22 @@ export function nodeToFeature(node: CADNode): Feature {
     }
 
     case 'sketch':
-      params = pick(p, ['workplane']);
+      params = pick(p, ['workplane', 'sourceFaceRef']);
+      // A sketch created ON A FACE follows it (step 4): the source body becomes an
+      // input and `sourceFaceRef` carries the FaceSig the engine re-derives the
+      // frame from. A plane/datum sketch has neither → stays inert (no frame).
+      if (p.sourceFaceRef?.nodeId) push(inputs, refOf(p.sourceFaceRef.nodeId, 'source'));
       complete = !!p.workplane;
       break;
 
     case 'sketch_wire':
       params = pick(p, ['workplane', 'sketchGeom', 'region', 'regionArea', 'constraints', 'memberIds']);
-      // Entity wire = sketchGeom (no inputs). Region wire = a profile traced from
-      // its member entities → those are inputs (the DAG edge so a moved entity
+      // Depend on the parent sketch CONTAINER as a 'frame' input (step 4): the
+      // engine orders it first and threads its workplane — re-derived when the
+      // sketch is on a face, the baked one otherwise — into this wire's meta.
+      push(inputs, refOf(node.parentId, 'frame'));
+      // Entity wire = sketchGeom (no further inputs). Region wire = a profile traced
+      // from its member entities → those are inputs (the DAG edge so a moved entity
       // reshapes the region).
       if (p.region) for (const mid of (p.memberIds as string[] | undefined) ?? []) push(inputs, refOf(mid, 'entity'));
       complete = !!p.sketchGeom || (!!p.region && Array.isArray(p.memberIds) && p.memberIds.length > 0);
@@ -183,7 +191,10 @@ export function nodeToFeature(node: CADNode): Feature {
     case 'datum_plane': case 'datum_axis': case 'datum_point': {
       for (const r of (p.refs as any[] | undefined) ?? []) push(inputs, refOf(r?.nodeId, r?.kind ?? 'ref'));
       push(inputs, refOf(p.bind?.id, 'bind'));            // D13 rigid follow
-      params = pick(p, ['workplane', 'axis', 'point', 'method', 'datum']);
+      // Carry `refs` so the datum recipe replays: refs[].distance is the offset
+      // value (was being DROPPED → offset replayed as 0) and refs[].sel is the
+      // step-4 face signature evaluateDatum resolves to re-derive the base frame.
+      params = pick(p, ['workplane', 'axis', 'point', 'method', 'datum', 'refs']);
       complete = !!(p.workplane || p.axis || p.point);
       break;
     }

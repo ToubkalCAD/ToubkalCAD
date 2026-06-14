@@ -11,7 +11,9 @@
     "test:extrude": "node scripts/test-extrude.mjs",
     "test:recompute": "node scripts/test-recompute.mjs",
     "test:stableref": "node scripts/test-stableref-blend.mjs",
-    "test:stableref-face": "node scripts/test-stableref-face.mjs"
+    "test:stableref-face": "node scripts/test-stableref-face.mjs",
+    "test:stableref-datum": "node scripts/test-stableref-datum.mjs",
+    "test:stableref-sketch": "node scripts/test-stableref-sketch.mjs"
   },
   "dependencies": {
     "dockview": "^1.11.0",

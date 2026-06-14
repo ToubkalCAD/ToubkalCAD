@@ -23,6 +23,7 @@ import { useCADStore, Workplane } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccFaceService } from '../services/OccFaceService';
 import { FacePicker, FaceHit } from '../services/FacePicker';
+import { captureFace } from '../services/StableRef';
 
 const COLOR_HOVER   = 0x00e0a0;
 const CLICK_SLOP_PX = 5;
@@ -152,7 +153,11 @@ export function useCADSketchFacePick(
       const wp: Workplane = {
         label: 'Face', origin: plane.origin, normal: plane.normal, uAxis: plane.uAxis, vAxis: plane.vAxis,
       };
-      st.startSketchSession(wp);          // sets activeWorkplane + sketchSession (camera follows)
+      // Capture a StableRef signature of the picked face so the sketch FOLLOWS it on
+      // recompute (step 4) instead of staying at this baked frame. captured against
+      // the SAME shape the workplane came from; absent → sketch behaves as before.
+      const sel = captureFace(window.oc, shape, hit.faceIndex);
+      st.startSketchSession(wp, sel ? { nodeId: hit.nodeId, sel } : undefined);
       st.setInteractionMode('SELECT');    // no tool pre-selected — user picks a 2D shape
       st.log(`Sketching on a face of ${st.nodes[hit.nodeId]?.name ?? 'solid'} — pick a 2D tool to draw.`, 'success');
     };
