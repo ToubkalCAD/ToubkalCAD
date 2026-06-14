@@ -13,7 +13,8 @@
     "test:stableref": "node scripts/test-stableref-blend.mjs",
     "test:stableref-face": "node scripts/test-stableref-face.mjs",
     "test:stableref-datum": "node scripts/test-stableref-datum.mjs",
-    "test:stableref-sketch": "node scripts/test-stableref-sketch.mjs"
+    "test:stableref-sketch": "node scripts/test-stableref-sketch.mjs",
+    "test:region-backfill": "node scripts/test-region-backfill.mjs"
   },
   "dependencies": {
     "dockview": "^1.11.0",

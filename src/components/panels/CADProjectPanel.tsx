@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useCADStore } from '../../store/cadStore';
 import { CADPersistenceService, CADProject } from '../../services/CADPersistenceService';
+import { backfillRegionMembers } from '../../utils/backfillRegionMembers';
 
 export const CADProjectPanel: React.FC = () => {
   const nodes   = useCADStore((s) => s.nodes);
@@ -34,7 +35,10 @@ export const CADProjectPanel: React.FC = () => {
   };
 
   const handleLoad = (proj: CADProject) => {
-    useCADStore.setState({ nodes: proj.nodes, rootIds: proj.rootIds, selectedIds: [] });
+    // Back-fill memberIds on legacy region wires so they recompute/follow (saved
+    // before region members were persisted — see backfillRegionMembers).
+    const nodes = backfillRegionMembers(proj.nodes);
+    useCADStore.setState({ nodes, rootIds: proj.rootIds, selectedIds: [] });
     setActiveId(proj.id);
     setProjectName(proj.name);
     log(`Project loaded: "${proj.name}" (WASM geometry must be recreated)`, 'warn');
