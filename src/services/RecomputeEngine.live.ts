@@ -24,6 +24,7 @@ import { CADGeometryRegistry } from './CADGeometryRegistry';
 import { OccTransformService } from './OccTransformService';
 import { ThreeMeshCache } from './ThreeMeshCache';
 import { fromLocal2D } from './OccSketchService';
+import { toRegionEntity, findRegions, RegionEntity } from './SketchRegions';
 import { useCADStore, Workplane } from '../store/cadStore';
 
 /** World-space display polyline for a sketch wire's local-2D `sketchGeom`, placed
@@ -44,6 +45,23 @@ function sketchWireWorldPoints(geom: any, wp: Workplane | undefined): number[][]
     case 'arc':      return arc(geom.c, geom.r, geom.a1, geom.a2, 48);
     default:         return null;
   }
+}
+
+/** World-space loop for a REGION wire, placed through `wp`. A region carries no
+ *  sketchGeom — it's re-traced from its member entity wires (params.memberIds),
+ *  the same detection the sketchWire evaluator runs — so the loop follows whatever
+ *  frame the region was rebuilt on. Returns null if it can't be re-detected. */
+function regionLoopWorldPoints(
+  memberIds: string[] | undefined, nodes: Record<string, any>, wp: Workplane | undefined,
+): number[][] | null {
+  if (!wp || !Array.isArray(memberIds) || !memberIds.length) return null;
+  const ents = memberIds
+    .map((id) => toRegionEntity(id, nodes[id]?.params?.sketchGeom))
+    .filter((e): e is RegionEntity => !!e);
+  const regions = findRegions(ents);
+  if (!regions.length) return null;
+  const rg = regions.reduce((a, b) => (b.area > a.area ? b : a));   // largest, matching the evaluator
+  return rg.loop.map(([u, v]) => { const p = fromLocal2D(u, v, wp); return [p.x, p.y, p.z]; });
 }
 
 /** The production host: registry + store placement/meta + cad-*-mesh bus. */
@@ -72,9 +90,11 @@ export function liveHost(): RecomputeHost {
       const node = useCADStore.getState().nodes[id];
       if (node?.type === 'sketch_wire') {
         const st = useCADStore.getState();
-        const wp = (node.parentId ? st.nodes[node.parentId]?.params?.workplane : undefined)
-          ?? node.params?.workplane;
-        const pts = sketchWireWorldPoints(node.params?.sketchGeom, wp as Workplane | undefined);
+        const wp = ((node.parentId ? st.nodes[node.parentId]?.params?.workplane : undefined)
+          ?? node.params?.workplane) as Workplane | undefined;
+        // Entity wire → re-place its sketchGeom; region wire → re-trace its loop.
+        const pts = sketchWireWorldPoints(node.params?.sketchGeom, wp)
+          ?? regionLoopWorldPoints(node.params?.memberIds, st.nodes, wp);
         if (pts) { window.dispatchEvent(new CustomEvent('cad-sketch-replace-visual', { detail: { id, pts } })); return; }
       }
       // Already-meshed → re-tessellate in place (update); never meshed → add. onAdd

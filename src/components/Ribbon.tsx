@@ -398,7 +398,10 @@ export const Ribbon: React.FC = () => {
           material:  { color: 0x00aa66, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
           // No sketchGeom: a Region is a finished closed profile, not an editable
           // entity — this keeps it out of trim/constraint/region-detection passes.
-          params: { workplane: wp, region: true, regionArea: rg.area },
+          // memberIds = the entity wires this region was traced from: the recompute
+          // engine re-detects the region from them (DAG inputs) so it rebuilds when
+          // a member moves or its sketch-on-face frame is re-derived.
+          params: { workplane: wp, region: true, regionArea: rg.area, memberIds: rg.members.map((m) => m.id) },
         });
         window.dispatchEvent(new CustomEvent('cad-sketch-add-visual', {
           detail: { id, pts: rg.loop.map((p) => { const v = fromLocal2D(p[0], p[1], wp); return [v.x, v.y, v.z]; }) },
