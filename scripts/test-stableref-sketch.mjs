@@ -132,5 +132,25 @@ try { w6 = wireZ(EVALUATORS.sketchWire(oc, [], sketchParams({ sketchGeom: circle
 ok('no frame input → baked workplane (z=10)', close(w6, 10),
   `z=${typeof w6 === 'number' ? w6.toFixed(2) : w6}`);
 
+// ─── 7 — REGION wire follows the threaded frame too ───────────────────────────
+// A region wire has no sketchGeom: it re-detects a profile from its member ENTITY
+// inputs (each carrying meta.sketchGeom) and builds it on `wp`. Since the evaluator
+// resolves `wp` once (threaded frame preferred), the region must follow the face
+// just like an entity wire. A lone circle member is itself a closed region.
+console.log('\n7 — REGION wire (from a member entity) follows the threaded frame (z=11)');
+const memberEntity = (id, geom) => ({ id, role: 'entity', shape: null, meta: { sketchGeom: geom } });
+const regionInputs = (wp) => [...frameInput(wp), memberEntity('e1', circle)];
+let w7 = NaN;
+try { w7 = wireZ(EVALUATORS.sketchWire(oc, regionInputs(rederived), sketchParams({ region: true }))); } catch (e) { w7 = `threw: ${e?.message ?? e}`; }
+ok('region wire centroid follows threaded frame → z=11', close(w7, 11),
+  `z=${typeof w7 === 'number' ? w7.toFixed(2) : w7}`);
+
+// ─── 8 — REGION wire legacy: no threaded frame → baked p.workplane ────────────
+console.log('\n8 — REGION wire with no threaded frame falls back to baked p.workplane (z=10)');
+let w8 = NaN;
+try { w8 = wireZ(EVALUATORS.sketchWire(oc, [memberEntity('e1', circle)], sketchParams({ region: true }))); } catch (e) { w8 = `threw: ${e?.message ?? e}`; }
+ok('region wire no frame → baked workplane (z=10)', close(w8, 10),
+  `z=${typeof w8 === 'number' ? w8.toFixed(2) : w8}`);
+
 console.log(`\n${failed ? '\x1b[31m' : '\x1b[32m'}${passed} passed, ${failed} failed\x1b[0m`);
 done(failed ? 1 : 0);
