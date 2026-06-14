@@ -23,7 +23,28 @@ import { buildFeatureGraph, dirtySet, descendants } from './FeatureGraph';
 import { CADGeometryRegistry } from './CADGeometryRegistry';
 import { OccTransformService } from './OccTransformService';
 import { ThreeMeshCache } from './ThreeMeshCache';
-import { useCADStore } from '../store/cadStore';
+import { fromLocal2D } from './OccSketchService';
+import { useCADStore, Workplane } from '../store/cadStore';
+
+/** World-space display polyline for a sketch wire's local-2D `sketchGeom`, placed
+ *  through `wp`. Sketch wires render as imperative THREE.Line objects that ignore
+ *  cad-update-mesh, so after a recompute moves the wire (e.g. its sketch followed a
+ *  face) we re-place its outline and swap the line via cad-sketch-replace-visual —
+ *  the same event the constraint solver uses. Returns null for shapes we don't
+ *  re-derive here (region wires carry no sketchGeom). */
+function sketchWireWorldPoints(geom: any, wp: Workplane | undefined): number[][] | null {
+  if (!geom || !wp) return null;
+  const P = (u: number, v: number): number[] => { const p = fromLocal2D(u, v, wp); return [p.x, p.y, p.z]; };
+  const arc = (c: number[], r: number, a1: number, a2: number, n: number) =>
+    Array.from({ length: n + 1 }, (_, i) => { const t = a1 + (a2 - a1) * (i / n); return P(c[0] + r * Math.cos(t), c[1] + r * Math.sin(t)); });
+  switch (geom.kind) {
+    case 'line':     return [P(geom.a[0], geom.a[1]), P(geom.b[0], geom.b[1])];
+    case 'polyline': return Array.isArray(geom.pts) ? geom.pts.map((q: number[]) => P(q[0], q[1])) : null;
+    case 'circle':   return arc(geom.c, geom.r, 0, 2 * Math.PI, 64);
+    case 'arc':      return arc(geom.c, geom.r, geom.a1, geom.a2, 48);
+    default:         return null;
+  }
+}
 
 /** The production host: registry + store placement/meta + cad-*-mesh bus. */
 export function liveHost(): RecomputeHost {
@@ -42,9 +63,24 @@ export function liveHost(): RecomputeHost {
       return OccTransformService.placeShape(window.oc, shape, node.transform);
     },
     meta: (id) => useCADStore.getState().nodes[id]?.params,
-    // Already-meshed → re-tessellate in place (update); never meshed → add. onAdd
-    // skips sketch wires/containers, so emitting 'add' for those is a safe no-op.
-    onChanged: (id) => emit(ThreeMeshCache.getInstance().hasMesh(id) ? 'update' : 'add', id),
+    onChanged: (id) => {
+      // Sketch wires render as imperative THREE.Line objects (not ThreeMeshCache
+      // solids), so re-tessellation via cad-update-mesh wouldn't touch them. When a
+      // recompute rebuilds one — e.g. a sketch-on-face followed its moved face — swap
+      // its line: re-place the local-2D outline through the parent container's
+      // (freshly re-derived) workplane and fire cad-sketch-replace-visual.
+      const node = useCADStore.getState().nodes[id];
+      if (node?.type === 'sketch_wire') {
+        const st = useCADStore.getState();
+        const wp = (node.parentId ? st.nodes[node.parentId]?.params?.workplane : undefined)
+          ?? node.params?.workplane;
+        const pts = sketchWireWorldPoints(node.params?.sketchGeom, wp as Workplane | undefined);
+        if (pts) { window.dispatchEvent(new CustomEvent('cad-sketch-replace-visual', { detail: { id, pts } })); return; }
+      }
+      // Already-meshed → re-tessellate in place (update); never meshed → add. onAdd
+      // skips sketch wires/containers, so emitting 'add' for those is a safe no-op.
+      emit(ThreeMeshCache.getInstance().hasMesh(id) ? 'update' : 'add', id);
+    },
     onRemoved: (id) => emit('remove', id),
     onFrame: (id, frame) => {
       // Persist the recomputed datum frame so the viewport render + downstream
