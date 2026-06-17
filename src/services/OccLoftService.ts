@@ -16,8 +16,9 @@
 //
 // Requirements:
 //   • All wires must be closed.
-//   • Wires should have the same number of edges for best results.
 //   • Minimum 2 profiles required.
+//   • Profiles may have DIFFERENT edge counts (e.g. rectangle → circle):
+//     CheckCompatibility(true) reconciles them — see the note in loftProfiles.
 // ============================================================
 
 import { WasmScope } from '../utils/WasmScope';
@@ -47,8 +48,20 @@ export class OccLoftService {
       // Smooth B-spline blending when ruled=false
       if (!ruled) loft.SetSmoothing(true);
 
-      // Relax compatibility check to allow sections with different edge counts
-      loft.CheckCompatibility(false);
+      // CheckCompatibility(true) is what makes sections with DIFFERENT edge
+      // counts loftable: OCCT splits edges so every section has the same count,
+      // then recomputes each wire's seam origin + winding to minimise twist
+      // (start-to-start, same orientation). This is the general N→M fix.
+      //
+      // Disabling it (the old code) tells OCCT "these wires already align
+      // edge-for-edge" — true only for matched profiles (circle→ellipse, both
+      // 1 edge). For a 4-edge rectangle → 1-edge circle it maps corners to the
+      // circle arbitrarily, producing a self-intersecting, zero-volume,
+      // BRepCheck-invalid solid (the reported bowtie). Verified headlessly in
+      // scripts/test-loft-twist.mjs: false → invalid in every mismatch case;
+      // true → one valid solid for pentagon/triangle/N-gon→circle, opposite
+      // winding, and rotated seams alike.
+      loft.CheckCompatibility(true);
 
       for (const wire of profiles) loft.AddWire(wire);
 

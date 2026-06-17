@@ -16,6 +16,7 @@ import type { NodeType, Workplane } from '../store/cadStore';
 import { CADGeometryRegistry }  from '../services/CADGeometryRegistry';
 import { OccConverter }         from '../services/OccConverter';
 import { getPlacedShape }       from '../utils/placedShape';
+import { profileShapeFor, canResolveProfile, healOpProfileTargets } from '../utils/sketchProfile';
 import { captureFaceAtPoint }   from '../services/StableRef';
 import { propagateFromStore }   from '../services/RecomputeEngine.live';
 import { OccExtrusionService, ExtrudeEnd } from '../services/OccExtrusionService';
@@ -34,6 +35,10 @@ export interface Op3DRequest {
   op:          Op3DType;
   targetIds:   string[];
   editNodeId?: string;
+  /** True when the node was just created by createAndEditOp purely so the panel
+   *  could edit it live — Cancel/Esc must DELETE it (the op never really happened).
+   *  False/absent for a genuine Re-edit of a pre-existing node (Cancel keeps it). */
+  ephemeral?:  boolean;
 }
 
 // Module-level opener — set by CADLayout during render (before any useEffect).
@@ -44,8 +49,16 @@ export function show3DOpPanel(
   op:          Op3DType,
   targetIds:   string[],
   editNodeId?: string,
+  ephemeral?:  boolean,
 ): void {
-  useCADStore.getState().openOp3DPanel(op, targetIds, editNodeId);
+  // Re-editing an existing op: self-heal its profile targets to stable sketch
+  // ids first, so a loft/extrude created with (now-stale) entity-wire ids — e.g.
+  // a rectangle that was replaced — rebinds to its sketch instead of failing with
+  // "not in WASM registry". Both the live preview and Apply then see valid targets.
+  const ids = (editNodeId && ['extrude', 'revolve', 'loft', 'sweep'].includes(op))
+    ? healOpProfileTargets(editNodeId)
+    : targetIds;
+  useCADStore.getState().openOp3DPanel(op, ids.length ? ids : targetIds, editNodeId, ephemeral);
 }
 
 /**
@@ -60,7 +73,7 @@ export function createAndEditOp(op: Op3DType, targetIds: string[]): void {
   if (!oc) { store.log('OCC kernel not ready.', 'error'); return; }
 
   for (const wId of targetIds) {
-    if (!reg.getShape(wId)) {
+    if (!canResolveProfile(oc, wId)) {
       store.log(`Shape not in WASM registry — re-draw the sketch.`, 'error');
       return;
     }
@@ -87,8 +100,9 @@ export function createAndEditOp(op: Op3DType, targetIds: string[]): void {
     if (['extrude', 'revolve', 'loft', 'sweep'].includes(op)) store.adoptSketchSources(id, targetIds);
     store.log(`${name} created — adjust in the panel.`, 'success');
 
-    // Open panel in EDIT mode
-    show3DOpPanel(op, targetIds, id);
+    // Open panel in EDIT mode. ephemeral=true → Cancel/Esc deletes this node (the
+    // op is only provisional until the user clicks Update/Apply).
+    show3DOpPanel(op, targetIds, id, true);
   } catch (err: any) {
     store.log(`${OP_TITLE[op]} failed: ${err?.message ?? String(err)}`, 'error');
   }
@@ -150,7 +164,12 @@ function computeShape(
   const oc = window.oc;
   switch (op) {
     case 'extrude': {
-      const wires = ids.map((id) => reg.getShape(id)).filter(Boolean);
+      // Each target resolves to a wire: a SKETCH container → its current profile
+      // (temp, freed below); a sketch_wire / region node → its registered shape.
+      const built = ids.map((id) => profileShapeFor(oc, id));
+      const wires = built.map((b) => b.shape).filter(Boolean);
+      const freeTemps = () => built.forEach((b) => { if (b.temp && b.shape) try { b.shape.delete(); } catch { /*noop*/ } });
+      try {
       if (!wires.length) throw new Error('Wire not found.');
       const endMode = Math.round(p.endMode ?? 0);
       let solid;
@@ -204,9 +223,29 @@ function computeShape(
           : OccBooleanService.subtract(oc, target, solid);
       }
       return solid;
+      } finally { freeTemps(); }
     }
-    case 'revolve': { const w=reg.getShape(ids[0]); if(!w) throw new Error('Wire not found.'); const axes:any[]=[[1,0,0],[0,1,0],[0,0,1]]; return OccRevolutionService.revolveProfile(oc,w,[0,0,0],axes[Math.round(p.axis??1)],p.angle??360); }
-    case 'loft':    { const ws=ids.map(id=>reg.getShape(id)).filter(Boolean); if(ws.length<2) throw new Error('Need ≥ 2 wires.'); return OccLoftService.loftProfiles(oc,ws,(p.solid??1)>=0.5,(p.ruled??0)>=0.5); }
+    case 'revolve': {
+      const b = profileShapeFor(oc, ids[0]);
+      try {
+        if (!b.shape) throw new Error('Wire not found.');
+        const axes: any[] = [[1,0,0],[0,1,0],[0,0,1]];
+        return OccRevolutionService.revolveProfile(oc, b.shape, [0,0,0], axes[Math.round(p.axis ?? 1)], p.angle ?? 360);
+      } finally { if (b.temp && b.shape) try { b.shape.delete(); } catch { /*noop*/ } }
+    }
+    case 'loft':    {
+      // Resolve each target — a SKETCH container yields its current profile wire
+      // (temp), a sketch_wire yields its registered shape. Free the temporaries
+      // after the loft is built (the result is independent of the input wires).
+      const built = ids.map((id) => profileShapeFor(oc, id));
+      const ws = built.map((b) => b.shape).filter(Boolean);
+      try {
+        if (ws.length < 2) throw new Error('Need ≥ 2 wires.');
+        return OccLoftService.loftProfiles(oc, ws, (p.solid ?? 1) >= 0.5, (p.ruled ?? 0) >= 0.5);
+      } finally {
+        built.forEach((b) => { if (b.temp && b.shape) try { b.shape.delete(); } catch { /*noop*/ } });
+      }
+    }
     case 'sweep':   { const pr=reg.getShape(ids[0]),sp=reg.getShape(ids[1]); if(!pr||!sp) throw new Error('Profile/spine not found.'); return OccSweepService.sweepProfile(oc,pr,sp); }
     case 'fillet':  { const s=reg.getShape(ids[0]); if(!s) throw new Error('Shape not found.'); return OccFilletService.filletAllEdges(oc,s,p.r??1); }
     case 'chamfer': { const s=reg.getShape(ids[0]); if(!s) throw new Error('Shape not found.'); return OccFilletService.chamferAllEdges(oc,s,p.d??1); }
@@ -340,6 +379,11 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
   const datumPlanes = Object.values(useCADStore.getState().nodes).filter((n) => n.type === 'datum_plane');
   const previewRef    = useRef<THREE.Mesh | null>(null);
   const debounceRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Skip the FIRST preview when re-editing/just-created: the committed mesh already
+  // shows exactly the current params, so building a preview on open just re-runs an
+  // identical (and for revolve, costly) tessellation. Preview from the first real
+  // param change onward.
+  const skipFirstPreviewRef = useRef<boolean>(!!req.editNodeId);
   // Committed meshes hidden while the preview is live (edited node + boolean target).
   const hiddenMeshesRef = useRef<THREE.Object3D[]>([]);
 
@@ -383,6 +427,10 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     // Restore every committed mesh hidden during preview (edit node + target)
     for (const obj of hiddenMeshesRef.current) obj.visible = true;
     hiddenMeshesRef.current = [];
+    // The viewport renders on demand — this scene edit is imperative (no store/
+    // event change), so explicitly ask for a redraw or it won't show until the
+    // next pointer move (looked like a multi-second hang on axis change).
+    window.cadRequestRender?.();
   }, []);
 
   // Clear preview on any node deletion (prevents ghost meshes after tree delete)
@@ -417,15 +465,25 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
       mesh.castShadow = mesh.receiveShadow = true;
       sc.add(mesh);
       previewRef.current = mesh;
-    } catch {
-      // Preview failed — restore hidden meshes so the user can still see the solids
+      setApplyErr(null);
+    } catch (e: any) {
+      // Preview failed — restore hidden meshes so the user can still see the solids,
+      // and surface why (e.g. a revolve axis that passes through the profile).
       for (const obj of hiddenMeshesRef.current) obj.visible = true;
       hiddenMeshesRef.current = [];
+      setApplyErr(e?.message ?? null);
     }
+    // Imperative scene edit → the on-demand render loop needs an explicit nudge,
+    // otherwise the new preview isn't drawn until the next pointer move.
+    window.cadRequestRender?.();
   }, [clearPreview]);
 
   // Debounce preview on param change
   useEffect(() => {
+    // First run on open: the committed mesh already shows these params → don't
+    // tessellate a redundant preview. (New-from-scratch ops have no committed mesh
+    // yet, so they DO preview immediately.)
+    if (skipFirstPreviewRef.current) { skipFirstPreviewRef.current = false; return; }
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => buildPreview(req, params, targetSolidId, targetFacePoint, targetDatumId), 250);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
@@ -461,6 +519,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
   const onCloseRef  = useRef(onClose);
   const reqRef      = useRef(req);
   const doApplyRef  = useRef<() => void>(() => {});
+  const doCancelRef = useRef<() => void>(() => {});
   useEffect(() => { paramsRef.current  = params;  }, [params]);
   useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
   useEffect(() => { reqRef.current     = req;     }, [req]);
@@ -473,7 +532,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
 
     const h = (e: KeyboardEvent) => {
       if (!armed) return;
-      if (e.key === 'Escape') { e.preventDefault(); clearPreview(); onCloseRef.current(); }
+      if (e.key === 'Escape') { e.preventDefault(); doCancelRef.current(); }
       else if (e.key === 'Enter') { e.preventDefault(); doApplyRef.current(); }
     };
     // capture:true → fires before the number-input's onKeyDown stopPropagation,
@@ -504,10 +563,16 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     const snap = { ...params };
     store.log(`Op3D Apply → op=${req.op} targets=[${req.targetIds.map(s => s.slice(0,6)).join(',')}]`, 'info');
 
-    // ── Validate shapes in registry ──────────────────────────────────────────
+    // ── Validate targets are resolvable to geometry ──────────────────────────
+    // A target is valid if it's a registered shape OR a SKETCH container that
+    // currently encloses a closed profile (loft/extrude bind to the sketch, so a
+    // sketch with no shape of its own is still valid — its profile is re-derived).
     for (const wId of req.targetIds) {
-      if (!reg.getShape(wId)) {
-        const msg = `Shape "${wId.slice(0, 8)}…" not in WASM registry. Re-select the sketch.`;
+      if (!canResolveProfile(window.oc, wId)) {
+        const isSketch = store.nodes[wId]?.type === 'sketch';
+        const msg = isSketch
+          ? `Sketch "${store.nodes[wId]?.name ?? wId.slice(0, 8)}" has no closed profile — draw a closed shape in it.`
+          : `Shape "${wId.slice(0, 8)}…" not in WASM registry. Re-select the sketch.`;
         setApplyErr(msg);
         store.log(`Op3D FAIL: ${msg}`, 'error');
         return;
@@ -621,8 +686,19 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     }
   };
 
-  const doCancel = () => { clearPreview(); onClose(); };
-  doApplyRef.current = doApply; // keep Enter-key handler pointed at the latest closure
+  const doCancel = () => {
+    clearPreview();
+    // A freshly-created op (createAndEditOp) is provisional until Update — Cancel/Esc
+    // removes it so no phantom extrusion/revolve/loft is left in the tree + viewport.
+    // deleteNode preserves its source sketch (lifted back to root). A genuine Re-edit
+    // (ephemeral=false) keeps the existing node untouched.
+    if (req.ephemeral && req.editNodeId) {
+      useCADStore.getState().deleteNode(req.editNodeId);
+    }
+    onClose();
+  };
+  doApplyRef.current  = doApply;  // keep Enter-key handler pointed at the latest closure
+  doCancelRef.current = doCancel; // keep Esc-key handler pointed at the latest closure
 
   const set = (k: string, v: number) => setParams(p => ({ ...p, [k]: v }));
 

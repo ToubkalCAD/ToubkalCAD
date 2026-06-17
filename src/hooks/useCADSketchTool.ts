@@ -138,7 +138,7 @@ function sampleCatmullRom3D(pts: THREE.Vector3[], segs = 60): THREE.Vector3[] {
 export function useCADSketchTool(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const interactionMode    = useCADStore((s) => s.interactionMode);
   const activeWorkplane    = useCADStore((s) => s.activeWorkplane);

@@ -28,6 +28,19 @@ re-homed onto our registry + service + event pattern. Reuse algorithms, not plum
 - `compound.Located(new TopLoc_Location())` is **not** a deep clone; use
   `BRepBuilderAPI_Copy` for true isolation. Prefer the registry lifetime model.
 - The blanket "track all + purge in finally" pattern deletes shapes you still need.
+- `BRepOffsetAPI_ThruSections` (Loft) `.CheckCompatibility(flag)` semantics are the
+  reverse of what they read like. **`true` (the fix)** is what makes profiles with
+  DIFFERENT edge counts loftable — OCCT splits edges to a common count, then
+  recomputes each wire's seam origin + winding to minimise twist (start-to-start,
+  same orientation). **`false`** asserts the wires *already* align edge-for-edge;
+  true only for matched profiles (circle→ellipse, both 1 edge). For a 4-edge
+  rectangle → 1-edge circle, `false` maps corners arbitrarily → a self-intersecting,
+  zero-volume, BRepCheck-invalid solid (the "bowtie"). Verified headlessly in
+  `scripts/test-loft-twist.mjs`: `false` → invalid in every mismatch case; `true` →
+  one valid solid for pentagon/triangle/N-gon→circle, opposite winding, and rotated
+  seams alike. `SetSmoothing(true)` is orthogonal (surface smoothness, not vertex
+  mapping) and does not fix this. Guide curves are a separate feature (loft *path*)
+  and are not well-supported by `ThruSections` in opencascade.js — not needed here.
 
 ---
 

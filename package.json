@@ -9,11 +9,13 @@
     "preview": "rspack serve --config rspack.config.ts --mode production",
     "clean": "rimraf dist",
     "test:extrude": "node scripts/test-extrude.mjs",
+    "test:loft": "node scripts/test-loft.mjs",
     "test:recompute": "node scripts/test-recompute.mjs",
     "test:stableref": "node scripts/test-stableref-blend.mjs",
     "test:stableref-face": "node scripts/test-stableref-face.mjs",
     "test:stableref-datum": "node scripts/test-stableref-datum.mjs",
     "test:stableref-sketch": "node scripts/test-stableref-sketch.mjs",
+    "test:history-delta": "node scripts/test-history-delta.mjs",
     "test:region-backfill": "node scripts/test-region-backfill.mjs"
   },
   "dependencies": {

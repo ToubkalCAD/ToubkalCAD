@@ -27,7 +27,7 @@ const CLICK_SLOP_PX  = 5;        // max movement that still counts as a click
 export function useCADEdgeSelect(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const blendReq            = useCADStore((s) => s.blendReq);
   const selectedEdgeIndices = useCADStore((s) => s.selectedEdgeIndices);

@@ -6,6 +6,7 @@
 
 import { create } from 'zustand';
 import { computeDatumUpdates } from '../utils/recomputeDatums';
+import { NodeDelta, diffNodes, applyDeltas } from './historyDelta';
 
 // D13 — capture the body a datum is derived from (first ref pointing to a solid),
 // so a later move of that body can rigidly recompute the datum. Datum-sourced
@@ -170,8 +171,7 @@ export interface LogEntry {
 interface CADAction {
   type:        'ADD' | 'DELETE' | 'TRANSFORM' | 'RENAME' | 'MATERIAL';
   description: string;
-  nodesBefore: CADNode[];
-  nodesAfter:  CADNode[];
+  deltas:      NodeDelta[];   // only the nodes this action changed (not a full snapshot)
 }
 
 // ─── Full state interface ─────────────────────────────────────────────────────
@@ -272,8 +272,8 @@ interface CADState {
   closeTreeContextMenu: () => void;
 
   /** Op3D panel request — non-null while the panel is open. */
-  op3DPanelReq: { op: string; targetIds: string[]; editNodeId?: string } | null;
-  openOp3DPanel:  (op: string, targetIds: string[], editNodeId?: string) => void;
+  op3DPanelReq: { op: string; targetIds: string[]; editNodeId?: string; ephemeral?: boolean } | null;
+  openOp3DPanel:  (op: string, targetIds: string[], editNodeId?: string, ephemeral?: boolean) => void;
   closeOp3DPanel: () => void;
   /** One-shot result of EXTRUDE_TARGET_PICK: the solid id the user clicked
    *  while picking a Pad/Pocket boolean target. The Op3DPanel consumes and
@@ -407,10 +407,11 @@ function makeLog(msg: string, level: LogEntry['level'] = 'info'): LogEntry {
   return { id: makeId(), timestamp: Date.now(), level, message: msg };
 }
 
-/** Cap on retained undo steps. Bounds both the JS history arrays and the WASM
- *  shapes the registry keeps alive for undo: a deleted node's OCC shape survives
- *  exactly as long as its delete action stays in this window, then ages out and
- *  is freed (see CADGeometryRegistry's reachability GC). */
+/** Cap on retained undo steps. Bounds the JS history arrays. A REGENERABLE node's
+ *  OCC shape is freed immediately on delete (the recompute engine rebuilds it from
+ *  its recipe on undo); only NON-regenerable shapes (imported / mirror / pattern)
+ *  are retained while a delta referencing them stays in this window, then freed as
+ *  the action ages out — see CADGeometryRegistry's reachability GC. */
 const HISTORY_LIMIT = 100;
 
 /** Append an action to `past`, trimming the oldest entries past HISTORY_LIMIT.
@@ -419,6 +420,12 @@ const HISTORY_LIMIT = 100;
 function pushPast(past: CADAction[], action: CADAction): CADAction[] {
   const next = [...past, action];
   return next.length > HISTORY_LIMIT ? next.slice(next.length - HISTORY_LIMIT) : next;
+}
+
+/** Build a delta-based action from two full node snapshots (the push sites already
+ *  have these on hand; the diff keeps only what changed). */
+function makeAction(type: CADAction['type'], description: string, before: CADNode[], after: CADNode[]): CADAction {
+  return { type, description, deltas: diffNodes(before, after) };
 }
 
 /** After an undo/redo, push each restored node's transform back onto its mesh so
@@ -432,6 +439,20 @@ function syncTransforms(nodes: Record<string, CADNode>): void {
       detail: { id, position: t.position, rotation: t.rotation },
     }));
   }
+}
+
+/** Re-sync the viewport after an undo/redo restored `nodes`. A re-added node's
+ *  shape may have been freed on delete (regenerable nodes are freed immediately
+ *  now, not retained through history) — so before meshing, fire `cad-regenerate`,
+ *  which the recompute bridge handles SYNCHRONOUSLY (rebuilding any missing shape
+ *  from its recipe into the registry) so the subsequent cad-add-mesh finds it. */
+function syncScene(added: string[], removed: string[], restoredNodes: Record<string, CADNode>): void {
+  removed.forEach((id) => window.dispatchEvent(new CustomEvent('cad-remove-mesh', { detail: { id } })));
+  if (added.length) window.dispatchEvent(new CustomEvent('cad-regenerate'));
+  added.forEach((id) => window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } })));
+  // Re-meshed nodes rebuild at their LOCAL pose, and a plain transform-undo moves
+  // no mesh on its own — push every restored node's transform back onto its mesh.
+  syncTransforms(restoredNodes);
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -518,6 +539,13 @@ export const useCADStore = create<CADState>((set, get) => ({
     const { sketchSession } = get();
     if (sketchSession) get().log(`Sketch "${sketchSession.name}" complete — select it and click Extrude/Revolve.`, 'success');
     set({ sketchSession: null, interactionMode: 'SELECT' });
+    // Rebuild any feature bound to this sketch (loft / extrude / revolve) from its
+    // now-current profile. The recompute bridge (RecomputeEngine.live) listens —
+    // dispatched as an event to avoid a store→engine import cycle. No-op if nothing
+    // downstream depends on the sketch.
+    if (sketchSession) {
+      window.dispatchEvent(new CustomEvent('cad-sketch-committed', { detail: { sketchId: sketchSession.id } }));
+    }
   },
 
   setSketchInputStep:    (n)   => set({ sketchInputStep: n }),
@@ -542,7 +570,7 @@ export const useCADStore = create<CADState>((set, get) => ({
   openTreeContextMenu:  (nodeId, x, y) => set({ treeContextMenu: { nodeId, x, y } }),
   closeTreeContextMenu: ()             => set({ treeContextMenu: null }),
 
-  openOp3DPanel:  (op, targetIds, editNodeId) => set({ op3DPanelReq: { op, targetIds, editNodeId } }),
+  openOp3DPanel:  (op, targetIds, editNodeId, ephemeral) => set({ op3DPanelReq: { op, targetIds, editNodeId, ephemeral } }),
   closeOp3DPanel: ()                          => set({ op3DPanelReq: null }),
 
   startOp3DTargetPick: () => set({ interactionMode: 'EXTRUDE_TARGET_PICK', op3DTargetPick: null, op3DTargetPickPoint: null }),
@@ -689,11 +717,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       updatedRootIds.push(newNode.id);
     }
 
-    const action: CADAction = {
-      type: 'ADD', description: `Add "${newNode.name}"`,
-      nodesBefore: Object.values(nodes),
-      nodesAfter:  Object.values(updatedNodes),
-    };
+    const action = makeAction('ADD', `Add "${newNode.name}"`, Object.values(nodes), Object.values(updatedNodes));
     set({ nodes: updatedNodes, rootIds: updatedRootIds,
           past: pushPast(get().past, action), future: [] });
     get().log(`Created: ${newNode.name} (${newNode.type})`, 'success');
@@ -746,10 +770,22 @@ export const useCADStore = create<CADState>((set, get) => ({
     const nodesBefore  = Object.values(nodes);
     const updatedNodes = { ...nodes };
     const deletedIds:  string[] = [];
+    const preservedSketchIds: string[] = [];
 
-    const removeRecursive = (targetId: string) => {
+    const removeRecursive = (targetId: string, isTarget = false) => {
       const node = updatedNodes[targetId];
       if (!node) return;
+      // Adopted source sketches OUTLIVE the op that consumed them: deleting an
+      // extrusion/revolve/loft/sweep should leave its sketch in the tree (lifted
+      // back to root) so you can reuse it — e.g. decide you want a revolve instead
+      // of the extrude you just removed — without redrawing it. This only applies
+      // when the sketch is a SIDE-EFFECT of deleting an ancestor; deleting a sketch
+      // directly (isTarget) still removes it and its wires.
+      if (!isTarget && node.type === 'sketch') {
+        updatedNodes[targetId] = { ...node, parentId: null };
+        preservedSketchIds.push(targetId);
+        return;
+      }
       node.children.forEach((cid) => removeRecursive(cid));
       deletedIds.push(targetId);
       delete updatedNodes[targetId];
@@ -757,7 +793,7 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     const parentId    = nodes[id].parentId;
     const deletedName = nodes[id].name;
-    removeRecursive(id);
+    removeRecursive(id, true);
 
     // Restore visibility of any input solids a deleted op had hidden (booleans
     // hide base+tools, fillet/chamfer hide the source). Without this, deleting
@@ -779,7 +815,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       }
     });
 
-    const updatedRootIds = rootIds.filter((r) => r !== id);
+    const updatedRootIds = rootIds.filter((r) => r !== id).concat(preservedSketchIds);
     if (parentId && updatedNodes[parentId]) {
       updatedNodes[parentId] = {
         ...updatedNodes[parentId],
@@ -795,10 +831,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     set({
       nodes: updatedNodes, rootIds: updatedRootIds,
       selectedIds: get().selectedIds.filter((s) => s !== id),
-      past: pushPast(get().past, {
-        type: 'DELETE', description: `Delete "${deletedName}"`,
-        nodesBefore, nodesAfter: Object.values(updatedNodes),
-      }),
+      past: pushPast(get().past, makeAction('DELETE', `Delete "${deletedName}"`, nodesBefore, Object.values(updatedNodes))),
       future: [],
       ...(activeSketchDeleted ? { sketchSession: null, interactionMode: 'SELECT' as InteractionMode } : {}),
     });
@@ -816,12 +849,11 @@ export const useCADStore = create<CADState>((set, get) => ({
       window.dispatchEvent(new CustomEvent('cad-visibility-changed', { detail: { id: rid, visible: true } }))
     );
 
-    get().log(
-      restoredIds.length
-        ? `Deleted: ${deletedName} (restored ${restoredIds.length} input${restoredIds.length > 1 ? 's' : ''})`
-        : `Deleted: ${deletedName}`,
-      'warn',
-    );
+    const notes = [
+      restoredIds.length ? `restored ${restoredIds.length} input${restoredIds.length > 1 ? 's' : ''}` : '',
+      preservedSketchIds.length ? `kept ${preservedSketchIds.length} sketch${preservedSketchIds.length > 1 ? 'es' : ''}` : '',
+    ].filter(Boolean).join(', ');
+    get().log(`Deleted: ${deletedName}${notes ? ` (${notes})` : ''}`, 'warn');
   },
 
   duplicateNode: (id) => {
@@ -854,10 +886,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     const updatedNodes = { ...nodes, [id]: { ...nodes[id], name } };
     set({
       nodes: updatedNodes,
-      past: pushPast(get().past, {
-        type: 'RENAME', description: `Rename → "${name}"`,
-        nodesBefore, nodesAfter: Object.values(updatedNodes),
-      }),
+      past: pushPast(get().past, makeAction('RENAME', `Rename → "${name}"`, nodesBefore, Object.values(updatedNodes))),
       future: [],
     });
   },
@@ -881,10 +910,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     }
     set({
       nodes: updatedNodes,
-      past:  pushPast(get().past, {
-        type: 'TRANSFORM', description: 'Transform',
-        nodesBefore, nodesAfter: Object.values(updatedNodes),
-      }),
+      past:  pushPast(get().past, makeAction('TRANSFORM', 'Transform', nodesBefore, Object.values(updatedNodes))),
       future: [],
     });
   },
@@ -917,10 +943,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
     set({
       nodes: updatedNodes,
-      past:  pushPast(get().past, {
-        type: 'MATERIAL', description: 'Change material',
-        nodesBefore, nodesAfter: Object.values(updatedNodes),
-      }),
+      past:  pushPast(get().past, makeAction('MATERIAL', 'Change material', nodesBefore, Object.values(updatedNodes))),
       future: [],
     });
     get().log(`Material updated: ${nodes[id].name}`, 'info');
@@ -949,71 +972,45 @@ export const useCADStore = create<CADState>((set, get) => ({
   // ── Undo / Redo ────────────────────────────────────────────────────────────
 
   undo: () => {
-    const { past, future } = get();
+    const { past, future, nodes: currentNodes } = get();
     if (past.length === 0) return;
-    const prev = past[past.length - 1];
+    const action = past[past.length - 1];
 
-    const currentNodes = get().nodes;
-    const restoredNodes: Record<string, CADNode> = {};
-    prev.nodesBefore.forEach((n) => { restoredNodes[n.id] = n; });
-
-    // Compute scene diff so the Viewport stays in sync
+    const restoredNodes = applyDeltas(currentNodes, action.deltas, 'undo');
+    // Scene diff so the Viewport stays in sync.
     const added   = Object.keys(restoredNodes).filter((id) => !currentNodes[id]);
     const removed = Object.keys(currentNodes).filter((id) => !restoredNodes[id]);
 
     set({
       nodes:       restoredNodes,
-      rootIds:     prev.nodesBefore.filter((n) => !n.parentId).map((n) => n.id),
+      rootIds:     Object.values(restoredNodes).filter((n) => !n.parentId).map((n) => n.id),
       selectedIds: [],
       past:        past.slice(0, -1),
-      future:      [prev, ...future],
+      future:      [action, ...future],
     });
 
-    // Sync 3D scene. Deleted OCC shapes DO re-appear now — the registry keeps a
-    // shape alive while its id is still reachable through history (see
-    // CADGeometryRegistry), so a re-added node rebuilds its mesh from getShape.
-    removed.forEach((id) =>
-      window.dispatchEvent(new CustomEvent('cad-remove-mesh', { detail: { id } }))
-    );
-    added.forEach((id) =>
-      window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }))
-    );
-    // Re-meshed nodes rebuild at their LOCAL pose, and a plain transform-undo
-    // moves no mesh on its own — so push every restored node's transform back
-    // onto its mesh to match the metadata we just restored.
-    syncTransforms(restoredNodes);
-
-    get().log(`Undo: ${prev.description}`, 'info');
+    syncScene(added, removed, restoredNodes);
+    get().log(`Undo: ${action.description}`, 'info');
   },
 
   redo: () => {
-    const { past, future } = get();
+    const { past, future, nodes: currentNodes } = get();
     if (future.length === 0) return;
-    const next = future[0];
+    const action = future[0];
 
-    const currentNodes = get().nodes;
-    const restoredNodes: Record<string, CADNode> = {};
-    next.nodesAfter.forEach((n) => { restoredNodes[n.id] = n; });
-
+    const restoredNodes = applyDeltas(currentNodes, action.deltas, 'redo');
     const added   = Object.keys(restoredNodes).filter((id) => !currentNodes[id]);
     const removed = Object.keys(currentNodes).filter((id) => !restoredNodes[id]);
 
     set({
       nodes:       restoredNodes,
-      rootIds:     next.nodesAfter.filter((n) => !n.parentId).map((n) => n.id),
+      rootIds:     Object.values(restoredNodes).filter((n) => !n.parentId).map((n) => n.id),
       selectedIds: [],
-      past:        [...past, next],
+      past:        [...past, action],
       future:      future.slice(1),
     });
 
-    removed.forEach((id) =>
-      window.dispatchEvent(new CustomEvent('cad-remove-mesh', { detail: { id } }))
-    );
-    added.forEach((id) =>
-      window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }))
-    );
-    syncTransforms(restoredNodes);
-
-    get().log(`Redo: ${next.description}`, 'info');
+    syncScene(added, removed, restoredNodes);
+    get().log(`Redo: ${action.description}`, 'info');
   },
 }));

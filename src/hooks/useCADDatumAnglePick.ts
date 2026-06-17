@@ -20,6 +20,7 @@ import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccFaceService } from '../services/OccFaceService';
 import { OccDatumService } from '../services/OccDatumService';
 import { FacePicker, FaceHit } from '../services/FacePicker';
+import { captureFace, lineSigFromPoints } from '../services/StableRef';
 import { getPlacedShape } from '../utils/placedShape';
 import { showParamModal } from '../components/ParameterModal';
 
@@ -34,7 +35,7 @@ interface FacePick { sourceId: string; faceIndex: number; workplane: Workplane; 
 export function useCADDatumAnglePick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const hoverHlRef   = useRef<THREE.Mesh | null>(null);   // phase-1 face hover
@@ -139,22 +140,41 @@ export function useCADDatumAnglePick(
         const geo = new THREE.BufferGeometry().setFromPoints(ed.points.map((p) => new THREE.Vector3(p[0], p[1], p[2])));
         const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: EDGE_IDLE, depthTest: false, transparent: true, opacity: 0.95 }));
         line.renderOrder = 1000;
-        line.userData = { angleEdge: { origin: ed.origin, dir: ed.dir } };
+        line.userData = { angleEdge: { origin: ed.origin, dir: ed.dir, points: ed.points } };
         scene.add(line);
         edgeLinesRef.current.push(line);
       }
       useCADStore.getState().log('Pick a straight edge of the face as the hinge axis.', 'info');
     };
 
-    const createAtAngle = async (fp: FacePick, axisOrigin: [number, number, number], axisDir: [number, number, number]) => {
+    const createAtAngle = async (
+      fp: FacePick,
+      axis: { origin: [number, number, number]; dir: [number, number, number]; points: [number, number, number][] },
+    ) => {
       const v = await showParamModal('Plane at Angle', [
         { key: 'a', label: 'Angle', default: 45, min: -180, max: 180, unit: '°' },
       ]);
       if (!v) return;
-      const wp = OccDatumService.planeAtAngle(window.oc, fp.workplane.origin, fp.workplane.normal, axisOrigin, axisDir, v.a ?? 0);
+      const wp = OccDatumService.planeAtAngle(window.oc, fp.workplane.origin, fp.workplane.normal, axis.origin, axis.dir, v.a ?? 0);
       const st = useCADStore.getState();
       if (!wp) { st.log('Could not build the angled plane.', 'warn'); return; }
-      st.createDatumPlane(wp, 'angle', [{ kind: 'face', nodeId: fp.sourceId, faceIndex: fp.faceIndex, angle: v.a ?? 0 }]);
+
+      // Step 4 — capture stable signatures so the datum FOLLOWS its source on a
+      // parametric recompute: a FaceSig of the hinge face + an EdgeSig of the hinge
+      // edge (built from the picked polyline — faceStraightEdges has no TopExp
+      // ordinal). evaluateDatum re-resolves both against the live body; reject →
+      // falls back to the baked `wp`. Captured against the SAME placed source the
+      // evaluator resolves against.
+      const reg = CADGeometryRegistry.getInstance();
+      const placed = getPlacedShape(fp.sourceId);
+      const faceSig = placed ? captureFace(window.oc, placed, fp.faceIndex) : null;
+      if (placed && placed !== reg.getShape(fp.sourceId)) { try { placed.delete(); } catch {} }
+      const edgeSig = lineSigFromPoints(axis.points);
+
+      st.createDatumPlane(wp, 'angle', [{
+        kind: 'face', nodeId: fp.sourceId, faceIndex: fp.faceIndex, angle: v.a ?? 0,
+        sel: faceSig ?? undefined, edgeSel: edgeSig ?? undefined,
+      }]);
       st.log(`Plane at ${v.a ?? 0}° created.`, 'success');
     };
 
@@ -197,12 +217,12 @@ export function useCADDatumAnglePick(
         const l = pickEdge(e);
         if (!l) return;
         e.stopPropagation();
-        const ax = l.userData.angleEdge as { origin: [number, number, number]; dir: [number, number, number] };
+        const ax = l.userData.angleEdge as { origin: [number, number, number]; dir: [number, number, number]; points: [number, number, number][] };
         const fp = pickedFaceRef.current!;                     // capture before the mode change disposes it
         clearEdgeHover();
         container.style.cursor = 'default';
         useCADStore.getState().setInteractionMode('SELECT');   // exit (disposes overlays/lines)
-        void createAtAngle(fp, ax.origin, ax.dir);
+        void createAtAngle(fp, ax);
       }
     };
     const onKey = (e: KeyboardEvent) => {

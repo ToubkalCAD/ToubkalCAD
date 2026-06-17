@@ -14,6 +14,7 @@ import { useCADStore } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccAxisService } from '../services/OccAxisService';
 import { OccDatumService } from '../services/OccDatumService';
+import { captureFaceAtPoint } from '../services/StableRef';
 import { getPlacedShape } from '../utils/placedShape';
 
 const FACE_IDLE  = 0x2a7fd4;
@@ -25,7 +26,7 @@ const NON_SOLID = new Set(['sketch', 'sketch_wire', 'datum_plane', 'datum_axis',
 export function useCADDatumTangentPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const meshesRef = useRef<THREE.Mesh[]>([]);
@@ -119,7 +120,17 @@ export function useCADDatumTangentPick(
       st.setInteractionMode('SELECT');
       const wp = OccDatumService.tangentPlaneToCylinder(window.oc, p, cyl.axisPoint, cyl.axisDir);
       if (!wp) { st.log('Could not build a tangent plane there.', 'warn'); return; }
-      st.createDatumPlane(wp, 'tangent', sourceId ? [{ kind: 'cylinder', nodeId: sourceId }] : []);
+      // Step 4 — capture a FaceSig of the cylindrical face (nearest face to the
+      // hit) + the hit point, so evaluateDatum re-derives the tangent plane on the
+      // live cylinder (follows translation/radius); reject → baked `wp` fallback.
+      let faceSig = null;
+      if (sourceId) {
+        const reg = CADGeometryRegistry.getInstance();
+        const placed = getPlacedShape(sourceId);
+        faceSig = placed ? captureFaceAtPoint(window.oc, placed, p) : null;
+        if (placed && placed !== reg.getShape(sourceId)) { try { placed.delete(); } catch {} }
+      }
+      st.createDatumPlane(wp, 'tangent', sourceId ? [{ kind: 'cylinder', nodeId: sourceId, sel: faceSig ?? undefined, point: p }] : []);
       st.log('Tangent plane created.', 'success');
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { clearHover(); useCADStore.getState().setInteractionMode('SELECT'); } };

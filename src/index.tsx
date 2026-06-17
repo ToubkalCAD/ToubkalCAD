@@ -12,10 +12,12 @@ import { ParameterModal }      from './components/ParameterModal';
 import { ErrorBoundary }       from './components/ErrorBoundary';
 import { CADGeometryRegistry } from './services/CADGeometryRegistry';
 import { ThreeMeshCache }      from './services/ThreeMeshCache';
+import { installRecomputeBridge } from './services/RecomputeEngine.live';
 import './services/StableRef.selftest';     // dev: registers window.stableRefSelfTest() — Phase 1 §6 de-risk
 import './services/FeatureGraph.selftest';     // dev: registers window.featureGraphSelfTest() — Phase 1 step 1
 import './services/FeatureEvaluators.selftest'; // dev: registers window.evaluatorSelfTest() — Phase 1 step 2
 import './services/RecomputeEngine.selftest';   // dev: registers window.recomputeSelfTest() — Phase 1 step 3
+import './services/HistoryUndo.selftest';        // dev: registers window.stepFiveVerify() — Phase 1 step 5
 import { initTheme }           from './utils/theme';
 import './styles/global.css';
 
@@ -379,6 +381,7 @@ const AppInitializer: React.FC = () => {
         setStep('Initializing geometry registry…');
         CADGeometryRegistry.getInstance();
         ThreeMeshCache.getInstance();
+        installRecomputeBridge();   // step 5: undo regenerates freed shapes via the engine
 
         setStep('Loading interface…');
         await new Promise<void>((r) => setTimeout(r, 60));

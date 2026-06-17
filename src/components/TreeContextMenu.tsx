@@ -16,7 +16,7 @@ import type { Op3DType } from './Op3DPanel';
 import { showBlendPanel }      from './BlendActionPanel';
 import { editPrimitive, primitiveKind } from '../utils/editPrimitive';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
-import { resolveProfileWire } from '../utils/sketchProfile';
+import { resolveProfileWire, resolveAllProfileWires, canResolveProfile, sketchRegionCount } from '../utils/sketchProfile';
 
 // Node types whose right-click triggers re-edit
 const REEDITABLE_OP = new Set<NodeType>(['extrusion', 'revolve', 'loft', 'sweep', 'compound']);
@@ -31,6 +31,7 @@ const SOLID_TYPES = new Set<NodeType>([
 export const TreeContextMenu: React.FC = () => {
   const menu         = useCADStore((s) => s.treeContextMenu);
   const nodes        = useCADStore((s) => s.nodes);
+  const selectedIds  = useCADStore((s) => s.selectedIds);
   const closeMenu    = useCADStore((s) => s.closeTreeContextMenu);
   const resumeSketch = useCADStore((s) => s.resumeSketchSession);
   const menuRef      = useRef<HTMLDivElement>(null);
@@ -88,9 +89,16 @@ export const TreeContextMenu: React.FC = () => {
   const doExtrude = () => {
     closeMenu();
     if (isSketchContainer) {
-      const pid = resolveProfileWire(menu.nodeId, wireIds);
-      if (!pid) { useCADStore.getState().log('This sketch has no closed region to extrude.', 'warn'); return; }
-      createAndEditOp('extrude', [pid]);
+      // One region → bind to the SKETCH so it re-derives on edit; several regions →
+      // Multi-Pad: one region wire per enclosed region (kept as before).
+      if (sketchRegionCount(menu.nodeId) > 1) {
+        const ids = resolveAllProfileWires(menu.nodeId, wireIds);
+        if (!ids.length) { useCADStore.getState().log('This sketch has no closed region to extrude.', 'warn'); return; }
+        createAndEditOp('extrude', ids);
+        return;
+      }
+      if (!canResolveProfile(window.oc, menu.nodeId)) { useCADStore.getState().log('This sketch has no closed region to extrude.', 'warn'); return; }
+      createAndEditOp('extrude', [menu.nodeId]);
       return;
     }
     if (!firstWireId) return;
@@ -100,9 +108,8 @@ export const TreeContextMenu: React.FC = () => {
   const doRevolve = () => {
     closeMenu();
     if (isSketchContainer) {
-      const pid = resolveProfileWire(menu.nodeId, wireIds);
-      if (!pid) { useCADStore.getState().log('This sketch has no closed region to revolve.', 'warn'); return; }
-      createAndEditOp('revolve', [pid]);
+      if (!canResolveProfile(window.oc, menu.nodeId)) { useCADStore.getState().log('This sketch has no closed region to revolve.', 'warn'); return; }
+      createAndEditOp('revolve', [menu.nodeId]);  // bind to the sketch (re-derive on edit)
       return;
     }
     if (!firstWireId) return;
@@ -113,6 +120,45 @@ export const TreeContextMenu: React.FC = () => {
     if (wireIds.length < 2) return;
     closeMenu();
     createAndEditOp('loft', wireIds);
+  };
+
+  // Loft across the CURRENT multi-selection — each selected sketch/sketch-wire is
+  // one profile (a sketch container resolves to its profile wire). The right-
+  // clicked node is folded in even if it wasn't part of the selection. This is
+  // what lets the user loft two separate sketches (the common case).
+  const loftSelOrder = selectedIds.includes(menu.nodeId)
+    ? selectedIds
+    : [...selectedIds, menu.nodeId];
+  const loftProfileNodeIds = loftSelOrder.filter((id) => {
+    const t = nodes[id]?.type;
+    if (t === 'sketch_wire') return true;
+    if (t === 'sketch') return Object.values(nodes).some(
+      (n) => n.parentId === id && n.type === 'sketch_wire');
+    return false;
+  });
+  const canLoftSelection = loftProfileNodeIds.length >= 2;
+
+  const doLoftSelection = () => {
+    closeMenu();
+    const all = useCADStore.getState().nodes;
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const id of loftProfileNodeIds) {
+      const n = all[id];
+      if (!n) continue;
+      let wid: string | null = null;
+      if (n.type === 'sketch_wire') {
+        wid = id;
+      } else if (n.type === 'sketch') {
+        const childIds = Object.values(all)
+          .filter((c) => c.parentId === id && c.type === 'sketch_wire')
+          .map((c) => c.id);
+        wid = resolveProfileWire(id, childIds);
+      }
+      if (wid && !seen.has(wid)) { seen.add(wid); out.push(wid); }
+    }
+    if (out.length < 2) { useCADStore.getState().log('Need ≥ 2 closed profiles to loft.', 'warn'); return; }
+    createAndEditOp('loft', out);
   };
   const doReEdit  = () => {
     closeMenu();
@@ -297,7 +343,9 @@ export const TreeContextMenu: React.FC = () => {
               </div>
               <Item icon="↑" label="Extrude" sub={wireIds.length > 1 ? '1st wire' : undefined} onClick={doExtrude} />
               <Item icon="↻" label="Revolve" sub={wireIds.length > 1 ? '1st wire' : undefined} onClick={doRevolve} />
-              {wireIds.length >= 2 && <Item icon="⊿" label="Loft" sub={`${wireIds.length} wires`} onClick={doLoft} />}
+              {canLoftSelection
+                ? <Item icon="⊿" label="Loft" sub={`${loftProfileNodeIds.length} profiles`} onClick={doLoftSelection} />
+                : wireIds.length >= 2 && <Item icon="⊿" label="Loft" sub={`${wireIds.length} wires`} onClick={doLoft} />}
             </>
           )}
           {wireIds.length === 0 && (
@@ -323,6 +371,9 @@ export const TreeContextMenu: React.FC = () => {
           </div>
           <Item icon="↑" label="Extrude" onClick={doExtrude} />
           <Item icon="↻" label="Revolve" onClick={doRevolve} />
+          {canLoftSelection && (
+            <Item icon="⊿" label="Loft" sub={`${loftProfileNodeIds.length} profiles`} onClick={doLoftSelection} />
+          )}
         </>
       )}
     </div>

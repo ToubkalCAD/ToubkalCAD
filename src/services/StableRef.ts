@@ -41,7 +41,12 @@ export interface EdgeSig {
   radius?: number;                        // circle
 }
 
-export type StableRef = FaceSig | EdgeSig;
+export interface VertexSig {
+  kind: 'vertex';
+  pos:  [number, number, number];         // world position of the vertex
+}
+
+export type StableRef = FaceSig | EdgeSig | VertexSig;
 
 export interface ResolveResult {
   index:     number;   // 0-based TopExp_Explorer ordinal in the target shape
@@ -114,6 +119,38 @@ export function captureEdges(oc: any, shape: any, indices: number[]): (EdgeSig |
   return indices.map((i) => captureEdge(oc, shape, i));
 }
 
+/** EdgeSig for a STRAIGHT edge described only by its tessellated polyline — used
+ *  where no TopExp ordinal is available (e.g. `OccDatumService.faceStraightEdges`
+ *  geometry, the D3 hinge edge). Endpoint-derived `mid`/`length`/`axis` match what
+ *  `edgeSig()` derives for a line (COM = midpoint, Mass = chord length, dir is
+ *  compared via |dot| so sign is irrelevant), so `resolveEdge` re-finds the same
+ *  physical edge on an edited body. Null for a degenerate/empty polyline. */
+export function lineSigFromPoints(points: [number, number, number][]): EdgeSig | null {
+  if (!points || points.length < 2) return null;
+  const a = points[0], b = points[points.length - 1];
+  const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+  const length = Math.hypot(dx, dy, dz);
+  if (length < 1e-9) return null;
+  return {
+    kind: 'edge', curve: 'line', length,
+    mid:  [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2],
+    axis: [dx / length, dy / length, dz / length],
+  };
+}
+
+/** Signature of the vertex at TopExp_Explorer ordinal `vertexIndex` (0-based). */
+export function captureVertex(oc: any, shape: any, vertexIndex: number): VertexSig | null {
+  const v = nthSub(oc, shape, oc.TopAbs_ShapeEnum.TopAbs_VERTEX, vertexIndex, (c: any) => oc.TopoDS.Vertex_1(c));
+  if (!v) return null;
+  try { return vertexSig(oc, v); } finally { try { v.delete(); } catch {} }
+}
+
+/** A VertexSig straight from a known world position (the pick already has it — no
+ *  OCC round-trip needed). `resolveVertex` re-finds the nearest live vertex to it. */
+export function vertexSigFromPoint(pos: [number, number, number]): VertexSig {
+  return { kind: 'vertex', pos: [pos[0], pos[1], pos[2]] };
+}
+
 // ─── Resolve ────────────────────────────────────────────────────────────────
 
 /** Find the face in `shape` that best matches `ref`. */
@@ -130,6 +167,18 @@ export function resolveEdge(oc: any, shape: any, ref: EdgeSig): ResolveResult {
     (c: any) => oc.TopoDS.Edge_1(c),
     (e: any) => edgeSig(oc, e),
     (cand: EdgeSig) => edgeScore(ref, cand));
+}
+
+/** Find the vertex in `shape` nearest `ref`. A vertex has no intrinsic size, so
+ *  the position distance is normalized by the shape's vertex-cloud diagonal — a
+ *  small parametric move scores low, a large jump rejects (same REJECT/AMBIG gate
+ *  as faces/edges). */
+export function resolveVertex(oc: any, shape: any, ref: VertexSig): ResolveResult {
+  const scale = vertexCloudScale(oc, shape);
+  return resolve(oc, shape, oc.TopAbs_ShapeEnum.TopAbs_VERTEX,
+    (c: any) => oc.TopoDS.Vertex_1(c),
+    (v: any) => vertexSig(oc, v),
+    (cand: VertexSig) => W.centroid * (dist(ref.pos, cand.pos) / scale));
 }
 
 // ─── Scoring ────────────────────────────────────────────────────────────────
@@ -221,6 +270,29 @@ function edgeSig(oc: any, edge: any): EdgeSig {
     }
     return { kind: 'edge', curve, mid, length, axis, radius };
   } finally { s.free(); }
+}
+
+function vertexSig(oc: any, vertex: any): VertexSig {
+  const p = oc.BRep_Tool.Pnt(vertex);
+  try { return { kind: 'vertex', pos: [p.X(), p.Y(), p.Z()] }; } finally { try { p.delete(); } catch {} }
+}
+
+/** Bounding-box diagonal of a shape's vertex cloud — the characteristic length
+ *  used to normalize vertex-match distance. Falls back to 1 for a degenerate cloud. */
+function vertexCloudScale(oc: any, shape: any): number {
+  const map = subMap(oc, shape, oc.TopAbs_ShapeEnum.TopAbs_VERTEX);
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  const n = map.Extent();
+  for (let i = 1; i <= n; i++) {
+    const v = oc.TopoDS.Vertex_1(map.FindKey(i));
+    const p = oc.BRep_Tool.Pnt(v);
+    const c = [p.X(), p.Y(), p.Z()];
+    for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], c[k]); hi[k] = Math.max(hi[k], c[k]); }
+    try { p.delete(); } catch {} try { v.delete(); } catch {}
+  }
+  map.delete();
+  const d = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+  return d > 1e-6 ? d : 1;
 }
 
 // ─── Explorer plumbing ────────────────────────────────────────────────────────

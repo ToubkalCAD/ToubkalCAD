@@ -14,6 +14,7 @@ import { useCADStore } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccEdgeService } from '../services/OccEdgeService';
 import { OccDatumService } from '../services/OccDatumService';
+import { captureEdge } from '../services/StableRef';
 import { getPlacedShape } from '../utils/placedShape';
 import { showParamModal } from '../components/ParameterModal';
 
@@ -26,7 +27,7 @@ const NON_SOLID = new Set(['sketch', 'sketch_wire', 'datum_plane', 'datum_axis',
 export function useCADDatumCurveNormalPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const linesRef  = useRef<THREE.Line[]>([]);
@@ -59,7 +60,7 @@ export function useCADDatumCurveNormalPick(
             new THREE.LineBasicMaterial({ color: EDGE_IDLE, depthTest: false, transparent: true, opacity: 0.9 }),
           );
           line.renderOrder = 999;
-          line.userData = { points: e.points, sourceId: id };
+          line.userData = { points: e.points, sourceId: id, edgeIndex: e.index };
           scene.add(line);
           linesRef.current.push(line);
           for (const p of e.points) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); }
@@ -97,15 +98,26 @@ export function useCADDatumCurveNormalPick(
       return hits.length ? (hits[0].object as THREE.Line) : null;
     };
 
-    const createNormal = async (points: [number, number, number][], sourceId?: string) => {
+    const createNormal = async (points: [number, number, number][], sourceId?: string, edgeIndex?: number) => {
       const v = await showParamModal('Plane Normal to Curve', [
         { key: 'pct', label: 'Position', default: 50, min: 0, max: 100, unit: '%' },
       ]);
       if (!v) return;
-      const wp = OccDatumService.planeNormalToPath(window.oc, points, (v.pct ?? 50) / 100);
+      const f  = (v.pct ?? 50) / 100;
+      const wp = OccDatumService.planeNormalToPath(window.oc, points, f);
       const st = useCADStore.getState();
       if (!wp) { st.log('Could not build a plane normal to that curve.', 'warn'); return; }
-      st.createDatumPlane(wp, 'normalToCurve', sourceId ? [{ kind: 'edge', nodeId: sourceId }] : []);
+      // Step 4 — capture an EdgeSig + the arc-length fraction so evaluateDatum
+      // re-samples the edge on the live body and the plane FOLLOWS it; reject → baked
+      // `wp` fallback. (The fraction was previously lost — only baked into wp.)
+      let sig = null;
+      if (sourceId && edgeIndex != null) {
+        const reg = CADGeometryRegistry.getInstance();
+        const placed = getPlacedShape(sourceId);
+        sig = placed ? captureEdge(window.oc, placed, edgeIndex) : null;
+        if (placed && placed !== reg.getShape(sourceId)) { try { placed.delete(); } catch {} }
+      }
+      st.createDatumPlane(wp, 'normalToCurve', sourceId ? [{ kind: 'edge', nodeId: sourceId, sel: sig ?? undefined, fraction: f }] : []);
       st.log(`Plane normal to curve at ${v.pct ?? 50}% created.`, 'success');
     };
 
@@ -125,10 +137,11 @@ export function useCADDatumCurveNormalPick(
       e.stopPropagation();
       const points = l.userData.points as [number, number, number][];
       const sourceId = l.userData.sourceId as string | undefined;
+      const edgeIndex = l.userData.edgeIndex as number | undefined;
       clearHover();
       container.style.cursor = 'default';
       useCADStore.getState().setInteractionMode('SELECT');
-      void createNormal(points, sourceId);
+      void createNormal(points, sourceId, edgeIndex);
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { clearHover(); useCADStore.getState().setInteractionMode('SELECT'); } };
 

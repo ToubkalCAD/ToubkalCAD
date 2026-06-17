@@ -14,6 +14,8 @@ declare global {
     cadCamera: any | null;
     /** OrbitControls principal */
     cadControls: any | null;
+    /** Request an on-demand viewport render (the loop renders only on change). */
+    cadRequestRender?: () => void;
   }
 }
 

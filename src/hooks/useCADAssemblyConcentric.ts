@@ -28,7 +28,7 @@ interface CylMeta extends CylFace { nodeId: string; }
 export function useCADAssemblyConcentric(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const meshesRef  = useRef<THREE.Mesh[]>([]);

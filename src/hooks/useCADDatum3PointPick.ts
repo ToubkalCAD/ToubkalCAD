@@ -18,6 +18,7 @@ import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccDatumService } from '../services/OccDatumService';
+import { vertexSigFromPoint } from '../services/StableRef';
 import { getPlacedShape } from '../utils/placedShape';
 
 const COLOR_IDLE     = 0x2a7fd4; // resting vertex marker (blue)
@@ -31,7 +32,7 @@ const NON_SOLID = new Set(['sketch', 'sketch_wire', 'datum_plane', 'datum_axis',
 export function useCADDatum3PointPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const markersRef   = useRef<THREE.Mesh[]>([]);
@@ -150,7 +151,12 @@ export function useCADDatum3PointPick(
       const wp = OccDatumService.planeFrom3Points(window.oc, a, b, c);
       const st = useCADStore.getState();
       if (!wp) { st.log('Those 3 points are collinear — pick a non-collinear set.', 'warn'); reset(); return; }
-      st.createDatumPlane(wp, 'threePoint', pickedRef.current.map((p, i) => ({ kind: 'point', pos: p, nodeId: pickedSrcRef.current[i] })));
+      // Step 4 — each picked vertex carries a VertexSig so evaluateDatum re-resolves
+      // it on the live source body and the plane FOLLOWS edits; `pos` is the baked
+      // fallback (used when a vertex can't be resolved).
+      st.createDatumPlane(wp, 'threePoint', pickedRef.current.map((p, i) => ({
+        kind: 'point', pos: p, nodeId: pickedSrcRef.current[i], sel: vertexSigFromPoint(p),
+      })));
       st.log('Plane through 3 points created.', 'success');
       pickedRef.current = [];                 // dispose() runs on the mode change below
       st.setInteractionMode('SELECT');

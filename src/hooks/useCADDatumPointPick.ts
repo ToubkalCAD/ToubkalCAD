@@ -16,6 +16,7 @@ import { useCADStore } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccDatumService } from '../services/OccDatumService';
 import { OccEdgeService } from '../services/OccEdgeService';
+import { captureEdge, vertexSigFromPoint } from '../services/StableRef';
 import { getPlacedShape } from '../utils/placedShape';
 
 const VERT_IDLE  = 0x2a7fd4;
@@ -30,7 +31,7 @@ const NON_SOLID = new Set(['sketch', 'sketch_wire', 'datum_plane', 'datum_axis',
 export function useCADDatumPointPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const markersRef   = useRef<THREE.Mesh[]>([]);
@@ -61,7 +62,7 @@ export function useCADDatumPointPick(
 
     const verts: [number, number, number][] = [];
     const vertSrc: string[] = [];
-    const edges: { points: [number, number, number][]; sourceId: string }[] = [];
+    const edges: { points: [number, number, number][]; sourceId: string; sel: any }[] = [];
     const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
     const bump = (p: [number, number, number]) => { for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); } };
 
@@ -74,7 +75,9 @@ export function useCADDatumPointPick(
         for (const p of OccDatumService.extractVertices(window.oc, placed)) {
           if (!verts.some((q) => Math.hypot(q[0]-p[0], q[1]-p[1], q[2]-p[2]) < SAME_PT)) { verts.push(p); vertSrc.push(id); bump(p); }
         }
-        for (const e of OccEdgeService.extractEdges(window.oc, placed)) { edges.push({ points: e.points, sourceId: id }); for (const p of e.points) bump(p); }
+        // Step 4 — capture an EdgeSig (any curve kind) while `placed` is live so an
+        // edge-midpoint datum point re-resolves on the live body; reject → baked point.
+        for (const e of OccEdgeService.extractEdges(window.oc, placed)) { edges.push({ points: e.points, sourceId: id, sel: captureEdge(window.oc, placed, e.index) }); for (const p of e.points) bump(p); }
       } catch {
         /* skip extraction failures */
       } finally {
@@ -91,7 +94,7 @@ export function useCADDatumPointPick(
       const mesh = new THREE.Mesh(geo.clone(), new THREE.MeshBasicMaterial({ color: VERT_IDLE, depthTest: false }));
       mesh.position.set(p[0], p[1], p[2]);
       mesh.renderOrder = 1000;
-      mesh.userData = { datumPoint: p, sourceId: vertSrc[i] };
+      mesh.userData = { datumPoint: p, sourceId: vertSrc[i], sel: vertexSigFromPoint(p) };
       scene.add(mesh);
       markersRef.current.push(mesh);
     });
@@ -104,7 +107,7 @@ export function useCADDatumPointPick(
         new THREE.LineBasicMaterial({ color: EDGE_IDLE, depthTest: false, transparent: true, opacity: 0.9 }),
       );
       line.renderOrder = 999;
-      line.userData = { datumPoint: mid, sourceId: e.sourceId };
+      line.userData = { datumPoint: mid, sourceId: e.sourceId, sel: e.sel };
       scene.add(line);
       edgeLinesRef.current.push(line);
     }
@@ -173,11 +176,12 @@ export function useCADDatumPointPick(
       const p = o.userData.datumPoint as [number, number, number];
       const onEdge = o instanceof THREE.Line;
       const sourceId = o.userData.sourceId as string | undefined;
+      const sel = o.userData.sel ?? undefined;
       clearHover();
       container.style.cursor = 'default';
       const st = useCADStore.getState();
       st.setInteractionMode('SELECT');                 // exit (disposes markers/lines)
-      st.createDatumPoint(p, onEdge ? 'edgeMid' : 'vertex', sourceId ? [{ kind: onEdge ? 'edge' : 'vertex', nodeId: sourceId }] : []);
+      st.createDatumPoint(p, onEdge ? 'edgeMid' : 'vertex', sourceId ? [{ kind: onEdge ? 'edge' : 'vertex', nodeId: sourceId, sel }] : []);
       st.log(`Datum point created at ${onEdge ? 'an edge midpoint' : 'a vertex'}.`, 'success');
     };
     const onKey = (e: KeyboardEvent) => {

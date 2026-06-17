@@ -113,6 +113,7 @@ export const BooleanActionPanel: React.FC = () => {
     previewRef.current = null;
     hiddenRef.current.forEach((o) => { o.visible = true; });
     hiddenRef.current = [];
+    window.cadRequestRender?.();   // on-demand render: imperative scene edit needs a nudge
   }, []);
 
   const buildPreview = useCallback((o: BooleanOp, base: string | null, tools: string[]) => {
@@ -147,6 +148,7 @@ export const BooleanActionPanel: React.FC = () => {
     } catch (e: any) {
       setApplyErr(e?.message ?? String(e));
     }
+    window.cadRequestRender?.();   // on-demand render: draw the new preview now
   }, [clearPreview]);
 
   // ── Debounced preview ────────────────────────────────────────────────────────

@@ -181,14 +181,19 @@ Pragmatic, staged approach (do **not** try to solve it perfectly first):
 The existing `FacePicker` hit already yields exactly the data a signature needs
 (world point, the face group), so capture happens at pick time.
 
-## 7. Shape lifetime, reconciled
+## 7. Shape lifetime, reconciled — ✅ done (step 5)
 
-With regeneration available, the `shape-lifetime` retention hack goes away:
+With regeneration available, the `shape-lifetime` retention hack is gone:
 
 - A feature's shape is owned by the registry under its id, replaced on each recompute.
-- Deleting/suppressing/rolling-back-past a feature **frees** its shape immediately —
-  undo regenerates it by replaying the recipe. No more "keep deleted shapes alive
-  through history."
+- Deleting a **regenerable** feature **frees** its shape immediately; undo regenerates it
+  by replaying the recipe (the `cad-regenerate` bridge → `regenerateMissing`). No more
+  "keep deleted shapes alive through history" for these.
+- **Exception:** features with no recipe (imported geometry, mirror/pattern — no evaluator)
+  can't be regenerated, so the registry still retains them by history reachability and frees
+  them when they age out of `HISTORY_LIMIT`. This residual retention is unavoidable until
+  those ops gain recipes (imports would need to re-read the source; mirror/pattern need
+  evaluators).
 - The registry stays the WASM owner; the engine is the only writer of shapes.
 
 ## 8. Threading (later, optional)
@@ -295,13 +300,84 @@ The DAG can be introduced **without** a big-bang rewrite by wrapping what exists
      live host's `onFrame` writes the re-derived `workplane` back to the container. Validated by
      `npm run test:stableref-sketch` (7 assertions: capture; re-derive on face; follow d 10→11;
      reject→baked fallback; no-sig passthrough; wire placed on threaded frame; wire baked fallback).
-   - **Remaining face-ref work: datum angle/tangent, 3-point-from-vertices.** Boolean base/tool
-     are whole-body NODE refs by id — already stable, nothing to migrate.
+   - **Also done: datum plane-at-angle.** `useCADDatumAnglePick` captures a FaceSig of the hinge
+     face AND an EdgeSig of the hinge edge into the datum's `refs[0]` (`sel` + `edgeSel`). The
+     edge sig is built by `StableRef.lineSigFromPoints` from the picked polyline (faceStraightEdges
+     carries no TopExp ordinal). `evaluateDatum`'s `angle` branch re-resolves the face
+     (`deriveFaceWorkplane`) and edge (`resolveEdgeAxis` → resolveEdge → re-capture for the live
+     axis point/dir) against the live body, then re-rotates via `OccDatumService.planeAtAngle` — so
+     the angled plane FOLLOWS the body; either sig rejecting (or a legacy node) → baked `workplane`
+     fallback. Validated by `npm run test:stableref-datum` (now 10 assertions: +4 — re-derivation
+     runs, follow on widen 10→11 Δx=+1, reject→baked fallback, legacy passthrough).
+   - **Also done: datum tangent.** `useCADDatumTangentPick` captures a cylinder FaceSig
+     (`captureFaceAtPoint` at the click) + the hit point into `refs[0]` (`sel` + `point`).
+     `evaluateDatum`'s `tangent` branch resolves the cylinder on the live body (`resolveCylinderAxis`
+     → resolveFace → re-capture for the live axis/centroid/radius), recovers the hit's radial
+     direction from the captured signature, and rebuilds the tangent plane at `axisPoint +
+     radius·r̂` — so it FOLLOWS translation + radius change; reject → baked `workplane`. Rotation
+     about the cylinder's own axis is the §6 Phase 1a limit (absolute-position r̂).
+   - **Also done: 3-point-from-vertices.** New `StableRef` VertexSig (`captureVertex` /
+     `resolveVertex` — nearest live vertex, distance normalized by the shape's vertex-cloud
+     diagonal so a small move scores low / a big jump rejects; `vertexSigFromPoint` for the pick
+     which already knows the position). `useCADDatum3PointPick` stores a `sel` VertexSig per picked
+     corner; `evaluateDatum`'s `threePoint` branch re-resolves all three on their live bodies
+     (all-or-nothing — a mix of live + stale corners would build a wrong plane) → `planeFrom3Points`,
+     `pos` is the baked fallback. **Also fixed a dead branch:** the evaluator matched `'3point'` but
+     hooks store `'threePoint'`, so 3-point datums never recomputed at all before this. Validated by
+     `npm run test:stableref-datum` (now 17 assertions: +7 — tangent follow r 5→6 / reject; 3-point
+     follow 10→11 / reject / legacy).
+   - **Also done: D6 curve-normal + through-2-edges.** Both re-sample their captured edge(s) on the
+     live body via `resolveEdgePolyline` (resolveEdge → `OccEdgeService.extractEdges` at the matching
+     ordinal — the edge map dedup matches StableRef's, so the resolved index maps straight back to
+     the live polyline), then rebuild. `normalToCurve` stores an EdgeSig + the **arc-length fraction**
+     (previously lost — only baked into wp) and re-runs `planeNormalToPath`; `twoEdges` stores an
+     EdgeSig per edge (each captured against its own placed body, refs ordered A then B) and re-runs
+     `planeThrough2Edges`. Either edge rejecting → baked `workplane`. Validated by
+     `npm run test:stableref-datum` (now 25 assertions: +8 — each follows 10→11, rejects on 10→20,
+     legacy passthrough).
+   - **Also done: datum_axis + datum_point.** `evaluateDatum`'s axis/point tails re-derive from the
+     captured signature: `datum_axis` edge (`resolveEdgeAxis`) / cylinder (`resolveCylinderAxis`);
+     `datum_point` vertex (`resolveVertex` → re-capture) / edge-midpoint (`resolveEdgePolyline` → the
+     param-midpoint sample). Hooks capture the sig while `placed` is live (axis edges via
+     `lineSigFromPoints`, cylinder via `captureFaceAtPoint` on a surface point, point edges via
+     `captureEdge` on the extract ordinal, vertices via `vertexSigFromPoint`). Reject → baked
+     `axis`/`point`. Validated by `npm run test:stableref-datum` (now 38 assertions: +13 — edge/cylinder
+     axis follow + reject + legacy; vertex/edge-mid point follow + reject + legacy).
+   - **Every datum type (plane / axis / point) now re-derives on geometry edits.** Remaining datum
+     work: datum→datum chains rely on the recompute engine threading `meta.workplane`, and D11/D12
+     projected/section sketch entities are still non-associative. Boolean base/tool are whole-body
+     NODE refs by id — already stable, nothing to migrate.
    - Known limit (§6 Phase 1a): a signature is absolute-position based, so a reference on
      a feature that TRANSLATES far (e.g. a fillet on a face of a growing extrude) may
      reject and fall back rather than track — that's what OCC `Generated()`/`Modified()`
      history threading (Phase 1b) is for.
-5. **Switch undo/redo to graph deltas**; drop the shape-retention GC hack.
+5. ✅ **Switch undo/redo to graph deltas**; drop the shape-retention GC hack.
+   - **Delta history.** `CADAction` now stores a `NodeDelta[]` (only the nodes an action
+     changed: `{id, before, after}` — null `before` = created, null `after` = removed),
+     not full `nodesBefore`/`nodesAfter` snapshots. Pure `diffNodes`/`applyDeltas` live in
+     `store/historyDelta.ts` (type-only `CADNode` import → headlessly testable); the five
+     push sites (add/delete/rename/transform/material) route through `makeAction`, and
+     undo/redo `applyDeltas(current, action.deltas, dir)` against the live map. Validated by
+     `npm run test:history-delta` (11 assertions: add/delete/modify undo+redo, round-trip,
+     no-op diff). The UI only reads `past.length`/`future.length`, so it's unaffected.
+   - **Shape lifetime — hack dropped.** A REGENERABLE node's OCC shape is freed the moment
+     its node leaves the scene (`CADGeometryRegistry` GC step 1); undo rebuilds it from its
+     recipe via the engine. The store's undo/redo fire `cad-regenerate` before `cad-add-mesh`;
+     `RecomputeEngine.live.installRecomputeBridge` (wired in `index.tsx`) handles it
+     SYNCHRONOUSLY with `regenerateMissing()` — an empty-dirty `recompute` that rebuilds only
+     nodes whose shape is absent, leaving the rest cached. Freed and rebuilt stay aligned
+     through shape-presence (no shared predicate needed).
+   - **Conservative free set.** `canRegenerate` (via `nodeToFeature`) frees only well-established
+     recipes: an EVALUATOR op, `complete` (excludes Ribbon.create revolve/loft/sweep that never
+     persisted inputs), and not an up-to-next/last extrude (needs sibling context bodies the graph
+     doesn't wire). NON-regenerable shapes (imported / mirror / pattern, or anything excluded) have
+     no recipe, so GC step 2 retains them while reachable from a retained delta and frees them once
+     they age out of `HISTORY_LIMIT` — a false negative only retains a shape a bit longer; a false
+     positive would break undo, so the rule errs toward retaining.
+   - *Known minor change:* a node restored by undo-of-delete re-appears at the end of `rootIds`
+     order (deltas don't carry tree position) rather than its original slot — cosmetic tree-order
+     only. *Not in scope (pre-existing):* `setNodeParams` (primitive resize) still doesn't push
+     history, so geometry param edits aren't round-tripped by undo regardless of model.
 6. **Timeline UI** (`rollbackId` + bottom bar). Pure payoff once 1–5 exist.
 7. **Persistence** serializes the graph; **parallel recompute** as a later optimization.
 

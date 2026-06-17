@@ -18,7 +18,7 @@ const CLICK_SLOP_PX = 5;
 export function useCADDatumSketchPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const litRef = useRef<THREE.MeshBasicMaterial | null>(null);

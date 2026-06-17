@@ -7,7 +7,7 @@
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { CADCameraService, CADViewPreset } from '../services/CADCameraService';
+import { CADViewPreset } from '../services/CADCameraService';
 
 interface CADViewCubeProps {
   mainCamera:   THREE.PerspectiveCamera | null;
@@ -83,7 +83,9 @@ export const CADViewCube: React.FC<CADViewCubeProps> = ({ mainCamera, mainContro
       const hits = raycaster.intersectObject(cube);
       if (hits.length > 0) {
         const slot = Math.floor((hits[0].faceIndex ?? 0) / 2);
-        CADCameraService.applyViewPreset(FACES[slot].view, mainCamera, mainControls);
+        // Go through the shared bus so Viewport3D picks the right projection
+        // (orthographic for axis views) — same path as the menu/view bar.
+        window.dispatchEvent(new CustomEvent('cad-view-preset', { detail: FACES[slot].view }));
       }
     };
     mount.addEventListener('click', onClick);

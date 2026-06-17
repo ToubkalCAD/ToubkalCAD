@@ -10,6 +10,7 @@
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { CADCameraService } from '../services/CADCameraService';
+import type { CADCamera } from '../services/CADCameraService';
 
 const PX = 120; // canvas pixel size
 
@@ -177,7 +178,11 @@ export const CADViewportGizmo: React.FC = () => {
       if (idx < 0) return;
       e.stopPropagation();
 
-      const mainCam  = window.cadCamera  as THREE.PerspectiveCamera | null;
+      // Axis snaps are standard orthographic views — switch projection first,
+      // THEN read the now-active (ortho) camera so we animate the right one.
+      window.dispatchEvent(new CustomEvent('cad-set-projection', { detail: 'ORTHO' }));
+
+      const mainCam  = window.cadCamera  as CADCamera | null;
       const mainCtrl = window.cadControls as any;
       if (!mainCam || !mainCtrl) return;
 

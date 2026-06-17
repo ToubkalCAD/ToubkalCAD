@@ -17,6 +17,7 @@ import { useCADStore } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccDatumService } from '../services/OccDatumService';
 import { OccAxisService } from '../services/OccAxisService';
+import { captureFaceAtPoint, lineSigFromPoints } from '../services/StableRef';
 import { getPlacedShape } from '../utils/placedShape';
 
 const EDGE_IDLE   = 0x66ccff;
@@ -32,7 +33,7 @@ interface AxisDef { origin: [number, number, number]; dir: [number, number, numb
 export function useCADDatumAxisPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const edgeLinesRef  = useRef<THREE.Line[]>([]);
@@ -74,7 +75,9 @@ export function useCADDatumAxisPick(
           const geo  = new THREE.BufferGeometry().setFromPoints(ed.points.map((p) => new THREE.Vector3(p[0], p[1], p[2])));
           const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: EDGE_IDLE, depthTest: false, transparent: true, opacity: 0.95 }));
           line.renderOrder = 999;
-          line.userData = { axisDef: { origin: mid, dir: ed.dir } as AxisDef, sourceId: id };
+          // Step 4 — EdgeSig (axis edges are straight) so evaluateDatum re-derives
+          // the axis on the live body; reject → baked axis.
+          line.userData = { axisDef: { origin: mid, dir: ed.dir } as AxisDef, sourceId: id, sel: lineSigFromPoints(ed.points) };
           scene.add(line);
           edgeLinesRef.current.push(line);
           for (const p of ed.points) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); }
@@ -86,7 +89,10 @@ export function useCADDatumAxisPick(
           const mat = new THREE.MeshBasicMaterial({ color: FACE_IDLE, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false });
           const mesh = new THREE.Mesh(geo, mat);
           mesh.renderOrder = 998;
-          mesh.userData = { axisDef: { origin: cf.axisPoint, dir: cf.axisDir } as AxisDef, sourceId: id };
+          // Step 4 — cylinder FaceSig (captured at a point on the surface) so
+          // evaluateDatum re-derives the axis from the live cylinder; reject → baked.
+          const surf = cf.positions.length >= 3 ? [cf.positions[0], cf.positions[1], cf.positions[2]] as [number, number, number] : cf.axisPoint;
+          mesh.userData = { axisDef: { origin: cf.axisPoint, dir: cf.axisDir } as AxisDef, sourceId: id, sel: captureFaceAtPoint(window.oc, placed, surf) };
           scene.add(mesh);
           cylMeshesRef.current.push(mesh);
         }
@@ -166,11 +172,12 @@ export function useCADDatumAxisPick(
       const ax = o.userData.axisDef as AxisDef;
       const fromCyl = o instanceof THREE.Mesh;
       const sourceId = o.userData.sourceId as string | undefined;
+      const sel = o.userData.sel ?? undefined;
       clearHover();
       container.style.cursor = 'default';
       const st = useCADStore.getState();
       st.setInteractionMode('SELECT');                 // exit (disposes overlays)
-      st.createDatumAxis(ax, fromCyl ? 'cylinder' : 'edge', sourceId ? [{ kind: fromCyl ? 'cylinder' : 'edge', nodeId: sourceId }] : []);
+      st.createDatumAxis(ax, fromCyl ? 'cylinder' : 'edge', sourceId ? [{ kind: fromCyl ? 'cylinder' : 'edge', nodeId: sourceId, sel }] : []);
       st.log(`Datum axis created from ${fromCyl ? 'a cylindrical face' : 'an edge'}.`, 'success');
     };
     const onKey = (e: KeyboardEvent) => {

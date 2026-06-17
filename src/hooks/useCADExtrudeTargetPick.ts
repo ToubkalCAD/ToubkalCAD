@@ -31,7 +31,7 @@ const NON_SOLID = new Set(['sketch', 'sketch_wire']);
 export function useCADExtrudeTargetPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const interactionMode = useCADStore((s) => s.interactionMode);
   const litRef          = useRef<THREE.MeshStandardMaterial | null>(null); // solid fallback hover

@@ -46,7 +46,26 @@ export class OccConverter {
     deflection = 0.1,
   ): THREE.BufferGeometry {
     // ── Triangulate ──────────────────────────────────────────────────────────
-    const incMesh = new oc.BRepMesh_IncrementalMesh_2(shape, deflection, false, 0.5, false);
+    // Scale the chord deflection to the shape's overall size so large CURVED
+    // solids (e.g. a full 360° revolve of a profile far from its axis) don't get
+    // an absurdly fine — and very slow — mesh. The passed `deflection` stays a
+    // FLOOR, so small parts keep their fine absolute tolerance and planar shapes
+    // (extrudes) are unaffected (few triangles at any deflection). Measured: a
+    // r≈30 revolve drops ~4.3 s → ~0.8 s of tessellation (scripts/test-revolve-perf).
+    let effDefl = deflection;
+    try {
+      const bb = new oc.Bnd_Box_1();
+      oc.BRepBndLib.Add(shape, bb, false);
+      if (!bb.IsVoid()) {
+        const lo = bb.CornerMin(), hi = bb.CornerMax();
+        const diag = Math.hypot(hi.X() - lo.X(), hi.Y() - lo.Y(), hi.Z() - lo.Z());
+        lo.delete(); hi.delete();
+        effDefl = Math.max(deflection, diag * 0.008);   // ≈0.8 % chord error, size-relative
+      }
+      bb.delete();
+    } catch { /* bbox unavailable → fall back to the passed absolute deflection */ }
+
+    const incMesh = new oc.BRepMesh_IncrementalMesh_2(shape, effDefl, false, 0.5, false);
     if (typeof incMesh.Perform === 'function') {
       incMesh.Perform(new oc.Message_ProgressRange_1());
     }

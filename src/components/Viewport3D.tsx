@@ -41,6 +41,7 @@ import { useCADDatum2EdgePick } from '../hooks/useCADDatum2EdgePick';
 import { useCADSketchProjectPick } from '../hooks/useCADSketchProjectPick';
 import { useCADSketchIntersectPick } from '../hooks/useCADSketchIntersectPick';
 import { CADCameraService }    from '../services/CADCameraService';
+import type { CADCamera, CADViewPreset } from '../services/CADCameraService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
 import { SketchOverlay }       from './SketchOverlay';
 import { SketchDimensions }    from './SketchDimensions';
@@ -140,7 +141,9 @@ function disposeGroup(g: THREE.Object3D) {
 export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const containerRef      = useRef<HTMLDivElement>(null);
   const sceneRef          = useRef<THREE.Scene | null>(null);
-  const cameraRef         = useRef<THREE.PerspectiveCamera | null>(null);
+  const cameraRef         = useRef<CADCamera | null>(null); // the ACTIVE camera (persp or ortho)
+  const perspCamRef       = useRef<THREE.PerspectiveCamera | null>(null);
+  const orthoCamRef       = useRef<THREE.OrthographicCamera | null>(null);
   const orbitRef          = useRef<OrbitControls | null>(null);
   const transformRef      = useRef<TransformControls | null>(null);
   const workplaneGridRef  = useRef<THREE.Object3D | null>(null);
@@ -262,6 +265,29 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     const inSketch = interactionMode.startsWith('SKETCH_') || !!sketchSession;
     orbit.enableRotate = !inSketch;
   }, [interactionMode, sketchSession]);
+
+  // ─── Sketch isolation: show only the active sketch while editing ─────────────
+  // Entering/resuming a sketch hides every other body (solids, lofts, other
+  // sketches) so the 2D entities you're editing aren't occluded by the geometry
+  // built on top of them. Purely a Three.js mesh.visible toggle — it never touches
+  // store node.visible, so it's fully reversible and doesn't pollute persistence.
+  // Cleanup (on Quit Sketch or switching sketches) restores exactly what it hid.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    const sid = sketchSession?.id;
+    if (!scene || !sid) return;
+    const nodes = useCADStore.getState().nodes;
+    const hidden: THREE.Object3D[] = [];
+    scene.children.forEach((o) => {
+      const nid = o.userData?.cadNodeId as string | undefined;
+      if (!nid || nid === sid) return;            // unmanaged helpers + the sketch itself
+      const node = nodes[nid];
+      if (!node) return;
+      if (node.parentId === sid) return;          // this sketch's own entity → keep visible
+      if (o.visible) { o.visible = false; hidden.push(o); }
+    });
+    return () => { hidden.forEach((o) => { o.visible = true; }); };
+  }, [sketchSession?.id]);
 
   // ─── Camera: animate when a session is resumed from the tree panel ───────────
   useEffect(() => {
@@ -453,11 +479,26 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     scene.background = new THREE.Color(isDark() ? 0x15181d : 0xe3e8ee);
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(
-      45, container.clientWidth / container.clientHeight, 0.01, 5000,
-    );
-    camera.position.set(20, 18, 20);
-    camera.lookAt(0, 0, 0);
+    const aspect0 = container.clientWidth / container.clientHeight;
+    const PERSP_FOV = 45;
+
+    const perspCam = new THREE.PerspectiveCamera(PERSP_FOV, aspect0, 0.01, 5000);
+    perspCam.position.set(20, 18, 20);
+    perspCam.up.set(0, 1, 0);
+    perspCam.lookAt(0, 0, 0);
+    perspCamRef.current = perspCam;
+
+    // Orthographic twin — frustum is sized on demand from the perspective view
+    // when we switch into it (see switchProjection). Starts as a 1:1 placeholder.
+    const orthoCam = new THREE.OrthographicCamera(-aspect0, aspect0, 1, -1, -5000, 5000);
+    orthoCam.position.copy(perspCam.position);
+    orthoCam.up.copy(perspCam.up);
+    orthoCam.lookAt(0, 0, 0);
+    orthoCamRef.current = orthoCam;
+
+    // The ACTIVE camera starts perspective. `camera` always refers to whichever
+    // projection is live; render loop / resize / picking all read cameraRef.
+    let camera: CADCamera = perspCam;
     cameraRef.current = camera;
     window.cadCamera  = camera;
 
@@ -483,6 +524,20 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     tc.setSize(0.8);
     scene.add(tc.getHelper());
     transformRef.current = tc;
+
+    // ── On-demand rendering ────────────────────────────────────────────────────
+    // Render only when something changes, not every frame: the expensive part
+    // (shadows + AA at HiDPI) was running ~continuously and pinning the viewport at
+    // ~20 fps, which then stalled visibly during synchronous OCC ops. orbit.update()
+    // still runs each frame (cheap) to apply damping and fire 'change'; renderer.render
+    // runs only while frames are requested OR while a camera flight / gizmo drag is
+    // active (both disable orbit). Anything that mutates the scene calls requestRender.
+    let renderFrames = 2;
+    const requestRender = () => { renderFrames = Math.max(renderFrames, 2); };
+    window.cadRequestRender = requestRender;
+    orbit.addEventListener('change', requestRender);   // user input, damping, camera animations
+    tc.addEventListener('change', requestRender);       // gizmo hover / handle redraw
+    tc.addEventListener('objectChange', requestRender); // gizmo drag moves the mesh
 
     // Drag end → commit one undo entry
     tc.addEventListener('dragging-changed', (ev: any) => {
@@ -588,6 +643,23 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       const px = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
       // Proportional factor: <1 zoom in (wheel up), >1 zoom out (wheel down).
       const factor = Math.pow(0.999, px);
+      // Orthographic has no perspective dolly — zooming changes the frustum
+      // scale (camera.zoom). To still zoom toward the cursor, shift the
+      // camera+target laterally so the focus point stays put on screen.
+      if ((camera as THREE.OrthographicCamera).isOrthographicCamera) {
+        const oc = camera as THREE.OrthographicCamera;
+        const viewDir = new THREE.Vector3(); oc.getWorldDirection(viewDir);
+        const planar  = _zFoc.clone().sub(orbit.target);
+        planar.addScaledVector(viewDir, -planar.dot(viewDir)); // strip depth component
+        const delta = planar.multiplyScalar(1 - factor);
+        oc.position.add(delta);
+        orbit.target.add(delta);
+        oc.zoom = Math.max(1e-4, oc.zoom / factor);
+        oc.updateProjectionMatrix();
+        orbit.update();
+        return;
+      }
+
       const newDist = camera.position.distanceTo(orbit.target) * factor;
       if (newDist < orbit.minDistance || newDist > orbit.maxDistance) { orbit.update(); return; }
 
@@ -598,22 +670,114 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     };
     window.addEventListener('wheel', onWheelZoom, { passive: false, capture: true });
 
+    // ── Projection switching (perspective ↔ orthographic) ────────────────────
+    // Standard CAD renders axis-aligned views orthographically so geometry on
+    // parallel planes collapses to exact 1-D lines (a perspective camera always
+    // shows a sliver of the far face's curvature). We keep the two cameras pose-
+    // synced and just swap which one drives rendering / controls / picking.
+    const switchProjection = (toOrtho: boolean) => {
+      const isOrtho = (camera as THREE.OrthographicCamera).isOrthographicCamera === true;
+      if (toOrtho === isOrtho) return;
+
+      const next: CADCamera = toOrtho ? orthoCam : perspCam;
+      next.position.copy(camera.position);
+      next.quaternion.copy(camera.quaternion);
+      next.up.copy(camera.up);
+
+      const aspect = container.clientWidth / container.clientHeight;
+      const halfFov = (PERSP_FOV * Math.PI / 180) / 2;
+
+      if (toOrtho) {
+        // Match the perspective framing at the orbit-target plane so the swap
+        // is visually seamless: ortho half-height = dist · tan(fov/2).
+        const dist  = camera.position.distanceTo(orbit.target);
+        const halfH = Math.max(1e-3, dist * Math.tan(halfFov));
+        orthoCam.top = halfH;  orthoCam.bottom = -halfH;
+        orthoCam.left = -halfH * aspect;  orthoCam.right = halfH * aspect;
+        orthoCam.zoom = 1;
+        orthoCam.updateProjectionMatrix();
+      } else {
+        // Back to perspective: dolly so the framing matches the current ortho
+        // scale, then the standard FOV takes over.
+        const effHalfH = ((orthoCam.top - orthoCam.bottom) / 2) / orthoCam.zoom;
+        const newDist  = effHalfH / Math.tan(halfFov);
+        const dir = new THREE.Vector3().subVectors(perspCam.position, orbit.target).normalize();
+        perspCam.position.copy(orbit.target).addScaledVector(dir, newDist);
+        perspCam.updateProjectionMatrix();
+      }
+
+      camera = next;
+      cameraRef.current = camera;
+      window.cadCamera  = camera;
+      orbit.object = camera;
+      tc.camera    = camera;
+      orbit.update();
+    };
+
+    // Single owner of view presets: choose projection, then orient. All triggers
+    // (menu, view bar, numpad, viewcube, gizmo) funnel here via this event.
+    const onViewPreset = (e: Event) => {
+      const preset = (e as CustomEvent).detail as CADViewPreset;
+      if (!preset) return;
+      switchProjection(CADCameraService.isOrthoPreset(preset));
+      CADCameraService.applyViewPreset(preset, camera, orbit);
+    };
+    window.addEventListener('cad-view-preset', onViewPreset);
+
+    // Generic projection toggle (no reorientation) — used by the orientation
+    // gizmo so its axis snaps land in orthographic like the standard presets.
+    const onSetProjection = (e: Event) => {
+      switchProjection((e as CustomEvent).detail === 'ORTHO');
+    };
+    window.addEventListener('cad-set-projection', onSetProjection);
+
     // Render loop
     let rafId: number;
     const animate = () => {
       rafId = requestAnimationFrame(animate);
-      orbit.update();
-      renderer.render(scene, camera);
+      orbit.update();   // cheap; applies damping and fires 'change' (→ requestRender) while moving
+      // Keep the idle camera pose-synced so the viewcube/gizmo (which may hold a
+      // ref to the perspective twin) read the correct orientation in ortho mode.
+      const idle = camera === perspCam ? orthoCam : perspCam;
+      idle.position.copy(camera.position);
+      idle.quaternion.copy(camera.quaternion);
+      idle.up.copy(camera.up);
+      // Render on demand: while frames are queued, OR while a camera flight / gizmo
+      // drag is active (those disable orbit, so keep drawing every frame until done).
+      if (renderFrames > 0 || !orbit.enabled) {
+        if (renderFrames > 0) renderFrames--;
+        renderer.render(scene, camera);
+      }
     };
     animate();
 
     const handleResize = () => {
       const w = container.clientWidth;
       const h = container.clientHeight;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
+      const aspect = w / h;
+      perspCam.aspect = aspect;
+      perspCam.updateProjectionMatrix();
+      // Preserve the ortho vertical extent; refit horizontal span to new aspect.
+      const halfH = (orthoCam.top - orthoCam.bottom) / 2;
+      orthoCam.left = -halfH * aspect;  orthoCam.right = halfH * aspect;
+      orthoCam.updateProjectionMatrix();
       renderer.setSize(w, h);
+      requestRender();
     };
+
+    // Any scene mutation → request a render. The store covers state-driven changes
+    // (add/remove/select/material/visibility/transform); the cad-* events cover the
+    // imperative viewport mutations; pointer-move covers tool hover highlights.
+    const unsubStore = useCADStore.subscribe(requestRender);
+    const SCENE_EVENTS = [
+      'cad-add-mesh', 'cad-update-mesh', 'cad-remove-mesh', 'cad-duplicate-mesh',
+      'cad-material-changed', 'cad-visibility-changed', 'cad-apply-transform',
+      'cad-sketch-add-visual', 'cad-sketch-replace-visual', 'cad-frame-selection',
+      'cad-view-preset', 'cad-set-projection', 'cad-session-resumed', 'cad-theme-changed',
+      'cad-request-render',
+    ];
+    SCENE_EVENTS.forEach((ev) => window.addEventListener(ev, requestRender));
+    container.addEventListener('pointermove', requestRender);
 
     // Throttled world-space cursor coordinates → StatusBar
     const workPlane  = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -640,14 +804,23 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     };
     container.addEventListener('mousemove', onMouseMove);
 
-    onReady?.(handleResize, scene, camera, orbit);
+    onReady?.(handleResize, scene, perspCam, orbit);
     window.cadScene = scene;
 
     return () => {
       cancelAnimationFrame(rafId);
       if (mousePosRafRef.current) cancelAnimationFrame(mousePosRafRef.current);
       window.removeEventListener('wheel', onWheelZoom, { capture: true });
+      window.removeEventListener('cad-view-preset', onViewPreset);
+      window.removeEventListener('cad-set-projection', onSetProjection);
       window.removeEventListener('cad-theme-changed', onThemeChanged);
+      orbit.removeEventListener('change', requestRender);
+      tc.removeEventListener('change', requestRender);
+      tc.removeEventListener('objectChange', requestRender);
+      unsubStore();
+      SCENE_EVENTS.forEach((ev) => window.removeEventListener(ev, requestRender));
+      container.removeEventListener('pointermove', requestRender);
+      window.cadRequestRender = undefined;
       tc.dispose();
       orbit.dispose();
       renderer.dispose();

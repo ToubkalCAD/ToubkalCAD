@@ -53,6 +53,11 @@ export interface RecomputeHost {
   /** Static, non-geometry metadata an evaluator needs — the node's `params`
    *  (workplane / sketchGeom / point). Datum frames recomputed this pass override it. */
   meta(id: string): Record<string, any> | undefined;
+  /** Build a SKETCH container's current profile wire (largest closed region) from
+   *  its live entities — a fresh temporary the engine frees after the evaluator
+   *  runs. Lets a feature bind to a sketch and re-derive its profile each recompute
+   *  (survives entity move/resize/delete/replace). Undefined → can't resolve. */
+  profileWire?(sketchId: string): any | undefined;
   /** A feature's shape was (re)computed → viewport should add or update it. */
   onChanged?(id: string): void;
   /** A feature's shape was freed (suppress / rollback) → viewport should remove it. */
@@ -232,8 +237,9 @@ function resolveInputs(
 ): ResolvedInput[] {
   const out: ResolvedInput[] = [];
   for (const ref of f.inputs) {
-    if (!graph.features[ref.id]) continue;        // dangling edge — drop (flagged at build)
-    out.push(resolveOne(host, metaOf, ref, temps));
+    const dep = graph.features[ref.id];
+    if (!dep) continue;                           // dangling edge — drop (flagged at build)
+    out.push(resolveOne(host, metaOf, ref, dep.op, temps));
   }
   return out;
 }
@@ -241,14 +247,19 @@ function resolveInputs(
 function resolveOne(
   host: RecomputeHost,
   metaOf: (id: string) => Record<string, any> | undefined,
-  ref: FeatureRef, temps: any[],
+  ref: FeatureRef, depOp: FeatureOp, temps: any[],
 ): ResolvedInput {
-  const raw = host.getShape(ref.id);
-  let shape = raw;
-  if (raw) {
-    const placed = host.place(ref.id, raw);     // identity → same ref; else a new temp
-    if (placed && placed !== raw) temps.push(placed);
+  let shape = host.getShape(ref.id);
+  if (shape) {
+    const placed = host.place(ref.id, shape);   // identity → same ref; else a new temp
+    if (placed && placed !== shape) temps.push(placed);
     shape = placed;
+  } else if (depOp === 'sketch' && host.profileWire) {
+    // The input is a SKETCH container (no shape of its own) — build its current
+    // profile wire fresh from its live entities. A temporary the engine frees
+    // after the evaluator runs, so the feature re-derives the profile each pass.
+    const wire = host.profileWire(ref.id);
+    if (wire) { temps.push(wire); shape = wire; }
   }
   return { id: ref.id, role: ref.role, shape, ref: ref.sel, meta: metaOf(ref.id) };
 }

@@ -127,6 +127,7 @@ export const BlendActionPanel: React.FC = () => {
     previewRef.current = null;
     if (hiddenSolid.current) { hiddenSolid.current.visible = true; hiddenSolid.current = null; }
     setEdgeLinesVisible(true);
+    window.cadRequestRender?.();   // on-demand render: imperative scene edit needs a nudge
   }, []);
 
   const buildPreview = useCallback((o: BlendOp, edges: number[], v: number, targetId: string) => {
@@ -156,6 +157,7 @@ export const BlendActionPanel: React.FC = () => {
       // keep edges visible so the user can adjust the selection / radius
       setApplyErr(e?.message ?? String(e));
     }
+    window.cadRequestRender?.();   // on-demand render: draw the new preview now
   }, [clearPreview]);
 
   // ── Debounced preview on selection / value / op change ───────────────────────

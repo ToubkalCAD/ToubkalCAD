@@ -28,7 +28,7 @@ const NON_SOLID = new Set(['sketch', 'sketch_wire', 'datum_plane', 'datum_axis',
 export function useCADSketchProjectPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const linesRef  = useRef<THREE.Line[]>([]);

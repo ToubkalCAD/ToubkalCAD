@@ -192,8 +192,12 @@ numbered overload** before each use.
   (`utils/recomputeDatums.ts`) into the same nodes-set + undo entry: the delta
   transform `current ∘ bind⁻¹` is applied to the datum's plane/axis/point and the
   bind is re-stamped. The datum visual rebuilds via a geometry signature on its group.
-  *Deferred (needs P1 / topological naming):* datum→datum chains, geometry-edit
-  (parameter-change) recompute, and projected/section sketch entities (D11/D12).
+  **Geometry-edit (parameter-change) recompute is now in for every datum type**
+  via P1 StableRef signatures: `FeatureEvaluators.evaluateDatum` re-derives every
+  `datum_plane` method (offset/midplane/3-point/angle/tangent/normal-to-curve/
+  two-edges) plus `datum_axis` (edge/cylinder) and `datum_point` (vertex/edge-mid)
+  against the live body — see PARAMETRIC.md §10 step 4. *Still deferred:* datum→datum
+  chains and projected/section sketch entities (D11/D12).
 
 ### Cleanup
 - **D10 — Retire the raw point+vector Custom tab.** ✅ **Done.** `PlaneSelector` now has

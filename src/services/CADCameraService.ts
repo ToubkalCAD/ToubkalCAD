@@ -9,7 +9,20 @@ import type { Workplane } from '../store/cadStore';
 
 export type CADViewPreset = 'PERSPECTIVE' | 'TOP' | 'FRONT' | 'RIGHT' | 'ISOMETRIC';
 
+// The viewport may be driven by either projection. Standard CAD uses an
+// orthographic camera for the axis-aligned presets (so shapes on parallel
+// planes collapse to clean 1-D lines) and a perspective camera for the free
+// "Persp" view.
+export type CADCamera = THREE.PerspectiveCamera | THREE.OrthographicCamera;
+
 export class CADCameraService {
+
+  // Which presets want an orthographic projection. Everything except the
+  // free perspective view is rendered orthographically, matching how
+  // Fusion/SolidWorks/etc. behave when you click a standard view.
+  static isOrthoPreset(preset: CADViewPreset): boolean {
+    return preset !== 'PERSPECTIVE';
+  }
 
   // ─── Standard preset views ────────────────────────────────────────────────
 
@@ -81,7 +94,7 @@ export class CADCameraService {
   // Used by the viewport orientation gizmo for click-to-snap axis views.
 
   static animateToPose(
-    camera:      THREE.PerspectiveCamera,
+    camera:      CADCamera,
     controls:    OrbitControls,
     targetPos:   THREE.Vector3,
     lookAt:      THREE.Vector3,
@@ -120,7 +133,7 @@ export class CADCameraService {
 
   // ─── Animated transition to view normal to a workplane ───────────────────
   static animateToWorkplaneNormal(
-    camera:     THREE.PerspectiveCamera,
+    camera:     CADCamera,
     controls:   OrbitControls,
     wp:         Workplane,
     durationMs  = 550,

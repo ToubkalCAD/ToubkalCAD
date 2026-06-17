@@ -32,7 +32,7 @@ interface PointCand { ref: SketchRef; world: THREE.Vector3 }
 export function useCADConstraintPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const constraintReq = useCADStore((s) => s.constraintReq);
   const sel           = useCADStore((s) => s.constraintSel);

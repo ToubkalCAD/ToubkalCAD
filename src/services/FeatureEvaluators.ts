@@ -16,7 +16,8 @@
 // ============================================================
 
 import type { FeatureOp } from './FeatureGraph';
-import { resolveEdge, resolveFace, captureFace, type StableRef } from './StableRef';
+import { resolveEdge, resolveFace, resolveVertex, captureFace, captureEdge, captureVertex,
+  type StableRef, type EdgeSig, type FaceSig } from './StableRef';
 import { OccPrimitivesService } from './OccPrimitivesService';
 import { OccRevolutionService } from './OccRevolutionService';
 import { OccLoftService }       from './OccLoftService';
@@ -27,6 +28,7 @@ import { OccExtrusionService }  from './OccExtrusionService';
 import { OccSketchService }     from './OccSketchService';
 import { OccDatumService }      from './OccDatumService';
 import { OccFaceService }       from './OccFaceService';
+import { OccEdgeService }       from './OccEdgeService';
 import { toRegionEntity, findRegions, RegionEntity } from './SketchRegions';
 import type { Workplane } from '../store/cadStore';
 
@@ -283,13 +285,16 @@ export const HAS_EVALUATOR = (op: FeatureOp): boolean => !!EVALUATORS[op];
 
 // ─── Datums: frame producers (NOT shapes) ─────────────────────────────────────
 // Datums carry no OCC solid; they yield a reference frame the viewport renders
-// from params. `evaluateDatum` re-derives that frame for the methods that are
-// cleanly determined by their input frames + a scalar (offset / midplane /
-// 3-point), so the datum follows when those inputs change. Methods that need
-// positional face/edge/vertex resolution (angle / tangent / curve-normal / …)
-// pass the STORED frame through unchanged for now — correct while inputs are
-// stable; full re-derivation arrives with StableRef integration (step 4). Body
-// moves are already handled rigidly by recomputeDatums.computeDatumUpdates (D13).
+// from params. `evaluateDatum` re-derives that frame for the methods determined
+// by their input frames + a scalar (offset / midplane) and, via StableRef
+// signatures (step 4), the face/edge/vertex-resolved methods — all re-derived
+// against the live body: `angle` (hinge face + edge), `tangent` (cylinder axis +
+// radius), `threePoint` (each picked vertex), `normalToCurve` (edge re-sampled at
+// its arc-length fraction), `twoEdges` (both edges re-sampled). datum_axis
+// (edge / cylinder) and datum_point (vertex / edge-midpoint) likewise re-derive
+// their axis/point from the captured signature. On any reject the branch falls
+// through to the baked frame (`p.workplane` / `p.axis` / `p.point`). Body moves
+// are handled rigidly by recomputeDatums.computeDatumUpdates (D13).
 
 export type DatumFrame =
   | { kind: 'plane'; workplane: Workplane }
@@ -304,6 +309,45 @@ function deriveFaceWorkplane(oc: any, bodyShape: any, faceSig: StableRef): Workp
   if (r.rejected || r.index < 0) return null;
   const pl = OccFaceService.planeFromFaceIndex(oc, bodyShape, r.index);
   return pl ? { label: 'Face', origin: pl.origin, normal: pl.normal, uAxis: pl.uAxis, vAxis: pl.vAxis } : null;
+}
+
+/** Re-derive a hinge axis (a point on the line + its direction) on `bodyShape` by
+ *  resolving the captured edge signature (step 4). Re-captures the resolved edge so
+ *  the returned point/dir are the edge's CURRENT geometry — `mid` is a point on the
+ *  line, which is all `planeAtAngle` needs. Null if the edge can't be confidently
+ *  resolved or isn't a line. */
+function resolveEdgeAxis(oc: any, bodyShape: any, edgeSig: EdgeSig): { point: V3; dir: V3 } | null {
+  const r = resolveEdge(oc, bodyShape, edgeSig);
+  if (r.rejected || r.index < 0) return null;
+  const cur = captureEdge(oc, bodyShape, r.index);
+  return cur?.axis ? { point: cur.mid, dir: cur.axis } : null;
+}
+
+/** Re-derive a cylindrical face's axis + radius on `bodyShape` by resolving the
+ *  captured face signature (step 4, tangent datum). `axisPoint` is the resolved
+ *  face's centroid — on the axis for a full cylinder — which is all
+ *  `tangentPlaneToCylinder` needs (any point on the axis). The axis sign is
+ *  aligned to the captured signature so radial reconstruction stays consistent.
+ *  Null if the face can't be confidently resolved or isn't a cylinder. */
+function resolveCylinderAxis(oc: any, bodyShape: any, sig: FaceSig): { axisPoint: V3; axisDir: V3; radius: number } | null {
+  const r = resolveFace(oc, bodyShape, sig);
+  if (r.rejected || r.index < 0) return null;
+  const cur = captureFace(oc, bodyShape, r.index);
+  if (!cur || cur.surf !== 'cylinder' || !cur.axis || cur.radius == null) return null;
+  let dir = cur.axis;
+  if (sig.axis && (dir[0] * sig.axis[0] + dir[1] * sig.axis[1] + dir[2] * sig.axis[2]) < 0) dir = [-dir[0], -dir[1], -dir[2]];
+  return { axisPoint: cur.centroid, axisDir: dir, radius: cur.radius };
+}
+
+/** Re-sample a captured edge's polyline on `bodyShape` (step 4, curve-normal /
+ *  two-edges datums). `resolveEdge`'s ordinal indexes the same deduped EDGE map
+ *  `OccEdgeService.extractEdges` builds, so the resolved index maps straight back
+ *  to the live edge's points. Null if the edge can't be confidently resolved. */
+function resolveEdgePolyline(oc: any, bodyShape: any, sig: EdgeSig): V3[] | null {
+  const r = resolveEdge(oc, bodyShape, sig);
+  if (r.rejected || r.index < 0) return null;
+  const e = OccEdgeService.extractEdges(oc, bodyShape).find((x: any) => x.index === r.index);
+  return e ? (e.points as V3[]) : null;
 }
 
 export function evaluateDatum(
@@ -337,14 +381,134 @@ export function evaluateDatum(
       const a = inputs[0]?.meta?.workplane as Workplane | undefined;
       const b = inputs[1]?.meta?.workplane as Workplane | undefined;
       if (a && b) { const wp = OccDatumService.midplane(oc, a.origin, a.normal, b.origin, b.normal); if (wp) return { kind: 'plane', workplane: wp }; }
-    } else if (m === '3point') {
-      const pts = inputs.map((i) => i.meta?.point as V3 | undefined).filter((x): x is V3 => !!x);
-      if (pts.length >= 3) { const wp = OccDatumService.planeFrom3Points(oc, pts[0], pts[1], pts[2]); if (wp) return { kind: 'plane', workplane: wp }; }
+    } else if (m === 'threePoint') {
+      const refs = (p.refs as any[]) ?? [];
+      const sigRefs = refs.filter((r) => r?.sel?.kind === 'vertex');
+      if (sigRefs.length >= 3) {
+        // Vertex-signature path (step 4): re-resolve every picked vertex on its
+        // live source body so the plane FOLLOWS edits. All-or-nothing — if any
+        // vertex can't resolve, fall through to the baked workplane (a mix of
+        // live + stale corners would build a wrong plane).
+        const pts: V3[] = [];
+        let ok = true;
+        for (const r of refs) {
+          const src = inputs.find((x) => x.id === r?.nodeId);
+          let pt: V3 | undefined;
+          if (r?.sel?.kind === 'vertex' && src?.shape) {
+            const rr = resolveVertex(oc, src.shape, r.sel);
+            if (!rr.rejected && rr.index >= 0) { const cur = captureVertex(oc, src.shape, rr.index); if (cur) pt = cur.pos; }
+          }
+          if (!pt) { ok = false; break; }
+          pts.push(pt);
+        }
+        if (ok && pts.length >= 3) { const wp = OccDatumService.planeFrom3Points(oc, pts[0], pts[1], pts[2]); if (wp) return { kind: 'plane', workplane: wp }; }
+      } else {
+        // Legacy / datum-point sources expose their frame point via meta.point.
+        const pts = inputs.map((i) => i.meta?.point as V3 | undefined).filter((x): x is V3 => !!x);
+        if (pts.length >= 3) { const wp = OccDatumService.planeFrom3Points(oc, pts[0], pts[1], pts[2]); if (wp) return { kind: 'plane', workplane: wp }; }
+      }
+    } else if (m === 'tangent') {
+      // Re-derive the cylinder's live axis + radius and rebuild the tangent plane
+      // at the same angular position (the captured hit's radial direction). Follows
+      // translation + radius change; rotation about the cylinder's own axis is the
+      // §6 Phase 1a limit. Reject (or legacy node) → baked `p.workplane`.
+      const r0 = p.refs?.[0];
+      const hit = r0?.point as V3 | undefined;
+      if (r0?.sel?.kind === 'face' && r0.sel.surf === 'cylinder' && Array.isArray(hit)) {
+        const src = inputs.find((i) => i.id === r0.nodeId) ?? inputs[0];
+        const live = src?.shape ? resolveCylinderAxis(oc, src.shape, r0.sel) : null;
+        if (live) {
+          const c0 = r0.sel.centroid, d0 = r0.sel.axis ?? [0, 0, 1];
+          const rel = [hit[0] - c0[0], hit[1] - c0[1], hit[2] - c0[2]];
+          const t = rel[0] * d0[0] + rel[1] * d0[1] + rel[2] * d0[2];
+          let rh = [rel[0] - t * d0[0], rel[1] - t * d0[1], rel[2] - t * d0[2]];
+          const rl = Math.hypot(rh[0], rh[1], rh[2]);
+          if (rl > 1e-9) {
+            rh = [rh[0] / rl, rh[1] / rl, rh[2] / rl];
+            const np: V3 = [live.axisPoint[0] + live.radius * rh[0], live.axisPoint[1] + live.radius * rh[1], live.axisPoint[2] + live.radius * rh[2]];
+            const wp = OccDatumService.tangentPlaneToCylinder(oc, np, live.axisPoint, live.axisDir);
+            if (wp) return { kind: 'plane', workplane: wp };
+          }
+        }
+      }
+    } else if (m === 'normalToCurve') {
+      // Re-sample the captured edge on the live body and rebuild the plane normal
+      // to it at the stored arc-length fraction → follows the edge. Reject (or a
+      // legacy node with no signature) → baked `p.workplane`.
+      const r0 = p.refs?.[0];
+      const f = Number(r0?.fraction ?? p.fraction ?? 0.5);
+      if (r0?.sel?.kind === 'edge') {
+        const src = inputs.find((i) => i.id === r0.nodeId) ?? inputs[0];
+        const pts = src?.shape ? resolveEdgePolyline(oc, src.shape, r0.sel) : null;
+        if (pts) { const wp = OccDatumService.planeNormalToPath(oc, pts, f); if (wp) return { kind: 'plane', workplane: wp }; }
+      }
+    } else if (m === 'twoEdges') {
+      // Re-sample both captured edges on their live bodies and rebuild the plane
+      // through their endpoints → follows edits. Either edge rejecting (or a legacy
+      // node) → baked `p.workplane`. refs[0]=A, refs[1]=B (planeThrough2Edges order).
+      const refs = (p.refs as any[]) ?? [];
+      const a = refs[0], b = refs[1];
+      if (a?.sel?.kind === 'edge' && b?.sel?.kind === 'edge') {
+        const srcA = inputs.find((i) => i.id === a.nodeId);
+        const srcB = inputs.find((i) => i.id === b.nodeId);
+        const ptsA = srcA?.shape ? resolveEdgePolyline(oc, srcA.shape, a.sel) : null;
+        const ptsB = srcB?.shape ? resolveEdgePolyline(oc, srcB.shape, b.sel) : null;
+        if (ptsA && ptsB) { const wp = OccDatumService.planeThrough2Edges(oc, ptsA, ptsB); if (wp) return { kind: 'plane', workplane: wp }; }
+      }
+    } else if (m === 'angle') {
+      // Re-derive the angled plane from signatures so it FOLLOWS the source body:
+      // resolve the hinge FACE → its current plane, resolve the hinge EDGE → its
+      // current axis, then re-rotate (OccDatumService.planeAtAngle). The angle is
+      // stored on the ref. Either signature rejecting (or a legacy node with no
+      // signatures) → fall through to the baked `p.workplane`.
+      const r0 = p.refs?.[0];
+      const angle = Number(r0?.angle ?? p.angle ?? 0);
+      if (r0?.sel?.kind === 'face' && r0?.edgeSel?.kind === 'edge') {
+        const src = inputs.find((i) => i.id === r0.nodeId) ?? inputs[0];
+        if (src?.shape) {
+          const faceWp = deriveFaceWorkplane(oc, src.shape, r0.sel);
+          const hinge  = resolveEdgeAxis(oc, src.shape, r0.edgeSel);
+          if (faceWp && hinge) {
+            const wp = OccDatumService.planeAtAngle(oc, faceWp.origin, faceWp.normal, hinge.point, hinge.dir, angle);
+            if (wp) return { kind: 'plane', workplane: wp };
+          }
+        }
+      }
     }
     if (p.workplane) return { kind: 'plane', workplane: p.workplane };   // pass-through
   }
-  if (datumType === 'datum_axis'  && p.axis)  return { kind: 'axis',  axis: p.axis };
-  if (datumType === 'datum_point' && p.point) return { kind: 'point', point: p.point };
+  if (datumType === 'datum_axis') {
+    // Re-derive the axis from the captured edge / cylindrical face on the live
+    // body so it FOLLOWS edits; reject (or legacy node with no sig) → baked `axis`.
+    const r0 = p.refs?.[0];
+    const src = r0?.sel ? (inputs.find((i) => i.id === r0.nodeId) ?? inputs[0]) : undefined;
+    if (src?.shape) {
+      if (p.method === 'edge' && r0.sel.kind === 'edge') {
+        const h = resolveEdgeAxis(oc, src.shape, r0.sel);
+        if (h) return { kind: 'axis', axis: { origin: h.point, dir: h.dir } };
+      } else if (p.method === 'cylinder' && r0.sel.kind === 'face') {
+        const live = resolveCylinderAxis(oc, src.shape, r0.sel);
+        if (live) return { kind: 'axis', axis: { origin: live.axisPoint, dir: live.axisDir } };
+      }
+    }
+    if (p.axis) return { kind: 'axis', axis: p.axis };
+  }
+  if (datumType === 'datum_point') {
+    // Re-derive the point from the captured vertex / edge-midpoint on the live
+    // body so it FOLLOWS edits; reject (or legacy node with no sig) → baked `point`.
+    const r0 = p.refs?.[0];
+    const src = r0?.sel ? (inputs.find((i) => i.id === r0.nodeId) ?? inputs[0]) : undefined;
+    if (src?.shape) {
+      if (p.method === 'vertex' && r0.sel.kind === 'vertex') {
+        const rr = resolveVertex(oc, src.shape, r0.sel);
+        if (!rr.rejected && rr.index >= 0) { const cur = captureVertex(oc, src.shape, rr.index); if (cur) return { kind: 'point', point: cur.pos }; }
+      } else if (p.method === 'edgeMid' && r0.sel.kind === 'edge') {
+        const pts = resolveEdgePolyline(oc, src.shape, r0.sel);
+        if (pts && pts.length) return { kind: 'point', point: pts[Math.floor(pts.length / 2)] };
+      }
+    }
+    if (p.point) return { kind: 'point', point: p.point };
+  }
   return null;
 }
 

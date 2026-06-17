@@ -25,6 +25,7 @@ import { OccTransformService } from './OccTransformService';
 import { ThreeMeshCache } from './ThreeMeshCache';
 import { fromLocal2D } from './OccSketchService';
 import { toRegionEntity, findRegions, RegionEntity } from './SketchRegions';
+import { buildSketchProfileWire, healOpProfileTargets } from '../utils/sketchProfile';
 import { useCADStore, Workplane } from '../store/cadStore';
 
 /** World-space display polyline for a sketch wire's local-2D `sketchGeom`, placed
@@ -81,6 +82,7 @@ export function liveHost(): RecomputeHost {
       return OccTransformService.placeShape(window.oc, shape, node.transform);
     },
     meta: (id) => useCADStore.getState().nodes[id]?.params,
+    profileWire: (id) => buildSketchProfileWire(window.oc, id) ?? undefined,
     onChanged: (id) => {
       // Sketch wires render as imperative THREE.Line objects (not ThreeMeshCache
       // solids), so re-tessellation via cad-update-mesh wouldn't touch them. When a
@@ -149,4 +151,49 @@ export function propagateFromStore(editedIds: string | string[]): RecomputeRepor
     st.log(`Recompute ▸ ${rep.ok} downstream feature(s) updated`, 'info');
   }
   return rep;
+}
+
+/**
+ * Rebuild only the nodes whose OCC shape is MISSING from the registry, leaving
+ * every node that still has a live shape untouched. This is the step-5 undo bridge:
+ * a regenerable node's shape is freed on delete, so when undo brings the node back
+ * its shape must be rebuilt from the recipe before the viewport meshes it.
+ *
+ * An EMPTY dirty set gives exactly this: the engine treats every node WITH a shape
+ * as cached (skipped) and (re)evaluates only those without one — in topo order, so
+ * a restored chain (e.g. box + its fillet) rebuilds bottom-up. Non-regenerable
+ * nodes (imported / mirror / pattern) keep their retained shape → stay cached.
+ */
+export function regenerateMissing(): RecomputeReport {
+  const graph = buildFeatureGraph(useCADStore.getState().nodes);
+  return recompute(liveHost(), graph, { dirty: new Set<string>() });
+}
+
+let bridgeInstalled = false;
+/** Install the `cad-regenerate` listener (fired by the store's undo/redo). Runs
+ *  regenerateMissing SYNCHRONOUSLY — CustomEvent dispatch is synchronous, so by the
+ *  time the store's following cad-add-mesh fires the rebuilt shape is registered.
+ *  Idempotent; call once at startup. */
+export function installRecomputeBridge(): void {
+  if (bridgeInstalled || typeof window === 'undefined') return;
+  bridgeInstalled = true;
+  window.addEventListener('cad-regenerate', () => {
+    try { regenerateMissing(); } catch { /* engine already isolates per-feature errors */ }
+  });
+  // Sketch edited & exited → rebuild everything downstream of that sketch (loft /
+  // extrude / revolve bound to it re-derive their profile from the new shape).
+  window.addEventListener('cad-sketch-committed', (e) => {
+    const id = (e as CustomEvent).detail?.sketchId as string | undefined;
+    if (!id) return;
+    try {
+      // First self-heal any op that consumed this sketch (adopted it as a child):
+      // an op still holding a stale entity-wire target rebinds to the sketch, which
+      // makes it a live descendant so the propagation below actually reaches it.
+      const st = useCADStore.getState();
+      for (const n of Object.values(st.nodes)) {
+        if (n.params?.opType && (n.children ?? []).includes(id)) healOpProfileTargets(n.id);
+      }
+      propagateFromStore(id);
+    } catch { /* engine isolates per-feature errors */ }
+  });
 }

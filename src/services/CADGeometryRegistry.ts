@@ -1,19 +1,54 @@
 import { useCADStore } from '../store/cadStore';
+import { nodeToFeature } from './FeatureGraph';
+
+/** Feature ops the recompute engine can rebuild from a recipe (have EVALUATORS).
+ *  A removed node of one of these types has its shape FREED immediately — undo
+ *  regenerates it. Everything else with a shape (imported geometry, mirror,
+ *  pattern — no evaluator) must be RETAINED while still reachable by undo. */
+const REGENERABLE_OPS = new Set<string>([
+  'box', 'cylinder', 'sphere', 'torus', 'cone',
+  'revolve', 'loft', 'sweep', 'extrude', 'boolean', 'fillet', 'chamfer', 'sketchWire',
+]);
+
+/** Can the recompute engine rebuild this node's shape from its stored recipe?
+ *  Conservative — a false negative only RETAINS a shape a little longer (freed when
+ *  it ages out of history); a false positive would FREE a shape undo can't rebuild,
+ *  leaving an invisible body. So we only free when regeneration is well-established:
+ *   • the node maps to an evaluator op (REGENERABLE_OPS), and
+ *   • the feature is `complete` — has a persisted recipe (excludes Ribbon.create
+ *     revolve/loft/sweep, which never stored their inputs), and
+ *   • it isn't an up-to-next / up-to-last extrude — those need sibling "context"
+ *     bodies the feature graph doesn't wire (the panel supplies them); the generic
+ *     evaluator would throw, so retain instead.
+ *  Uses the same node→op classification the feature graph does (so the overloaded
+ *  `compound` type — fillet/chamfer/torus/cone vs. import — resolves correctly). */
+function canRegenerate(node: any): boolean {
+  try {
+    const f = nodeToFeature(node);
+    if (!REGENERABLE_OPS.has(f.op) || !f.complete) return false;
+    if (f.op === 'extrude') {
+      const endMode = Math.round(Number(node.params?.opParams?.endMode ?? 0));
+      if (endMode === 4 || endMode === 5) return false;   // up-to-next / up-to-last
+    }
+    return true;
+  } catch { return false; }
+}
 
 /**
  * Centralized registry for OpenCascade shapes.
  * Manages WASM heap lifetime: every registered shape must eventually be
  * .delete()'d. The store subscription does that automatically.
  *
- * Lifetime rule (NOT "free as soon as the node leaves the scene"): a shape is
- * freed only once its id is unreachable from BOTH the current scene AND the
- * entire undo/redo history. This is what lets `undo` after a delete rebuild the
- * mesh — the node comes back and its OCC shape is still alive. A deleted shape
- * is finally freed when its delete action ages out of the HISTORY_LIMIT window.
+ * Lifetime rule (Phase 1 step 5): a REGENERABLE node's shape is freed the moment
+ * its node leaves the scene — undo rebuilds it from its recipe via the recompute
+ * engine (the `cad-regenerate` bridge). A NON-regenerable shape (imported / mirror
+ * / pattern — no evaluator) has no recipe, so it is retained while still reachable
+ * from the current scene OR a retained undo/redo delta, and freed once it ages out
+ * of the HISTORY_LIMIT window.
  *
- * Perf: the subscription only does the (history-scanning) GC when a node id has
- * actually disappeared from `nodes`. Pure transform/selection/log updates — and
- * gizmo live-drag, which rewrites `nodes` every frame — take the cheap path.
+ * Perf: the subscription only runs the GC when a node id has actually disappeared
+ * from `nodes`. Pure transform/selection/log updates — and gizmo live-drag, which
+ * rewrites `nodes` every frame — take the cheap path.
  */
 export class CADGeometryRegistry {
   private static instance: CADGeometryRegistry | null = null;
@@ -66,15 +101,21 @@ export class CADGeometryRegistry {
       for (const id in prev) { if (!state.nodes[id]) { removed = true; break; } }
       if (!removed) return;
 
-      // GC: an id is still needed if it's in the scene OR reachable by undo/redo
-      // (present in any retained history action's before/after snapshot).
+      // 1 — a REGENERABLE node that just left the scene is freed NOW; undo rebuilds
+      //     it from its recipe (no need to retain it through history).
+      for (const id in prev) {
+        if (!state.nodes[id] && this.geometryMap.has(id) && canRegenerate(prev[id])) {
+          this.deleteShape(id);
+        }
+      }
+
+      // 2 — sweep the remainder (non-regenerable retained shapes: imported / mirror
+      //     / pattern): keep while reachable from the scene OR a retained delta,
+      //     free once aged out of the HISTORY_LIMIT window. Also backstops step 1.
       const reachable = new Set<string>();
       for (const id in state.nodes) reachable.add(id);
-      const scan = (actions: Array<{ nodesBefore: { id: string }[]; nodesAfter: { id: string }[] }>) => {
-        for (const a of actions) {
-          for (const n of a.nodesBefore) reachable.add(n.id);
-          for (const n of a.nodesAfter)  reachable.add(n.id);
-        }
+      const scan = (actions: Array<{ deltas: { id: string }[] }>) => {
+        for (const a of actions) for (const d of a.deltas) reachable.add(d.id);
       };
       scan(state.past as any);
       scan(state.future as any);

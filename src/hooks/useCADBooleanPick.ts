@@ -23,7 +23,7 @@ const CLICK_SLOP_PX = 5;
 export function useCADBooleanPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const booleanReq    = useCADStore((s) => s.booleanReq);
   const booleanBaseId = useCADStore((s) => s.booleanBaseId);

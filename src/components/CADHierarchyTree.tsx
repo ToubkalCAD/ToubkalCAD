@@ -206,7 +206,10 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
           if (isContextable) {
             e.preventDefault();
             e.stopPropagation();
-            setSelectedIds([nodeId]);
+            // Preserve an existing multi-selection when right-clicking one of its
+            // members (so e.g. Loft across selected sketches is offered); only
+            // collapse to this node when it wasn't already selected.
+            if (!selectedIds.includes(nodeId)) setSelectedIds([nodeId]);
             openContextMenu(nodeId, e.clientX, e.clientY);
           }
         }}

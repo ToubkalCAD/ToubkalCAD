@@ -51,7 +51,7 @@ function facePlaneAndSig(nodeId: string, faceIndex: number): { wp: Workplane; si
 export function useCADDatumOffsetPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const hoverHlRef    = useRef<THREE.Mesh | null>(null);                 // solid-face hover highlight

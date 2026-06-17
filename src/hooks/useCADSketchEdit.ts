@@ -59,7 +59,7 @@ const toEntity2D = (geom: any): Entity2D | null => {
 export function useCADSketchEdit(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const hoverRef = useRef<THREE.Line | null>(null);

@@ -29,7 +29,7 @@ import { ConstraintPanel }     from './ConstraintPanel';
 import { CADConsolePanel }      from './panels/CADConsolePanel';
 import { CADProjectPanel }      from './panels/CADProjectPanel';
 import { Icon }                 from './Icon';
-import { CADCameraService, CADViewPreset } from '../services/CADCameraService';
+import { CADViewPreset } from '../services/CADCameraService';
 import { useCADStore } from '../store/cadStore';
 import { getTheme, toggleTheme } from '../utils/theme';
 import 'dockview/dist/styles/dockview.css';
@@ -50,10 +50,12 @@ const ThemeToggle: React.FC = () => {
 };
 
 // ─── Numpad camera shortcuts ──────────────────────────────────────────────────
-function useNumpadCamera(
-  camRef: React.MutableRefObject<THREE.PerspectiveCamera | null>,
-  ctlRef: React.MutableRefObject<OrbitControls | null>,
-) {
+// All view-preset triggers (numpad, menu, view bar, viewcube) dispatch the
+// `cad-view-preset` event; Viewport3D is the single handler that chooses the
+// projection (orthographic for axis views, perspective for "Persp") and orients
+// the active camera. Keeping one owner avoids two code paths fighting over which
+// camera instance gets positioned.
+function useNumpadCamera() {
   useEffect(() => {
     const MAP: Record<string, CADViewPreset> = {
       Numpad0: 'PERSPECTIVE', Numpad7: 'TOP',
@@ -62,28 +64,12 @@ function useNumpadCamera(
     };
     const fn = (e: KeyboardEvent) => {
       const preset = MAP[e.code];
-      if (preset && camRef.current && ctlRef.current)
-        CADCameraService.applyViewPreset(preset, camRef.current, ctlRef.current);
+      if (preset)
+        window.dispatchEvent(new CustomEvent('cad-view-preset', { detail: preset }));
     };
     window.addEventListener('keydown', fn);
     return () => window.removeEventListener('keydown', fn);
-  }, [camRef, ctlRef]);
-}
-
-// ─── View-preset event bus (fired from MenuBar / numpad) ──────────────────────
-function useViewPresetBus(
-  camRef: React.MutableRefObject<THREE.PerspectiveCamera | null>,
-  ctlRef: React.MutableRefObject<OrbitControls | null>,
-) {
-  useEffect(() => {
-    const fn = (e: Event) => {
-      const preset = (e as CustomEvent).detail as CADViewPreset;
-      if (camRef.current && ctlRef.current)
-        CADCameraService.applyViewPreset(preset, camRef.current, ctlRef.current);
-    };
-    window.addEventListener('cad-view-preset', fn);
-    return () => window.removeEventListener('cad-view-preset', fn);
-  }, [camRef, ctlRef]);
+  }, []);
 }
 
 // ─── Floating view buttons ────────────────────────────────────────────────────
@@ -168,8 +154,7 @@ export const CADLayout: React.FC = () => {
   const op3DReq    = useCADStore((s) => s.op3DPanelReq);
   const closeOp3D  = useCADStore((s) => s.closeOp3DPanel);
 
-  useNumpadCamera(cameraRef, orbitRef);
-  useViewPresetBus(cameraRef, orbitRef);
+  useNumpadCamera();
 
   // Viewport double-click → re-edit the selected 3D op node.
   // Registered on window so Viewport3D.tsx is not modified.
@@ -221,8 +206,7 @@ export const CADLayout: React.FC = () => {
   }, []); // no deps — intentionally stable for the lifetime of CADLayout
 
   const handlePreset = useCallback((p: CADViewPreset) => {
-    if (cameraRef.current && orbitRef.current)
-      CADCameraService.applyViewPreset(p, cameraRef.current, orbitRef.current);
+    window.dispatchEvent(new CustomEvent('cad-view-preset', { detail: p }));
   }, []);
 
   // ─── Dockview panels ───────────────────────────────────────────────────────

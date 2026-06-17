@@ -25,7 +25,7 @@ import { OccSweepService }          from '../services/OccSweepService';
 import { OccSketchService, fromLocal2D } from '../services/OccSketchService';
 import { findRegions, RegionEntity, toRegionEntity } from '../services/SketchRegions';
 import { setAlignOffset } from '../hooks/useCADAssemblyMate';
-import { resolveProfileWire, resolveAllProfileWires } from '../utils/sketchProfile';
+import { resolveProfileWire, resolveAllProfileWires, profileShapeFor, canResolveProfile, sketchRegionCount } from '../utils/sketchProfile';
 import { createAndEditOp } from './Op3DPanel';
 import { createSketchEntityNode } from '../utils/sketchEntity';
 import { transformGeom, translator } from '../services/SketchTransform2D';
@@ -440,20 +440,40 @@ export const Ribbon: React.FC = () => {
     return null;
   };
 
+  // Single-profile target for extrude/revolve: bind to the SKETCH container when
+  // one is selected (so the op re-derives its profile from the sketch's current
+  // shape every recompute — survives entity move/resize/delete/replace), or the
+  // sketch_wire itself when a bare wire is picked. null = no resolvable profile.
+  const profileTargetId = (): string | null => {
+    const node = nodes[selIds[0]];
+    if (node?.type === 'sketch_wire') {
+      // Bind a selected wire leaf to its owning sketch so it re-derives on edit.
+      const par = node.parentId && nodes[node.parentId]?.type === 'sketch' ? node.parentId : null;
+      return par && canResolveProfile(window.oc, par) ? par : selIds[0];
+    }
+    if (node?.type === 'sketch') return canResolveProfile(window.oc, node.id) ? node.id : null;
+    return null;
+  };
+
   // ─── Extrusion ──────────────────────────────────────────────────────────────
   const extrude = () => {
     if (!selIds.length) { log('Select a sketch or sketch wire.', 'warn'); return; }
     const node = nodes[selIds[0]];
     if (node?.type !== 'sketch_wire' && node?.type !== 'sketch') { log('Selected object must be a 2D sketch.', 'warn'); return; }
     withOC(() => {
-      // E7: extrude every closed region in the sketch (Multi-Pad), not just one.
       const node = nodes[selIds[0]];
       let wireIds: string[];
       if (node?.type === 'sketch') {
-        const childIds = Object.values(useCADStore.getState().nodes)
-          .filter((n) => n.parentId === node.id && n.type === 'sketch_wire')
-          .map((n) => n.id);
-        wireIds = resolveAllProfileWires(node.id, childIds);
+        // One region → bind to the SKETCH (re-derive on edit). Several regions →
+        // Multi-Pad: extrude each as its own region wire (kept as before).
+        if (sketchRegionCount(node.id) > 1) {
+          const childIds = Object.values(useCADStore.getState().nodes)
+            .filter((n) => n.parentId === node.id && n.type === 'sketch_wire')
+            .map((n) => n.id);
+          wireIds = resolveAllProfileWires(node.id, childIds);
+        } else {
+          wireIds = canResolveProfile(window.oc, node.id) ? [node.id] : [];
+        }
       } else {
         const w = profileWireFor();
         wireIds = w ? [w] : [];
@@ -476,10 +496,12 @@ export const Ribbon: React.FC = () => {
         { key: 'angle', label: 'Angle', default: 360, min: 1, max: 360, unit: '°' },
       ]);
       if (!v) return;
-      const wireId = profileWireFor();
-      if (!wireId) { log('This sketch has no closed region to revolve.', 'warn'); return; }
-      const wire = reg.getShape(wireId);
-      if (!wire) { log('Sketch wire not found.', 'error'); return; }
+      const targetId = profileTargetId();
+      if (!targetId) { log('This sketch has no closed region to revolve.', 'warn'); return; }
+      // Bind to the sketch (or wire); build the immediate shape from its current
+      // profile and free the temp — the engine rebuilds it from targetWireIds.
+      const prof = profileShapeFor(window.oc, targetId);
+      if (!prof.shape) { log('Sketch wire not found.', 'error'); return; }
       const axisVecs: [number,number,number][] = [[1,0,0],[0,1,0],[0,0,1]];
       const axisLabels = ['X','Y','Z'];
       const idx = Math.round(Math.max(0, Math.min(2, v.axis)));
@@ -487,25 +509,67 @@ export const Ribbon: React.FC = () => {
       try {
         const id = crypto.randomUUID();
         create(id, `Revolve${v.angle.toFixed(0)}°/${axisLabels[idx]}`, 'revolve',
-          OccRevolutionService.revolveProfile(window.oc, wire, [0,0,0], axisVecs[idx], v.angle),
-          { opType: 'revolve', targetWireIds: [wireId], opParams: { axis: idx, angle: v.angle } });
-        useCADStore.getState().adoptSketchSources(id, [wireId]);
-      } finally { setProc(false); }
+          OccRevolutionService.revolveProfile(window.oc, prof.shape, [0,0,0], axisVecs[idx], v.angle),
+          { opType: 'revolve', targetWireIds: [targetId], opParams: { axis: idx, angle: v.angle } });
+        useCADStore.getState().adoptSketchSources(id, [targetId]);
+      } finally {
+        if (prof.temp && prof.shape) try { prof.shape.delete(); } catch { /*noop*/ }
+        setProc(false);
+      }
     });
   };
 
   // ─── Loft ───────────────────────────────────────────────────────────────────
+  // Collect ordered loft profile wires from the selection. Accepts both
+  // sketch-wire leaves AND sketch containers (resolved to their profile wire),
+  // mirroring how Extrude/Revolve treat a selected sketch — so the user can pick
+  // the "Sketch N [Face]" rows in the tree, not just the inner wire leaves.
+  const loftProfileWireIds = (): string[] => {
+    // How many selected wires belong to each parent sketch — a wire that's the
+    // SOLE selection from its sketch binds to that sketch (re-derives on edit);
+    // several wires from one sketch is an explicit multi-wire loft → keep the wires.
+    const selWireParents = new Map<string, number>();
+    for (const id of selIds) {
+      const n = nodes[id];
+      if (n?.type === 'sketch_wire' && n.parentId && nodes[n.parentId]?.type === 'sketch')
+        selWireParents.set(n.parentId, (selWireParents.get(n.parentId) ?? 0) + 1);
+    }
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const id of selIds) {
+      const n = nodes[id];
+      if (!n) continue;
+      // Bind to the SKETCH container so the loft re-derives its profile from the
+      // sketch's CURRENT shape every recompute (survives entity move/resize/
+      // delete/replace). profileShapeFor() resolves either id to geometry.
+      let wid: string | null = null;
+      if (n.type === 'sketch') {
+        if (canResolveProfile(window.oc, id)) wid = id;
+      } else if (n.type === 'sketch_wire') {
+        const par = n.parentId && nodes[n.parentId]?.type === 'sketch' ? n.parentId : null;
+        wid = (par && selWireParents.get(par) === 1 && canResolveProfile(window.oc, par)) ? par : id;
+      }
+      if (wid && !seen.has(wid)) { seen.add(wid); out.push(wid); }
+    }
+    return out;
+  };
+
   const loft = () => {
-    const sketchIds = selIds.filter((id) => nodes[id]?.type === 'sketch_wire');
-    if (sketchIds.length < 2) { log('Select ≥ 2 sketch wires (Ctrl+click) to loft.', 'warn'); return; }
+    if (loftProfileCount < 2) { log('Select ≥ 2 sketches or sketch wires (Ctrl+click) to loft.', 'warn'); return; }
     withOC(async () => {
       const v = await showParamModal('Loft', [
         { key: 'solid', label: 'Solid (1) or Shell (0)', default: 1, min: 0, max: 1, step: 1 },
         { key: 'ruled', label: 'Ruled (1) or Smooth (0)', default: 0, min: 0, max: 1, step: 1 },
       ]);
       if (!v) return;
-      const wires = sketchIds.map((id) => reg.getShape(id)).filter(Boolean);
-      if (wires.length < 2) { log('Could not retrieve all sketch shapes.', 'error'); return; }
+      const sketchIds = loftProfileWireIds();
+      if (sketchIds.length < 2) { log('Need ≥ 2 closed profiles to loft.', 'warn'); return; }
+      // Resolve each target (sketch container → its current profile wire, temp;
+      // or a registered wire) to geometry. Free the temporaries we build here —
+      // the recompute engine rebuilds them on its own from the bound sketch ids.
+      const resolved = sketchIds.map((id) => profileShapeFor(window.oc, id));
+      const wires = resolved.map((r) => r.shape).filter(Boolean);
+      if (wires.length < 2) { resolved.forEach((r) => { if (r.temp && r.shape) try { r.shape.delete(); } catch { /*noop*/ } }); log('Could not retrieve all sketch shapes.', 'error'); return; }
       setProc(true, 'Lofting…');
       try {
         const id = crypto.randomUUID();
@@ -513,7 +577,10 @@ export const Ribbon: React.FC = () => {
           OccLoftService.loftProfiles(window.oc, wires, v.solid >= 0.5, v.ruled >= 0.5),
           { opType: 'loft', targetWireIds: [...sketchIds], opParams: { solid: v.solid >= 0.5 ? 1 : 0, ruled: v.ruled >= 0.5 ? 1 : 0 } });
         useCADStore.getState().adoptSketchSources(id, sketchIds);
-      } finally { setProc(false); }
+      } finally {
+        resolved.forEach((r) => { if (r.temp && r.shape) try { r.shape.delete(); } catch { /*noop*/ } });
+        setProc(false);
+      }
     });
   };
 
@@ -737,6 +804,15 @@ export const Ribbon: React.FC = () => {
   const hasSel       = selIds.length > 0;
   const hasSketch    = hasSel && (nodes[selIds[0]]?.type === 'sketch_wire' || nodes[selIds[0]]?.type === 'sketch');
   const sketchCount  = selIds.filter((id) => nodes[id]?.type === 'sketch_wire').length;
+  // Loft profiles: a selected sketch_wire counts directly; a selected sketch
+  // container counts if it holds at least one wire (resolved to a profile on run).
+  const loftProfileCount = selIds.filter((id) => {
+    const t = nodes[id]?.type;
+    if (t === 'sketch_wire') return true;
+    if (t === 'sketch') return Object.values(nodes).some(
+      (n) => n.parentId === id && n.type === 'sketch_wire');
+    return false;
+  }).length;
   const selType      = hasSel ? nodes[selIds[0]]?.type : undefined;
   const canConstrain = !!sketchSession || selType === 'sketch' || selType === 'sketch_wire';
   const hasSolid     = selIds.some((id) => {
@@ -791,7 +867,7 @@ export const Ribbon: React.FC = () => {
     // from sketch
     extrude:   { id:'extrude',   icon:'extrude',   label:'Extrude',  run:extrude, enabled:hasSketch,         accent:'#9944cc' },
     revolve:   { id:'revolve',   icon:'revolve',   label:'Revolve',  run:revolve, enabled:hasSketch,         accent:'#cc4488' },
-    loft:      { id:'loft',      icon:'loft',      label:'Loft',     run:loft,    enabled:sketchCount>=2,    accent:'#cc8844' },
+    loft:      { id:'loft',      icon:'loft',      label:'Loft',     run:loft,    enabled:loftProfileCount>=2, accent:'#cc8844' },
     sweep:     { id:'sweep',     icon:'sweep',     label:'Sweep',    run:sweep,   enabled:sketchCount>=2,    accent:'#44bbcc' },
     // transform
     mirror:        { id:'mirror',        icon:'mirror',    label:'Mirror',     run:mirror,        enabled:hasSolid||hasSketch, accent:'#4488cc' },

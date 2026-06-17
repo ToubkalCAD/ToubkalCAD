@@ -16,6 +16,7 @@ import { useCADStore } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccEdgeService } from '../services/OccEdgeService';
 import { OccDatumService } from '../services/OccDatumService';
+import { captureEdge } from '../services/StableRef';
 import { getPlacedShape } from '../utils/placedShape';
 
 const EDGE_IDLE   = 0x66ccff;
@@ -28,7 +29,7 @@ const NON_SOLID = new Set(['sketch', 'sketch_wire', 'datum_plane', 'datum_axis',
 export function useCADDatum2EdgePick(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sceneRef:     React.RefObject<THREE.Scene | null>,
-  cameraRef:    React.RefObject<THREE.PerspectiveCamera | null>,
+  cameraRef:    React.RefObject<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>,
 ) {
   const mode = useCADStore((s) => s.interactionMode);
   const linesRef    = useRef<THREE.Line[]>([]);
@@ -63,7 +64,7 @@ export function useCADDatum2EdgePick(
             new THREE.LineBasicMaterial({ color: EDGE_IDLE, depthTest: false, transparent: true, opacity: 0.9 }),
           );
           line.renderOrder = 999;
-          line.userData = { points: e.points, sourceId: id };
+          line.userData = { points: e.points, sourceId: id, edgeIndex: e.index };
           scene.add(line);
           linesRef.current.push(line);
           for (const p of e.points) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); }
@@ -129,13 +130,30 @@ export function useCADDatum2EdgePick(
       const ptsA = firstRef.current.userData.points as [number, number, number][];
       const ptsB = l.userData.points as [number, number, number][];
       const srcA = firstRef.current.userData.sourceId as string | undefined;
+      const srcB = l.userData.sourceId as string | undefined;
+      const idxA = firstRef.current.userData.edgeIndex as number | undefined;
+      const idxB = l.userData.edgeIndex as number | undefined;
       clearHover();
       container.style.cursor = 'default';
       const st = useCADStore.getState();
       st.setInteractionMode('SELECT');
       const wp = OccDatumService.planeThrough2Edges(window.oc, ptsA, ptsB);
       if (!wp) { st.log('Those edges do not define a plane (collinear).', 'warn'); return; }
-      st.createDatumPlane(wp, 'twoEdges', srcA ? [{ kind: 'edge', nodeId: srcA }] : []);
+      // Step 4 — capture an EdgeSig per edge (against its own placed body) so
+      // evaluateDatum re-samples both on the live bodies and the plane FOLLOWS edits;
+      // either edge rejecting → baked `wp` fallback. refs order = A then B.
+      const reg = CADGeometryRegistry.getInstance();
+      const capEdge = (sid?: string, idx?: number) => {
+        if (!sid || idx == null) return null;
+        const placed = getPlacedShape(sid);
+        const sig = placed ? captureEdge(window.oc, placed, idx) : null;
+        if (placed && placed !== reg.getShape(sid)) { try { placed.delete(); } catch {} }
+        return sig;
+      };
+      const refs = [];
+      if (srcA) refs.push({ kind: 'edge', nodeId: srcA, sel: capEdge(srcA, idxA) ?? undefined });
+      if (srcB) refs.push({ kind: 'edge', nodeId: srcB, sel: capEdge(srcB, idxB) ?? undefined });
+      st.createDatumPlane(wp, 'twoEdges', refs);
       st.log('Plane through 2 edges created.', 'success');
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { clearHover(); useCADStore.getState().setInteractionMode('SELECT'); } };
