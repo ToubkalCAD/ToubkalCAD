@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
 import type { Workplane } from '../store/cadStore';
 import { OccSketchService, workplaneBasis, toLocal2D, fromLocal2D } from '../services/OccSketchService';
+import { buildSketchDims } from '../utils/sketchDraftDims';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -148,6 +149,7 @@ export function useCADSketchTool(
   const previewRef     = useRef<THREE.Line | null>(null);
   const committedRef   = useRef<THREE.Line[]>([]);
   const wireVisualsRef = useRef<Map<string, THREE.Line[]>>(new Map());
+  const dimGroupRef    = useRef<THREE.Group | null>(null);   // live draft-dimension lines
 
   // ─── Project mouse onto the active workplane ────────────────────────────────
 
@@ -201,6 +203,63 @@ export function useCADSketchTool(
     s.add(previewRef.current);
   }, [sceneRef, clearPreview]);
 
+  // ─── Live draft dimensions (THREE.Line engineering draft, in the workplane) ───
+
+  const clearDims = useCallback(() => {
+    const s = sceneRef.current;
+    if (s && dimGroupRef.current) {
+      s.remove(dimGroupRef.current);
+      dimGroupRef.current.traverse((o) => {
+        const m = o as THREE.LineSegments;
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) (m.material as THREE.Material).dispose();
+      });
+    }
+    dimGroupRef.current = null;
+  }, [sceneRef]);
+
+  /** Rebuild the dimension-line group for the current tool/step + cursor. */
+  const updateDims = useCallback((priors2D: { x: number; y: number }[], cursor2D: { x: number; y: number }, wp: Workplane) => {
+    const s = sceneRef.current;
+    if (!s) return;
+    clearDims();
+    const { interactionMode: mode, sketchInputStep: step } = useCADStore.getState();
+    const set = buildSketchDims(mode, step, priors2D, cursor2D);
+    if (!set) { window.cadRequestRender?.(); return; }
+
+    const to3 = (p: { x: number; y: number }) => fromLocal2D(p.x, p.y, wp);
+    const solid: THREE.Vector3[] = [];   // dimension lines + arrowheads
+    const witness: THREE.Vector3[] = [];  // extension lines (dashed)
+    for (const dm of set.dims) {
+      for (const [a, b] of dm.dim)     solid.push(to3(a), to3(b));
+      for (const [a, b] of dm.arrows)  solid.push(to3(a), to3(b));
+      for (const [a, b] of dm.witness) witness.push(to3(a), to3(b));
+    }
+
+    const group = new THREE.Group();
+    group.userData.isWorkplaneHelper = true;   // excluded from picks (see useCADSketchTool onDown)
+    if (solid.length) {
+      const ls = new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints(solid),
+        new THREE.LineBasicMaterial({ color: 0x2a3340, transparent: true, opacity: 0.95, depthTest: false }),
+      );
+      ls.renderOrder = 999;   // always on top of geometry + grid
+      group.add(ls);
+    }
+    if (witness.length) {
+      const ls = new THREE.LineSegments(
+        new THREE.BufferGeometry().setFromPoints(witness),
+        new THREE.LineDashedMaterial({ color: 0x6a7785, transparent: true, opacity: 0.7, dashSize: 1.4, gapSize: 1.0, depthTest: false }),
+      );
+      ls.computeLineDistances();
+      ls.renderOrder = 999;
+      group.add(ls);
+    }
+    s.add(group);
+    dimGroupRef.current = group;
+    window.cadRequestRender?.();
+  }, [sceneRef, clearDims]);
+
   const addCommitted = useCallback((pts: THREE.Vector3[]) => {
     const s = sceneRef.current;
     if (!s || pts.length < 2) return;
@@ -210,6 +269,7 @@ export function useCADSketchTool(
 
   const cancelAll = useCallback(() => {
     clearPreview();
+    clearDims();
     const s = sceneRef.current;
     if (s) committedRef.current.forEach((l) => {
       s.remove(l); l.geometry.dispose(); (l.material as THREE.Material).dispose();
@@ -217,7 +277,7 @@ export function useCADSketchTool(
     committedRef.current = [];
     clicksRef.current    = [];
     useCADStore.getState().resetSketchInput();
-  }, [sceneRef, clearPreview]);
+  }, [sceneRef, clearPreview, clearDims]);
 
   // ─── Cancel last registered point (Esc step-back) ────────────────────────────
 
@@ -245,6 +305,7 @@ export function useCADSketchTool(
     wireVisualsRef.current.set(id, lines);
     committedRef.current = [];
     clearPreview();
+    clearDims();
     clicksRef.current = [];
 
     useCADStore.getState().resetSketchInput();
@@ -269,7 +330,7 @@ export function useCADSketchTool(
       'success',
     );
     useCADStore.getState().setInteractionMode('SELECT');
-  }, [clearPreview]);
+  }, [clearPreview, clearDims]);
 
   // ─── Process a single confirmed click (mouse or overlay) ─────────────────────
   // Reads mode/workplane from store at call-time to avoid stale closures.
@@ -500,10 +561,10 @@ export function useCADSketchTool(
     const getWP = () => useCADStore.getState().activeWorkplane;
 
     // Mouse click → project to plane → processClick
-    // IMPORTANT: skip if the click landed on an HTML overlay element
-    // (SketchOverlay inputs/buttons). Without this guard the capture listener
-    // fires BEFORE the button's onClick, producing a spurious extra click at
-    // the raw mouse position — doubling every overlay-submitted point.
+    // IMPORTANT: skip if the click landed on an HTML overlay element marked
+    // [data-sketch-overlay] (the SketchDimensionInput box). Without this guard the
+    // capture listener fires BEFORE the input, producing a spurious extra click at
+    // the raw mouse position — injecting a stray point while the user edits a value.
     const onDown = (e: MouseEvent) => {
       if (e.button !== 0) return;
       if ((e.target as HTMLElement).closest('[data-sketch-overlay]')) return;
@@ -548,6 +609,7 @@ export function useCADSketchTool(
       const mode = useCADStore.getState().interactionMode;
       if (!mode.startsWith('SKETCH_')) {
         clearPreview();
+        clearDims();
         useCADStore.getState().setSketchPreviewPoint(null);
         return;
       }
@@ -608,6 +670,9 @@ export function useCADSketchTool(
           break;
         default: break;
       }
+
+      // Live engineering dimensions for the current tool/step.
+      updateDims(useCADStore.getState().sketchPoints, { x: loc.u, y: loc.v }, wp);
     };
 
     const onKey = (e: KeyboardEvent) => {
@@ -643,8 +708,8 @@ export function useCADSketchTool(
       finishCurve(mode);
     };
 
-    // Hide the cursor annotation when the mouse leaves the viewport
-    const onLeave = () => useCADStore.getState().setSketchPreviewPoint(null);
+    // Hide the cursor annotation + draft dimensions when the mouse leaves
+    const onLeave = () => { useCADStore.getState().setSketchPreviewPoint(null); clearDims(); };
 
     container.addEventListener('mousedown', onDown, true);
     container.addEventListener('dblclick',  onDblClick, true);
@@ -663,6 +728,7 @@ export function useCADSketchTool(
       window.removeEventListener('cad-sketch-inject-point', onInjectPoint);
       window.removeEventListener('cad-sketch-finish-curve', onFinishCurve);
       clearPreview();
+      clearDims();
       useCADStore.getState().setSketchPreviewPoint(null);
     };
   }, [interactionMode, activeWorkplane, sketchPolygonSides,

@@ -43,7 +43,7 @@ import { useCADSketchIntersectPick } from '../hooks/useCADSketchIntersectPick';
 import { CADCameraService }    from '../services/CADCameraService';
 import type { CADCamera, CADViewPreset } from '../services/CADCameraService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
-import { SketchOverlay }       from './SketchOverlay';
+import { SketchDimensionInput } from './SketchDimensionInput';
 import { SketchDimensions }    from './SketchDimensions';
 import { CursorAnnotation }   from './CursorAnnotation';
 
@@ -137,6 +137,33 @@ function disposeGroup(g: THREE.Object3D) {
   });
 }
 
+// Two-tier Fusion-style sketch grid: minor sub-divisions every 1 unit, kept
+// exceptionally faint; major lines every 10 units, a muted light gray. Built in
+// the XZ plane (normal +Y) so the caller's yUp→normal quaternion lays it onto the
+// active workplane. No fill mesh — the active plane reads as fully transparent.
+function buildSketchGrid(): THREE.Group {
+  const HALF = 100, MAJOR = 10;
+  const majorPts: number[] = [], minorPts: number[] = [];
+  for (let v = -HALF; v <= HALF; v += 1) {
+    const arr = v % MAJOR === 0 ? majorPts : minorPts;
+    arr.push(-HALF, 0, v, HALF, 0, v);   // line parallel to X at z=v
+    arr.push(v, 0, -HALF, v, 0, HALF);   // line parallel to Z at x=v
+  }
+  const mk = (pts: number[], opacity: number): THREE.LineSegments => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+    const ls = new THREE.LineSegments(
+      g, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity, depthWrite: false }),
+    );
+    ls.renderOrder = -1;   // draw under geometry so it never z-fights sketch curves
+    return ls;
+  };
+  const group = new THREE.Group();
+  group.add(mk(minorPts, 0.04));   // rgba(0,0,0,0.04)
+  group.add(mk(majorPts, 0.15));   // rgba(0,0,0,0.15)
+  return group;
+}
+
 
 export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const containerRef      = useRef<HTMLDivElement>(null);
@@ -167,13 +194,15 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const updateTransform = useCADStore((s) => s.updateTransform);
   const setTransformLive = useCADStore((s) => s.setTransformLive);
 
-  // While a 3D-op / blend / boolean panel is open, declutter the scene: hide the
-  // translucent datum planes (and other datums). They're reference geometry, not
-  // part of the result, and the planes are the most expensive thing to redraw on
-  // a weak/throttled GPU — so this also speeds up every preview redraw. Fully
-  // reversible: datums return to their own visibility when the panel closes.
+  // Declutter the scene by hiding the datum planes (and other datums) while:
+  //   • a 3D-op / blend / boolean panel is open (reference geometry, and the
+  //     translucent planes are the most expensive thing to redraw on a weak GPU), OR
+  //   • a sketch is active — the two-tier grid is the active plane, and all OTHER
+  //     datum planes should drop away for a clean Fusion-style workspace.
+  // Fully reversible: datums return to their own visibility afterwards.
   const editPanelOpen = useCADStore(
-    (s) => !!(s.op3DPanelReq || s.blendReq || s.booleanReq),
+    (s) => !!(s.op3DPanelReq || s.blendReq || s.booleanReq) ||
+           s.interactionMode.startsWith('SKETCH_') || !!s.sketchSession,
   );
 
   // ─── Sketch tool hook (handles all SKETCH_* modes) ───────────────────────────
@@ -236,7 +265,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── Camera: animate to view normal to workplane when sketch starts ──────────
   useEffect(() => {
-    const isSketch = interactionMode.startsWith('SKETCH_');
+    // Align as soon as the sketch CONTEXT begins — when the session starts (even
+    // before a 2D tool is picked, e.g. "Create Sketch" on a datum) or a tool is
+    // chosen — so the view drops flat onto the plane immediately.
+    const isSketch = interactionMode.startsWith('SKETCH_') || !!sketchSession;
 
     if (isSketch) {
       // Animate to the workplane-normal view ONCE per session. Re-animating on
@@ -349,30 +381,13 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       Math.abs(n.dot(yUp)) > 0.999 ? new THREE.Vector3(0, 0, 1) : yUp, n,
     );
 
-    // Semi-transparent fill plane
-    const planeMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(120, 120),
-      new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.06, side: THREE.DoubleSide, depthWrite: false }),
-    );
-    planeMesh.quaternion.copy(quat);
-    planeMesh.position.copy(o);
-
-    // Sketch grid overlay
-    const grid = new THREE.GridHelper(120, 60, 0x2255aa, 0x1a3d7a);
-    grid.quaternion.copy(quat);
-    grid.position.copy(o);
-    (grid.material as THREE.Material | THREE.Material[]);
-    if (Array.isArray(grid.material)) {
-      grid.material.forEach((m) => { (m as THREE.LineBasicMaterial).opacity = 0.55; (m as THREE.LineBasicMaterial).transparent = true; });
-    }
-
-    // Plane normal indicator arrow
-    const arrowDir = n.clone();
-    const arrowOrigin = o.clone();
-    const arrow = new THREE.ArrowHelper(arrowDir, arrowOrigin, 8, 0x4488ff, 2, 1.2);
-
-    const group = new THREE.Group();
-    group.add(planeMesh, grid, arrow);
+    // Minimalist workspace: a clean two-tier grid only — no fill mesh (the active
+    // plane reads as fully transparent) and no normal arrow. Drawing projects onto
+    // a math plane, and picks exclude isWorkplaneHelper, so there's nothing to pick
+    // here either.
+    const group = buildSketchGrid();
+    group.quaternion.copy(quat);
+    group.position.copy(o);
     group.userData.isWorkplaneHelper = true;
     scene.add(group);
     workplaneGridRef.current = group;
@@ -1079,7 +1094,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   }, [interactionMode, projectToWorkplane, clearMeasureObjs]);
 
   // Session idle hint — shown only when in a session but no sketch tool active
-  // (the SketchOverlay handles hints while a tool is active)
+  // (the SketchDimensionInput shows the live dimension while a tool is active)
   const sessionIdleHint = !interactionMode.startsWith('SKETCH_') && sketchSession
     ? `${sketchSession.name} · Pick a sketch tool or click Quit Sketch ✓`
     : null;
@@ -1088,8 +1103,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative' }}>
       <CADViewportGizmo />
 
-      {/* Sketch coordinate input overlay — shown while a tool is drawing */}
-      <SketchOverlay />
+      {/* Viewport-embedded driving-dimension input — shown while a tool is drawing */}
+      <SketchDimensionInput />
 
       {/* Live cursor dimension annotation — follows the mouse */}
       <CursorAnnotation />
