@@ -46,6 +46,27 @@ export function buildSketchProfileWire(oc: any, sketchId: string): any | null {
   const regions = findRegions(ents);
   if (!regions.length) return null;
   const rg = regions.reduce((a, b) => (b.area > a.area ? b : a)); // largest enclosed region
+
+  // Prefer the ANALYTIC registered entity wire when the region is a single closed
+  // entity. An ellipse/spline is stored as a 72-point sampled polyline
+  // (sketchGeom), so rebuilding the region from it yields a ~72-EDGE wire. Lofting
+  // that against a 1-edge circle forces BRepOffsetAPI_ThruSections.CheckCompatibility
+  // into reconciling 1↔72 edges, which is catastrophically slow (~24 s measured for
+  // circle+2 ellipses; scripts headless). The registered entity wire is the clean
+  // 1-edge analytic curve, so copy it (the caller owns/frees this temp) — identical
+  // geometry, no edge-count blow-up → the same loft drops to ~0.5 s.
+  if (rg.members.length === 1) {
+    const w = CADGeometryRegistry.getInstance().getShape(rg.members[0].id);
+    if (w && OccSketchService.wireMakesFace(oc, w)) {
+      try {
+        const cp  = new oc.BRepBuilderAPI_Copy_2(w, true, false);
+        const out = oc.TopoDS.Wire_1(cp.Shape());
+        cp.delete();
+        return out;
+      } catch { /* fall through to the region rebuild */ }
+    }
+  }
+
   const geomOf = (id: string) => useCADStore.getState().nodes[id]?.params?.sketchGeom;
   return OccSketchService.buildRegionProfileWire(oc, rg, geomOf, wp).wire;
 }

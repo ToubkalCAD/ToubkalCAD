@@ -21,10 +21,22 @@ import { useCADStore, InteractionMode } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { OccSketchService, fromLocal2D, toLocal2D } from '../services/OccSketchService';
 import {
-  Entity2D, Pt, Line2D, Arc2D, paramOnLine, pointAt, splitLine, trimLine, extendLine,
+  Entity2D, Pt, Line2D, Arc2D, EllipseArc2D, paramOnLine, pointAt, splitLine, trimLine, extendLine,
   splitCircle, trimCircle, splitArc, trimArc, extendArc,
+  splitEllipse, trimEllipse, splitEllipseArc, trimEllipseArc, extendEllipseArc, fitAxisAlignedEllipse,
   lineCutParams, circleCutAngles, arcCutAngles,
 } from '../services/SketchEdit2D';
+
+const TWO_PI = 2 * Math.PI;
+/** Eccentric angle of a 2D point on the axis-aligned ellipse (c,rx,ry). */
+const ellipseParam2D = (c: Pt, rx: number, ry: number, p: Pt): number =>
+  Math.atan2((p[1] - c[1]) / ry, (p[0] - c[0]) / rx);
+/** Recover {c,rx,ry} from a polyline-ellipse target (descriptor first, else fit). */
+function ellipseOfGeom(g: any): { c: Pt; rx: number; ry: number } | null {
+  if (g?.ellipse && Array.isArray(g.ellipse.c)) return g.ellipse;
+  if (g?.kind === 'polyline' && Array.isArray(g.pts)) return fitAxisAlignedEllipse(g.pts);
+  return null;
+}
 
 // Click-driven edits (one target per click).
 const CLICK_EDIT_MODES = new Set<InteractionMode>(['EDIT_TRIM', 'EDIT_EXTEND', 'EDIT_SPLIT']);
@@ -52,6 +64,15 @@ const toEntity2D = (geom: any): Entity2D | null => {
   if (geom?.kind === 'line')   return { kind: 'line',   a: geom.a, b: geom.b };
   if (geom?.kind === 'circle') return { kind: 'circle', c: geom.c, r: geom.r };
   if (geom?.kind === 'arc')    return { kind: 'arc',    c: geom.c, r: geom.r, a1: geom.a1, a2: geom.a2 };
+  if (geom?.kind === 'ellipse_arc') {   // sample to a polyline so it acts as a cutter
+    const pts: Pt[] = [];
+    const SEGS = 48;
+    for (let i = 0; i <= SEGS; i++) {
+      const a = geom.a1 + ((geom.a2 - geom.a1) * i) / SEGS;
+      pts.push([geom.c[0] + geom.rx * Math.cos(a), geom.c[1] + geom.ry * Math.sin(a)]);
+    }
+    return { kind: 'polyline', pts };
+  }
   if (geom?.kind === 'polyline' && Array.isArray(geom.pts)) return { kind: 'polyline', pts: geom.pts };
   return null;
 };
@@ -230,8 +251,8 @@ function applyEdit(mode: InteractionMode, hit: THREE.Intersection) {
 
   const targetId = (hit.object.userData.cadNodeId as string);
   const tg = st.nodes[targetId]?.params?.sketchGeom;
-  if (!tg || (tg.kind !== 'line' && tg.kind !== 'circle' && tg.kind !== 'arc' && tg.kind !== 'polyline')) {
-    st.log('Trim/Extend/Split works on line, circle, arc and rectangle/polygon entities.', 'warn');
+  if (!tg || (tg.kind !== 'line' && tg.kind !== 'circle' && tg.kind !== 'arc' && tg.kind !== 'polyline' && tg.kind !== 'ellipse_arc')) {
+    st.log('Trim/Extend/Split works on line, circle, arc, ellipse and rectangle/polygon entities.', 'warn');
     return;
   }
 
@@ -263,6 +284,42 @@ function applyEdit(mode: InteractionMode, hit: THREE.Intersection) {
     }
     deleteWireNode(targetId);
     newIds = results.map((seg) => createLineNode(oc, seg, wp, sketchId));
+  } else if (tg.kind === 'ellipse_arc') {
+    // Already-trimmed ellipse arc → edit in eccentric-angle space, stays an arc.
+    const arc: EllipseArc2D = { c: tg.c, rx: tg.rx, ry: tg.ry, a1: tg.a1, a2: tg.a2 };
+    const clickParam = ellipseParam2D(arc.c, arc.rx, arc.ry, [loc.u, loc.v]);
+    let arcs: EllipseArc2D[] = [];
+    if (mode === 'EDIT_SPLIT') {
+      arcs = splitEllipseArc(arc, cutters);
+      if (arcs.length <= 1) { st.log('No intersections to split this ellipse arc at.', 'warn'); return; }
+    } else if (mode === 'EDIT_TRIM') {
+      arcs = trimEllipseArc(arc, cutters, clickParam);
+    } else {
+      const rel = ((clickParam - arc.a1) % TWO_PI + TWO_PI) % TWO_PI;
+      const ext = extendEllipseArc(arc, cutters, rel < (arc.a2 - arc.a1) / 2 ? 'a' : 'b');
+      if (!ext) { st.log('Nothing ahead to extend this ellipse arc to.', 'warn'); return; }
+      arcs = [ext];
+    }
+    deleteWireNode(targetId);
+    newIds = arcs.map((a) => createEllipseArcNode(oc, a, wp, sketchId));
+  } else if (tg.kind === 'polyline' && ellipseOfGeom(tg)) {
+    // FULL ellipse (analytic, stored as a 72-pt polyline) → trim/split in eccentric-
+    // angle space so the result is a clean ellipse ARC, not 72 line fragments.
+    const e = ellipseOfGeom(tg)!;
+    const clickParam = ellipseParam2D(e.c, e.rx, e.ry, [loc.u, loc.v]);
+    let arcs: EllipseArc2D[] = [];
+    if (mode === 'EDIT_SPLIT') {
+      arcs = splitEllipse(e, cutters);
+      if (!arcs.length) { st.log('Need ≥2 intersections to split this ellipse.', 'warn'); return; }
+    } else if (mode === 'EDIT_TRIM') {
+      const t = trimEllipse(e, cutters, clickParam);
+      if (!t) { st.log('Need ≥2 intersections to trim this ellipse.', 'warn'); return; }
+      arcs = t;
+    } else {
+      st.log('Extend does not apply to a full ellipse.', 'warn'); return;
+    }
+    deleteWireNode(targetId);
+    newIds = arcs.map((a) => createEllipseArcNode(oc, a, wp, sketchId));
   } else if (tg.kind === 'polyline') {
     // Rectangle / polygon / sampled curve: a chain of straight segments. Edit the
     // segment nearest the click, then explode the whole chain into line entities
@@ -466,6 +523,33 @@ function createArcNode(oc: any, arc: Arc2D, wp: any, sketchId: string | null): s
   for (let i = 0; i <= SEGS; i++) {
     const a = arc.a1 + ((arc.a2 - arc.a1) * i) / SEGS;
     const p = fromLocal2D(arc.c[0] + arc.r * Math.cos(a), arc.c[1] + arc.r * Math.sin(a), wp);
+    pts.push([p.x, p.y, p.z]);
+  }
+  window.dispatchEvent(new CustomEvent('cad-sketch-add-visual', { detail: { id, pts } }));
+  return id;
+}
+
+function createEllipseArcNode(oc: any, arc: EllipseArc2D, wp: any, sketchId: string | null): string {
+  // One analytic gp_Elips arc edge (buildEntityWire handles 'ellipse_arc').
+  const geom = { kind: 'ellipse_arc', c: arc.c, rx: arc.rx, ry: arc.ry, a1: arc.a1, a2: arc.a2 };
+  const wire = OccSketchService.buildEntityWire(oc, geom, wp);
+
+  const id = crypto.randomUUID();
+  CADGeometryRegistry.getInstance().registerShape(id, wire);
+  useCADStore.getState().addNode({
+    id, name: 'Ellipse arc', type: 'sketch_wire',
+    visible: true, locked: false, parentId: sketchId, notes: '',
+    transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
+    material:  { color: 0x003388, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
+    params: { workplane: wp, sketchGeom: geom },
+  });
+
+  // Polyline visual sampled along the ellipse-arc span.
+  const SEGS = 64;
+  const pts: number[][] = [];
+  for (let i = 0; i <= SEGS; i++) {
+    const a = arc.a1 + ((arc.a2 - arc.a1) * i) / SEGS;
+    const p = fromLocal2D(arc.c[0] + arc.rx * Math.cos(a), arc.c[1] + arc.ry * Math.sin(a), wp);
     pts.push([p.x, p.y, p.z]);
   }
   window.dispatchEvent(new CustomEvent('cad-sketch-add-visual', { detail: { id, pts } }));

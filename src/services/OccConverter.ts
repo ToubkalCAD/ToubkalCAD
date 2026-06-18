@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { tessRelTol } from '../utils/renderQuality';
 
 /**
  * ToubkalCAD – OccConverter  (opencascade.js@beta / OCC 7.8 API)
@@ -44,6 +45,7 @@ export class OccConverter {
     oc: any,
     shape: any,
     deflection = 0.1,
+    relTol?: number,
   ): THREE.BufferGeometry {
     // ── Triangulate ──────────────────────────────────────────────────────────
     // Scale the chord deflection to the shape's overall size so large CURVED
@@ -52,6 +54,12 @@ export class OccConverter {
     // FLOOR, so small parts keep their fine absolute tolerance and planar shapes
     // (extrudes) are unaffected (few triangles at any deflection). Measured: a
     // r≈30 revolve drops ~4.3 s → ~0.8 s of tessellation (scripts/test-revolve-perf).
+    //
+    // The relative factor is tier-adaptive (renderQuality): 0.008 on capable GPUs
+    // (unchanged), coarser on weak/throttled ones so tessellation + software/
+    // Nouveau rendering stay responsive. Callers may pass a larger `relTol` for a
+    // throwaway preview mesh (refined back to the committed quality on Apply).
+    const rel = relTol ?? tessRelTol();
     let effDefl = deflection;
     try {
       const bb = new oc.Bnd_Box_1();
@@ -60,7 +68,7 @@ export class OccConverter {
         const lo = bb.CornerMin(), hi = bb.CornerMax();
         const diag = Math.hypot(hi.X() - lo.X(), hi.Y() - lo.Y(), hi.Z() - lo.Z());
         lo.delete(); hi.delete();
-        effDefl = Math.max(deflection, diag * 0.008);   // ≈0.8 % chord error, size-relative
+        effDefl = Math.max(deflection, diag * rel);   // size-relative chord error
       }
       bb.delete();
     } catch { /* bbox unavailable → fall back to the passed absolute deflection */ }

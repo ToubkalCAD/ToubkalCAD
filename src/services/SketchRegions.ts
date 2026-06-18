@@ -20,6 +20,7 @@ export type RegionEntity =
   | { id: string; kind: 'line';     a: Pt; b: Pt }
   | { id: string; kind: 'arc';      c: Pt; r: number; a1: number; a2: number }
   | { id: string; kind: 'circle';   c: Pt; r: number }
+  | { id: string; kind: 'ellipse_arc'; c: Pt; rx: number; ry: number; a1: number; a2: number }
   | { id: string; kind: 'polyline'; pts: Pt[] };
 
 export interface RegionMember { id: string; reversed: boolean }
@@ -30,6 +31,7 @@ export function toRegionEntity(id: string, g: any): RegionEntity | null {
   if (g?.kind === 'line')   return { id, kind: 'line',   a: g.a, b: g.b };
   if (g?.kind === 'arc')    return { id, kind: 'arc',    c: g.c, r: g.r, a1: g.a1, a2: g.a2 };
   if (g?.kind === 'circle') return { id, kind: 'circle', c: g.c, r: g.r };
+  if (g?.kind === 'ellipse_arc') return { id, kind: 'ellipse_arc', c: g.c, rx: g.rx, ry: g.ry, a1: g.a1, a2: g.a2 };
   if (g?.kind === 'polyline' && Array.isArray(g.pts)) return { id, kind: 'polyline', pts: g.pts };
   return null;
 }
@@ -39,10 +41,17 @@ const MIN_AREA = 1e-4;   // ignore slivers / degenerate faces
 const TWO_PI   = 2 * Math.PI;
 
 const arcPt = (c: Pt, r: number, a: number): Pt => [c[0] + r * Math.cos(a), c[1] + r * Math.sin(a)];
+const ellArcPt = (c: Pt, rx: number, ry: number, a: number): Pt => [c[0] + rx * Math.cos(a), c[1] + ry * Math.sin(a)];
 
 function sampleArc(c: Pt, r: number, a1: number, a2: number, segs = 32): Pt[] {
   const out: Pt[] = [];
   for (let i = 0; i <= segs; i++) out.push(arcPt(c, r, a1 + ((a2 - a1) * i) / segs));
+  return out;
+}
+
+function sampleEllipseArc(c: Pt, rx: number, ry: number, a1: number, a2: number, segs = 32): Pt[] {
+  const out: Pt[] = [];
+  for (let i = 0; i <= segs; i++) out.push(ellArcPt(c, rx, ry, a1 + ((a2 - a1) * i) / segs));
   return out;
 }
 
@@ -67,6 +76,7 @@ function isClosedPoly(e: RegionEntity): boolean {
 function endpoints(e: RegionEntity): [Pt, Pt] | null {
   if (e.kind === 'line') return [e.a, e.b];
   if (e.kind === 'arc')  return [arcPt(e.c, e.r, e.a1), arcPt(e.c, e.r, e.a2)];
+  if (e.kind === 'ellipse_arc') return [ellArcPt(e.c, e.rx, e.ry, e.a1), ellArcPt(e.c, e.rx, e.ry, e.a2)];
   if (e.kind === 'polyline') return e.pts.length >= 2 ? [e.pts[0], last(e.pts)] : null;
   return null; // circle
 }
@@ -74,10 +84,11 @@ function endpoints(e: RegionEntity): [Pt, Pt] | null {
 /** Ordered sample points of a member, from its start endpoint to its end. */
 function memberPts(e: RegionEntity, reversed: boolean): Pt[] {
   let pts: Pt[];
-  if (e.kind === 'line')          pts = [e.a, e.b];
-  else if (e.kind === 'polyline') pts = e.pts;
-  else if (e.kind === 'arc')      pts = sampleArc(e.c, e.r, e.a1, e.a2);
-  else                            pts = sampleArc(e.c, e.r, 0, TWO_PI); // circle
+  if (e.kind === 'line')             pts = [e.a, e.b];
+  else if (e.kind === 'polyline')    pts = e.pts;
+  else if (e.kind === 'arc')         pts = sampleArc(e.c, e.r, e.a1, e.a2);
+  else if (e.kind === 'ellipse_arc') pts = sampleEllipseArc(e.c, e.rx, e.ry, e.a1, e.a2);
+  else                               pts = sampleArc(e.c, e.r, 0, TWO_PI); // circle
   return reversed ? pts.slice().reverse() : pts;
 }
 
@@ -98,6 +109,12 @@ function leaveAngle(e: RegionEntity, fromStart: boolean): number {
     // forward = increasing angle (a1→a2): tangent at a1 is a1+π/2;
     // backward from a2 (decreasing angle): tangent is a2−π/2.
     return fromStart ? e.a1 + Math.PI / 2 : e.a2 - Math.PI / 2;
+  }
+  if (e.kind === 'ellipse_arc') {
+    // tangent of (rx cos t, ry sin t) is (−rx sin t, ry cos t); backward negates it.
+    return fromStart
+      ? Math.atan2(e.ry * Math.cos(e.a1), -e.rx * Math.sin(e.a1))
+      : Math.atan2(-e.ry * Math.cos(e.a2), e.rx * Math.sin(e.a2));
   }
   return 0;
 }

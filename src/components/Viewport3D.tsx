@@ -148,6 +148,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const transformRef      = useRef<TransformControls | null>(null);
   const workplaneGridRef  = useRef<THREE.Object3D | null>(null);
   const datumGroupsRef    = useRef<Map<string, THREE.Group>>(new Map()); // datum_plane visuals by node id
+  const hideDatumsRef     = useRef<boolean>(false);            // true while a 3D-op/blend/boolean panel is open
   const restoreCameraRef  = useRef<(() => void) | null>(null); // stored restore fn
 
   // Measurement — track scene objects for cleanup
@@ -165,6 +166,15 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const nodes           = useCADStore((s) => s.nodes);
   const updateTransform = useCADStore((s) => s.updateTransform);
   const setTransformLive = useCADStore((s) => s.setTransformLive);
+
+  // While a 3D-op / blend / boolean panel is open, declutter the scene: hide the
+  // translucent datum planes (and other datums). They're reference geometry, not
+  // part of the result, and the planes are the most expensive thing to redraw on
+  // a weak/throttled GPU — so this also speeds up every preview redraw. Fully
+  // reversible: datums return to their own visibility when the panel closes.
+  const editPanelOpen = useCADStore(
+    (s) => !!(s.op3DPanelReq || s.blendReq || s.booleanReq),
+  );
 
   // ─── Sketch tool hook (handles all SKETCH_* modes) ───────────────────────────
   useCADSketchTool(containerRef, sceneRef, cameraRef);
@@ -400,13 +410,26 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       let g = groups.get(id);
       if (g && g.userData.datumSig !== sig) { scene.remove(g); disposeGroup(g); groups.delete(id); g = undefined; }
       if (!g) { g = make(); g.userData.datumSig = sig; scene.add(g); groups.set(id, g); }
-      g.visible = node.visible;
+      // Honour the edit-panel declutter (below) even as nodes change mid-edit
+      // (e.g. a live preview adds a node and re-runs this sync).
+      g.visible = node.visible && !hideDatumsRef.current;
     }
 
     for (const [id, g] of groups) {
       if (!seen.has(id)) { scene.remove(g); disposeGroup(g); groups.delete(id); }
     }
   }, [nodes, sceneRef]);
+
+  // Toggle the datum declutter when an edit panel opens/closes.
+  useEffect(() => {
+    hideDatumsRef.current = editPanelOpen;
+    const live = useCADStore.getState().nodes;
+    for (const [id, g] of datumGroupsRef.current) {
+      const visible = live[id]?.visible ?? true;
+      g.visible = visible && !editPanelOpen;
+    }
+    window.cadRequestRender?.();
+  }, [editPanelOpen]);
 
   // ─── Hotkeys ────────────────────────────────────────────────────────────────
   useCADGizmoHotkeys({

@@ -25,6 +25,7 @@ import { OccRevolutionService } from '../services/OccRevolutionService';
 import { OccLoftService }       from '../services/OccLoftService';
 import { OccSweepService }      from '../services/OccSweepService';
 import { OccFilletService }     from '../services/OccFilletService';
+import { isLowTier }            from '../utils/renderQuality';
 import { useDragPanel }         from '../hooks/useDragPanel';
 
 // ─── Public types ─────────────────────────────────────────────────────────────
@@ -105,6 +106,11 @@ export function createAndEditOp(op: Op3DType, targetIds: string[]): void {
     show3DOpPanel(op, targetIds, id, true);
   } catch (err: any) {
     store.log(`${OP_TITLE[op]} failed: ${err?.message ?? String(err)}`, 'error');
+    // Don't leave the user with nothing (menu closed, no panel) — open the panel
+    // in CREATE mode so the tool actually activates. The live preview re-runs the
+    // build and surfaces the error inline, and the user can adjust settings
+    // (e.g. switch Loft to Ruled, or reorder profiles) and Apply when it succeeds.
+    show3DOpPanel(op, targetIds);
   }
 }
 
@@ -459,7 +465,9 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
 
     try {
       const shape = computeShape(liveReq.op, liveReq.targetIds, liveParams, liveTarget ?? undefined, liveFacePoint ?? undefined, liveDatum ?? undefined);
-      const geo   = OccConverter.shapeToThreeGeometry(window.oc, shape, 0.2);
+      // Live preview is throwaway — on a weak GPU build it extra-coarse so dragging
+      // a slider stays responsive; Apply rebuilds it at the committed quality.
+      const geo   = OccConverter.shapeToThreeGeometry(window.oc, shape, 0.2, isLowTier() ? 0.04 : undefined);
       const mat   = new THREE.MeshStandardMaterial({ color:0x4488ee, opacity:0.70, transparent:true, roughness:0.25, metalness:0.15, side:THREE.DoubleSide });
       const mesh  = new THREE.Mesh(geo, mat);
       mesh.castShadow = mesh.receiveShadow = true;

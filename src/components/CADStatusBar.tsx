@@ -7,6 +7,7 @@ import '../types/index';
 import React, { useEffect, useState, useRef } from 'react';
 import { useCADStore } from '../store/cadStore';
 import type { InteractionMode } from '../store/cadStore';
+import { reportFps } from '../utils/renderQuality';
 import { Icon, IconName } from './Icon';
 
 const MODE_ICON: Partial<Record<InteractionMode, IconName>> = {
@@ -55,6 +56,7 @@ export const CADStatusBar: React.FC = () => {
       const now = performance.now();
       if (now - fpsRef.current.last >= 1000) {
         setFps(fpsRef.current.frames);
+        reportFps(fpsRef.current.frames);   // adaptive-quality safety net (renderQuality)
         fpsRef.current.frames = 0; fpsRef.current.last = now;
       }
       rafId = requestAnimationFrame(tick);

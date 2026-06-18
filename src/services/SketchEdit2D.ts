@@ -21,6 +21,10 @@ export interface Line2D { a: Pt; b: Pt }
 export interface Circle2D { c: Pt; r: number }
 /** Arc parameterised CCW from a1 to a2 (a2 > a1, span < 2π). */
 export interface Arc2D { c: Pt; r: number; a1: number; a2: number }
+/** Axis-aligned ellipse (sketch-local frame): P(t)=(cu+rx·cos t, cv+ry·sin t). */
+export interface Ellipse2D { c: Pt; rx: number; ry: number }
+/** Ellipse arc, parameterised by ECCENTRIC angle t (a2 > a1). */
+export interface EllipseArc2D { c: Pt; rx: number; ry: number; a1: number; a2: number }
 
 const EPS       = 1e-9;   // geometric zero
 const PARAM_EPS = 1e-4;   // param-space tolerance (endpoint / dedupe)
@@ -308,6 +312,173 @@ export function trimArc(arc: Arc2D, cutters: Entity2D[], clickAngle: number): Ar
   if (lo - arc.a1 > PARAM_EPS) out.push({ c: arc.c, r: arc.r, a1: arc.a1, a2: lo });
   if (arc.a2 - hi > PARAM_EPS) out.push({ c: arc.c, r: arc.r, a1: hi, a2: arc.a2 });
   return out;
+}
+
+/**
+ * Recover an axis-aligned ellipse (sketch-local) from a closed polyline's points.
+ * Returns {c,rx,ry} when the points actually lie on the implied ellipse (the
+ * ellipse tool emits a 72-point sample, major along uAxis), else null. Lets the
+ * trim editor treat a polyline ellipse analytically; freeform polylines fail the
+ * residual check and stay segment-based.
+ */
+export function fitAxisAlignedEllipse(pts: Pt[]): { c: Pt; rx: number; ry: number } | null {
+  if (!Array.isArray(pts) || pts.length < 8) return null;
+  let minu = Infinity, maxu = -Infinity, minv = Infinity, maxv = -Infinity;
+  for (const p of pts) {
+    if (!p || p.length < 2) return null;
+    if (p[0] < minu) minu = p[0]; if (p[0] > maxu) maxu = p[0];
+    if (p[1] < minv) minv = p[1]; if (p[1] > maxv) maxv = p[1];
+  }
+  const cu = (minu + maxu) / 2, cv = (minv + maxv) / 2;
+  const rx = (maxu - minu) / 2, ry = (maxv - minv) / 2;
+  if (rx < 1e-6 || ry < 1e-6) return null;
+  let maxDev = 0;
+  for (const p of pts) {
+    const du = (p[0] - cu) / rx, dv = (p[1] - cv) / ry;
+    maxDev = Math.max(maxDev, Math.abs(du * du + dv * dv - 1));
+  }
+  return maxDev <= 0.02 ? { c: [cu, cv], rx, ry } : null;
+}
+
+// ── Ellipse / ellipse-arc target ops ──────────────────────────────────────────
+// Mirrors the circle/arc ops but in ECCENTRIC-ANGLE space of an axis-aligned
+// ellipse, so trimming/splitting an ellipse yields ellipse ARCS instead of
+// exploding it into the 72 line segments of its polyline approximation.
+
+/** Eccentric angle of point p on the ellipse (c,rx,ry). */
+const ellipseParam = (c: Pt, rx: number, ry: number, p: Pt): number =>
+  Math.atan2((p[1] - c[1]) / ry, (p[0] - c[0]) / rx);
+
+/** Crossings of segment a→b with the ellipse — map to the unit circle and solve. */
+function segEllipsePoints(c: Pt, rx: number, ry: number, a: Pt, b: Pt): Pt[] {
+  const ax = (a[0] - c[0]) / rx, ay = (a[1] - c[1]) / ry;
+  const bx = (b[0] - c[0]) / rx, by = (b[1] - c[1]) / ry;
+  const dx = bx - ax, dy = by - ay;
+  const A = dx * dx + dy * dy;
+  if (A < EPS) return [];
+  const B = 2 * (ax * dx + ay * dy);
+  const C = ax * ax + ay * ay - 1;
+  const disc = B * B - 4 * A * C;
+  if (disc < 0) return [];
+  const sd = Math.sqrt(disc);
+  const out: Pt[] = [];
+  for (const s of [(-B - sd) / (2 * A), (-B + sd) / (2 * A)]) {
+    if (s >= -PARAM_EPS && s <= 1 + PARAM_EPS) out.push([c[0] + rx * (ax + s * dx), c[1] + ry * (ay + s * dy)]);
+  }
+  return out;
+}
+
+/** A cutter's drawn extent as straight chords (curves are sampled). */
+function cutterSegments(e: Entity2D): [Pt, Pt][] {
+  if (e.kind === 'line') return [[e.a, e.b]];
+  if (e.kind === 'polyline') {
+    const segs: [Pt, Pt][] = [];
+    for (let i = 0; i < e.pts.length - 1; i++) segs.push([e.pts[i], e.pts[i + 1]]);
+    return segs;
+  }
+  const a1 = e.kind === 'arc' ? e.a1 : 0;
+  const a2 = e.kind === 'arc' ? e.a2 : TWO_PI;
+  const N = 64;
+  const cp = (a: number): Pt => [e.c[0] + e.r * Math.cos(a), e.c[1] + e.r * Math.sin(a)];
+  const segs: [Pt, Pt][] = [];
+  for (let i = 0; i < N; i++) segs.push([cp(a1 + ((a2 - a1) * i) / N), cp(a1 + ((a2 - a1) * (i + 1)) / N)]);
+  return segs;
+}
+
+/** Crossing points of all cutters with the ellipse (c,rx,ry). */
+function cutterPointsOnEllipse(c: Pt, rx: number, ry: number, cutters: Entity2D[]): Pt[] {
+  const pts: Pt[] = [];
+  for (const e of cutters) for (const [a, b] of cutterSegments(e)) pts.push(...segEllipsePoints(c, rx, ry, a, b));
+  return pts;
+}
+
+/** Sorted, de-duplicated eccentric cut angles on the full ellipse, in [0,2π). */
+export function ellipseCutAngles(c: Pt, rx: number, ry: number, cutters: Entity2D[]): number[] {
+  const raw = cutterPointsOnEllipse(c, rx, ry, cutters).map((p) => norm2pi(ellipseParam(c, rx, ry, p))).sort((a, b) => a - b);
+  const out: number[] = [];
+  for (const a of raw) if (!out.length || a - out[out.length - 1] > PARAM_EPS) out.push(a);
+  if (out.length >= 2 && TWO_PI - out[out.length - 1] + out[0] < PARAM_EPS) out.pop();
+  return out;
+}
+
+/** Break the ellipse at every cut → ellipse arcs (needs ≥2 cuts, else []). */
+export function splitEllipse(e: Ellipse2D, cutters: Entity2D[]): EllipseArc2D[] {
+  const angs = ellipseCutAngles(e.c, e.rx, e.ry, cutters);
+  if (angs.length < 2) return [];
+  const arcs: EllipseArc2D[] = [];
+  for (let i = 0; i < angs.length; i++) {
+    const a1 = angs[i], a2 = i + 1 < angs.length ? angs[i + 1] : angs[0] + TWO_PI;
+    if (a2 - a1 > PARAM_EPS) arcs.push({ c: e.c, rx: e.rx, ry: e.ry, a1, a2 });
+  }
+  return arcs;
+}
+
+/** Trim an ellipse: drop the eccentric span containing the click, keep the rest as one arc. */
+export function trimEllipse(e: Ellipse2D, cutters: Entity2D[], clickParam: number): EllipseArc2D[] | null {
+  const angs = ellipseCutAngles(e.c, e.rx, e.ry, cutters);
+  if (angs.length < 2) return null;
+  const ca = norm2pi(clickParam);
+  let lo = angs[angs.length - 1], hi = angs[0] + TWO_PI;        // default: wrap gap
+  for (let i = 0; i < angs.length - 1; i++) {
+    if (ca >= angs[i] - PARAM_EPS && ca <= angs[i + 1] + PARAM_EPS) { lo = angs[i]; hi = angs[i + 1]; break; }
+  }
+  let a1 = hi, a2 = lo + TWO_PI;                                 // survivor = complement
+  while (a1 >= TWO_PI) { a1 -= TWO_PI; a2 -= TWO_PI; }
+  return [{ c: e.c, rx: e.rx, ry: e.ry, a1, a2 }];
+}
+
+/** Interior cut angles of an ellipse arc (eccentric, absolute, sorted). */
+function ellipseArcCutAngles(arc: EllipseArc2D, cutters: Entity2D[]): number[] {
+  const span = arc.a2 - arc.a1;
+  const abs = cutterPointsOnEllipse(arc.c, arc.rx, arc.ry, cutters)
+    .map((p) => arc.a1 + norm2pi(ellipseParam(arc.c, arc.rx, arc.ry, p) - arc.a1))
+    .filter((a) => a - arc.a1 > PARAM_EPS && a < arc.a2 - PARAM_EPS && a - arc.a1 < span)
+    .sort((a, b) => a - b);
+  const out: number[] = [];
+  for (const a of abs) if (!out.length || a - out[out.length - 1] > PARAM_EPS) out.push(a);
+  return out;
+}
+
+/** Break an ellipse arc at every interior cut → sub-arcs (≥1). */
+export function splitEllipseArc(arc: EllipseArc2D, cutters: Entity2D[]): EllipseArc2D[] {
+  const cuts = ellipseArcCutAngles(arc, cutters);
+  if (!cuts.length) return [arc];
+  const bounds = [arc.a1, ...cuts, arc.a2];
+  const out: EllipseArc2D[] = [];
+  for (let i = 0; i < bounds.length - 1; i++) {
+    if (bounds[i + 1] - bounds[i] > PARAM_EPS) out.push({ c: arc.c, rx: arc.rx, ry: arc.ry, a1: bounds[i], a2: bounds[i + 1] });
+  }
+  return out;
+}
+
+/** Trim an ellipse arc: drop the clicked sub-span bounded by nearest cuts / ends. */
+export function trimEllipseArc(arc: EllipseArc2D, cutters: Entity2D[], clickParam: number): EllipseArc2D[] {
+  const cuts = ellipseArcCutAngles(arc, cutters);
+  const bounds = [arc.a1, ...cuts, arc.a2];
+  const ca = arc.a1 + Math.max(0, Math.min(arc.a2 - arc.a1, norm2pi(clickParam - arc.a1)));
+  let lo = arc.a1, hi = arc.a2;
+  for (let i = 0; i < bounds.length - 1; i++) {
+    if (ca >= bounds[i] - PARAM_EPS && ca <= bounds[i + 1] + PARAM_EPS) { lo = bounds[i]; hi = bounds[i + 1]; break; }
+  }
+  const out: EllipseArc2D[] = [];
+  if (lo - arc.a1 > PARAM_EPS) out.push({ c: arc.c, rx: arc.rx, ry: arc.ry, a1: arc.a1, a2: lo });
+  if (arc.a2 - hi > PARAM_EPS) out.push({ c: arc.c, rx: arc.rx, ry: arc.ry, a1: hi, a2: arc.a2 });
+  return out;
+}
+
+/** Extend an ellipse arc end to the next cut ('a'=start back, 'b'=end forward). */
+export function extendEllipseArc(arc: EllipseArc2D, cutters: Entity2D[], end: 'a' | 'b'): EllipseArc2D | null {
+  const pts = cutterPointsOnEllipse(arc.c, arc.rx, arc.ry, cutters);
+  if (end === 'b') {
+    const ahead = pts.map((p) => arc.a2 + norm2pi(ellipseParam(arc.c, arc.rx, arc.ry, p) - arc.a2))
+      .filter((a) => a - arc.a2 > PARAM_EPS && a - arc.a2 < TWO_PI - PARAM_EPS).sort((x, y) => x - y);
+    if (!ahead.length) return null;
+    return { c: arc.c, rx: arc.rx, ry: arc.ry, a1: arc.a1, a2: ahead[0] };
+  }
+  const ahead = pts.map((p) => arc.a1 - norm2pi(arc.a1 - ellipseParam(arc.c, arc.rx, arc.ry, p)))
+    .filter((a) => arc.a1 - a > PARAM_EPS && arc.a1 - a < TWO_PI - PARAM_EPS).sort((x, y) => y - x);
+  if (!ahead.length) return null;
+  return { c: arc.c, rx: arc.rx, ry: arc.ry, a1: ahead[0], a2: arc.a2 };
 }
 
 /** Extend an arc end ('a'=start/a1 backwards CW, 'b'=end/a2 forwards CCW) to the next cut. */

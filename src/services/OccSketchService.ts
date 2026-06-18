@@ -73,6 +73,33 @@ function makeWire(oc: any, edges: any[]): any {
   const w = wm.Wire(); wm.delete(); return w;
 }
 
+/**
+ * Fit an axis-aligned ellipse (workplane-local 2D) to a closed polyline's points.
+ * Returns {c,rx,ry} when the points actually lie on the implied ellipse (i.e. they
+ * are a sampled ellipse — what the ellipse tool emits, major along uAxis), else
+ * null. Lets ellipses stored before the analytic descriptor existed (polyline-only)
+ * still be rebuilt as a single gp_Elips edge; genuine freeform polylines fail the
+ * residual check and keep their faceted build.
+ */
+function fitAxisAlignedEllipse(pts: number[][]): { c: [number, number]; rx: number; ry: number } | null {
+  if (!Array.isArray(pts) || pts.length < 8) return null;
+  let minu = Infinity, maxu = -Infinity, minv = Infinity, maxv = -Infinity;
+  for (const p of pts) {
+    if (!p || p.length < 2) return null;
+    if (p[0] < minu) minu = p[0]; if (p[0] > maxu) maxu = p[0];
+    if (p[1] < minv) minv = p[1]; if (p[1] > maxv) maxv = p[1];
+  }
+  const cu = (minu + maxu) / 2, cv = (minv + maxv) / 2;
+  const rx = (maxu - minu) / 2, ry = (maxv - minv) / 2;
+  if (rx < 1e-6 || ry < 1e-6) return null;
+  let maxDev = 0;   // every point must satisfy ((u-cu)/rx)^2 + ((v-cv)/ry)^2 ≈ 1
+  for (const p of pts) {
+    const du = (p[0] - cu) / rx, dv = (p[1] - cv) / ry;
+    maxDev = Math.max(maxDev, Math.abs(du * du + dv * dv - 1));
+  }
+  return maxDev <= 0.02 ? { c: [cu, cv], rx, ry } : null;
+}
+
 // ─── Workplane geometry helpers ───────────────────────────────────────────────
 
 /** Get Three.js vectors for the workplane basis. */
@@ -303,6 +330,28 @@ export class OccSketchService {
     return makeWire(oc, [edge]);
   }
 
+  // ── Ellipse ARC edge (eccentric angles a1→a2) ─────────────────────────────
+  // The sketch ellipse always has its major radius along uAxis (the draw tool +
+  // fit guarantee rx≥ry), so gp_Elips(ax2WithX(uAxis), rx, ry) and the eccentric
+  // angles line up with the 2D editor's EllipseArc2D param. Used to materialise a
+  // TRIMMED ellipse as ONE analytic arc edge instead of a chain of line segments.
+  static createEllipseArcEdge(
+    oc: any, center: V3, rx: number, ry: number, wp: Workplane, a1: number, a2: number,
+  ): any {
+    const { normal, uAxis } = workplaneBasis(wp);
+    const major = Math.max(rx, ry), minor = Math.min(rx, ry);
+    if (minor < 1e-6) throw new Error('Ellipse arc radii too small');
+    const ax2   = ax2WithX(oc, center, normal, uAxis);
+    const elips = new oc.gp_Elips_2(ax2, major, minor);
+    ax2.delete();
+    const mk = new oc.BRepBuilderAPI_MakeEdge_13(elips, a1, a2);
+    const ok = mk.IsDone();
+    const edge = ok ? mk.Edge() : null;
+    mk.delete(); elips.delete();
+    if (!ok) throw new Error('Ellipse arc edge failed');
+    return edge;
+  }
+
   // ── Bezier (3D, De Casteljau control polygon) ─────────────────────────────
 
   static createBezierWire(oc: any, ctrlPts: V3[]): any {
@@ -345,6 +394,25 @@ export class OccSketchService {
   static createRegionWire(
     oc: any, members: { id: string }[], geomOf: (id: string) => any, wp: Workplane,
   ): any {
+    // A single closed ELLIPSE → rebuild as ONE gp_Elips edge, not a 72-segment
+    // polyline. Lofting a polyline ellipse (72 edges) against a 1-edge circle forces
+    // BRepOffsetAPI_ThruSections.CheckCompatibility to reconcile 1↔72 edges, which is
+    // catastrophically slow (~24s measured). We recover the analytic ellipse from a
+    // stored descriptor (new sketches) OR by fitting an axis-aligned ellipse to the
+    // polyline points (old sketches drawn before the descriptor existed — non-ellipse
+    // polylines fail the fit and fall through to the faceted build below).
+    if (members.length === 1) {
+      const g = geomOf(members[0].id);
+      const ell = (g && g.ellipse && Array.isArray(g.ellipse.c))
+        ? g.ellipse
+        : (g && g.kind === 'polyline' && Array.isArray(g.pts) ? fitAxisAlignedEllipse(g.pts) : null);
+      if (ell && ell.rx > 1e-6 && ell.ry > 1e-6) {
+        const ce = fromLocal2D(ell.c[0], ell.c[1], wp);
+        const ma = fromLocal2D(ell.c[0] + ell.rx, ell.c[1], wp);
+        const mi = fromLocal2D(ell.c[0], ell.c[1] + ell.ry, wp);
+        return OccSketchService.createEllipseWire(oc, ce, ma, mi, wp);
+      }
+    }
     const edges: any[] = [];
     for (const m of members) {
       const g = geomOf(m.id);
@@ -360,6 +428,8 @@ export class OccSketchService {
         // A circle is a self-contained region — return its wire directly.
         const rim = fromLocal2D(g.c[0] + g.r, g.c[1], wp);
         return OccSketchService.createCircleWire(oc, fromLocal2D(g.c[0], g.c[1], wp), rim, wp);
+      } else if (g.kind === 'ellipse_arc') {
+        edges.push(OccSketchService.createEllipseArcEdge(oc, fromLocal2D(g.c[0], g.c[1], wp), g.rx, g.ry, wp, g.a1, g.a2));
       } else if (g.kind === 'polyline' && Array.isArray(g.pts)) {
         const p3 = g.pts.map((p: number[]) => fromLocal2D(p[0], p[1], wp));
         for (let i = 0; i < p3.length - 1; i++) edges.push(lineEdge(oc, p3[i], p3[i + 1]));
@@ -484,7 +554,26 @@ export class OccSketchService {
       const end    = fromLocal2D(geom.c[0] + geom.r * Math.cos(geom.a2), geom.c[1] + geom.r * Math.sin(geom.a2), wp);
       return makeWire(oc, [OccSketchService.createArcEdge(oc, center, start, end, wp)]);
     }
+    if (geom.kind === 'ellipse_arc') {
+      const center = fromLocal2D(geom.c[0], geom.c[1], wp);
+      return makeWire(oc, [OccSketchService.createEllipseArcEdge(oc, center, geom.rx, geom.ry, wp, geom.a1, geom.a2)]);
+    }
     if (geom.kind === 'polyline') {
+      // An ellipse is stored as a 72-point polyline. Rebuild it as ONE analytic
+      // gp_Elips edge (descriptor if present, else fitted from the points) — this is
+      // the wire the recompute/load registers and that lofts copy, so keeping it
+      // 1-edge is what stops the ~24s ThruSections.CheckCompatibility blow-up when
+      // it's lofted against a 1-edge circle. Non-ellipse polylines fail the fit and
+      // stay faceted.
+      const ell = (geom.ellipse && Array.isArray(geom.ellipse.c))
+        ? geom.ellipse
+        : fitAxisAlignedEllipse(geom.pts);
+      if (ell && ell.rx > 1e-6 && ell.ry > 1e-6) {
+        const c  = fromLocal2D(ell.c[0], ell.c[1], wp);
+        const ma = fromLocal2D(ell.c[0] + ell.rx, ell.c[1], wp);
+        const mi = fromLocal2D(ell.c[0], ell.c[1] + ell.ry, wp);
+        return OccSketchService.createEllipseWire(oc, c, ma, mi, wp);
+      }
       const p3 = geom.pts.map((p: number[]) => fromLocal2D(p[0], p[1], wp));
       const edges: any[] = [];
       for (let i = 0; i < p3.length - 1; i++) edges.push(lineEdge(oc, p3[i], p3[i + 1]));

@@ -368,7 +368,19 @@ export function useCADSketchTool(
             const wire = OccSketchService.createEllipseWire(oc, c, majPt, minPt, wp);
             const samp = sampleEllipse3D(c, majPt, minPt, wp);
             addCommitted(samp);
-            registerWire(oc, wire, 'Ellipse', wp, { kind: 'polyline', pts: localPts2D(samp, wp) });
+            // Store the polyline (for region detection / constraints) AND an analytic
+            // ellipse descriptor in local-2D: rx along uAxis, ry along vAxis, matching
+            // createEllipseWire (major forced along uAxis, major≥minor). The descriptor
+            // lets the profile be rebuilt as ONE gp_Elips edge instead of a 72-segment
+            // polyline — keeping lofts/extrudes 1-edge so they don't trigger the slow
+            // ThruSections.CheckCompatibility reconciliation (~24s for circle+ellipses).
+            const lc = toLocal2D(c, wp), lm = toLocal2D(majPt, wp), ln = toLocal2D(minPt, wp);
+            let rx = Math.hypot(lm.u - lc.u, lm.v - lc.v);
+            let ry = Math.hypot(ln.u - lc.u, ln.v - lc.v);
+            if (rx < ry) { const t = rx; rx = ry; ry = t; }
+            registerWire(oc, wire, 'Ellipse', wp, {
+              kind: 'polyline', pts: localPts2D(samp, wp), ellipse: { c: [lc.u, lc.v], rx, ry },
+            });
           }
           break;
         }
