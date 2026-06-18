@@ -218,13 +218,28 @@ export function useCADSketchTool(
     dimGroupRef.current = null;
   }, [sceneRef]);
 
+  /** Pixel→world scale at the workplane (so draft lines are screen-constant size). */
+  const computeScale = useCallback((wp: Workplane): number => {
+    const cam = cameraRef.current, container = containerRef.current;
+    if (!cam || !container) return 1;
+    const h = container.clientHeight || 1;
+    const o = new THREE.Vector3(...wp.origin);
+    if ((cam as any).isOrthographicCamera) {
+      const oc = cam as unknown as THREE.OrthographicCamera;
+      return (oc.top - oc.bottom) / oc.zoom / h;
+    }
+    const pc = cam as unknown as THREE.PerspectiveCamera;
+    const distCam = pc.position.distanceTo(o);
+    return (2 * distCam * Math.tan((pc.fov * Math.PI / 180) / 2)) / h;
+  }, [cameraRef, containerRef]);
+
   /** Rebuild the dimension-line group for the current tool/step + cursor. */
-  const updateDims = useCallback((priors2D: { x: number; y: number }[], cursor2D: { x: number; y: number }, wp: Workplane) => {
+  const updateDims = useCallback((priors2D: { x: number; y: number }[], cursor2D: { x: number; y: number }, wp: Workplane, scale: number) => {
     const s = sceneRef.current;
     if (!s) return;
     clearDims();
     const { interactionMode: mode, sketchInputStep: step } = useCADStore.getState();
-    const set = buildSketchDims(mode, step, priors2D, cursor2D);
+    const set = buildSketchDims(mode, step, priors2D, cursor2D, scale);
     if (!set) { window.cadRequestRender?.(); return; }
 
     const to3 = (p: { x: number; y: number }) => fromLocal2D(p.x, p.y, wp);
@@ -249,7 +264,7 @@ export function useCADSketchTool(
     if (witness.length) {
       const ls = new THREE.LineSegments(
         new THREE.BufferGeometry().setFromPoints(witness),
-        new THREE.LineDashedMaterial({ color: 0x6a7785, transparent: true, opacity: 0.7, dashSize: 1.4, gapSize: 1.0, depthTest: false }),
+        new THREE.LineDashedMaterial({ color: 0x6a7785, transparent: true, opacity: 0.7, dashSize: 5 * scale, gapSize: 3 * scale, depthTest: false }),
       );
       ls.computeLineDistances();
       ls.renderOrder = 999;
@@ -259,6 +274,70 @@ export function useCADSketchTool(
     dimGroupRef.current = group;
     window.cadRequestRender?.();
   }, [sceneRef, clearDims]);
+
+  // ── Shared preview path (used by mousemove AND typed-value changes) ───────────
+  // The "effective" cursor = the raw cursor, OR — when the user has typed a value
+  // into the dimension box — the point that value implies (typed magnitude along
+  // the cursor direction). Drawing from the effective point makes both the
+  // rubber-band preview and the dimension lines reflect a typed value live.
+
+  const dimLockRef = useRef<Record<string, number> | null>(null);   // typed dimension values
+
+  const drawPreview = useCallback((mode: string, clicks: THREE.Vector3[], pt: THREE.Vector3, wp: Workplane) => {
+    switch (mode) {
+      case 'SKETCH_LINE':
+        if (clicks.length === 1) setPreview([clicks[0].clone(), pt.clone()]);
+        break;
+      case 'SKETCH_CIRCLE':
+        if (clicks.length === 1 && clicks[0].distanceTo(pt) > 0.01) setPreview(sampleCircle3D(clicks[0], pt, wp));
+        break;
+      case 'SKETCH_RECTANGLE':
+        if (clicks.length === 1) setPreview(sampleRect3D(clicks[0], pt, wp));
+        break;
+      case 'SKETCH_ARC':
+        if (clicks.length === 1 && clicks[0].distanceTo(pt) > 0.01) setPreview(sampleCircle3D(clicks[0], pt, wp), 0x4488ff);
+        else if (clicks.length === 2 && clicks[0].distanceTo(clicks[1]) > 0.01) setPreview(sampleArc3D(clicks[0], clicks[1], pt, wp));
+        break;
+      case 'SKETCH_ARC_3P':
+        if (clicks.length === 1) setPreview([clicks[0].clone(), pt.clone()]);
+        else if (clicks.length === 2) setPreview(sampleArc3PPreview(clicks[0], clicks[1], pt, wp) ?? [clicks[0].clone(), pt.clone()]);
+        break;
+      case 'SKETCH_ELLIPSE':
+        if (clicks.length === 1 && clicks[0].distanceTo(pt) > 0.01) setPreview(sampleCircle3D(clicks[0], pt, wp));
+        else if (clicks.length === 2) setPreview(sampleEllipse3D(clicks[0], clicks[1], pt, wp));
+        break;
+      case 'SKETCH_POLYGON':
+        if (clicks.length === 1 && clicks[0].distanceTo(pt) > 0.01) setPreview(samplePolygon3D(clicks[0], pt, useCADStore.getState().sketchPolygonSides, wp));
+        break;
+      case 'SKETCH_ROUNDED_RECT':
+        if (clicks.length === 1) setPreview(sampleRect3D(clicks[0], pt, wp));
+        else if (clicks.length === 2) setPreview([clicks[0].clone(), pt.clone()], 0xff8800);
+        break;
+      case 'SKETCH_BEZIER':
+        if (clicks.length >= 1) setPreview(sampleBezier3D([...clicks, pt]));
+        break;
+      case 'SKETCH_SPLINE':
+        if (clicks.length >= 1) setPreview(sampleCatmullRom3D([...clicks, pt]));
+        break;
+      default: break;
+    }
+  }, [setPreview]);
+
+  /** Redraw preview + dimensions for a raw cursor point (local 2D), honouring any typed lock. */
+  const rebuildPreview = useCallback((rawLocal: { x: number; y: number }) => {
+    const { interactionMode: mode, sketchInputStep: step, sketchPoints: priors, activeWorkplane: wp } = useCADStore.getState();
+    if (!mode.startsWith('SKETCH_')) return;
+    const scale = computeScale(wp);
+    let effLocal = rawLocal;
+    const lock = dimLockRef.current;
+    if (lock) {
+      const set = buildSketchDims(mode, step, priors, rawLocal, scale);
+      if (set) effLocal = set.resolve(lock, priors, rawLocal);
+    }
+    const effPt = fromLocal2D(effLocal.x, effLocal.y, wp);
+    drawPreview(mode, clicksRef.current, effPt, wp);
+    updateDims(priors, effLocal, wp, scale);
+  }, [computeScale, drawPreview, updateDims]);
 
   const addCommitted = useCallback((pts: THREE.Vector3[]) => {
     const s = sceneRef.current;
@@ -341,6 +420,8 @@ export function useCADSketchTool(
 
     const { interactionMode: mode, activeWorkplane: wp, sketchPolygonSides: sides } = useCADStore.getState();
     if (!mode.startsWith('SKETCH_')) return;
+
+    dimLockRef.current = null;   // a placed point ends the current step's typed lock
 
     const clicks = clicksRef.current;
     clicks.push(pt.clone());
@@ -617,62 +698,11 @@ export function useCADSketchTool(
       const pt = project(e, wp);
       if (!pt) return;
 
-      // Update the overlay's live coordinate display
+      // Update the overlay's live coordinate display, then redraw preview + dims
+      // (the shared path applies any typed dimension lock).
       const loc = toLocal2D(pt, wp);
       useCADStore.getState().setSketchPreviewPoint({ x: loc.u, y: loc.v });
-
-      const clicks = clicksRef.current;
-
-      switch (mode) {
-        case 'SKETCH_LINE':
-          if (clicks.length === 1) setPreview([clicks[0].clone(), pt.clone()]);
-          break;
-        case 'SKETCH_CIRCLE':
-          if (clicks.length === 1 && clicks[0].distanceTo(pt) > 0.01)
-            setPreview(sampleCircle3D(clicks[0], pt, wp));
-          break;
-        case 'SKETCH_RECTANGLE':
-          if (clicks.length === 1) setPreview(sampleRect3D(clicks[0], pt, wp));
-          break;
-        case 'SKETCH_ARC':
-          if (clicks.length === 1 && clicks[0].distanceTo(pt) > 0.01)
-            setPreview(sampleCircle3D(clicks[0], pt, wp), 0x4488ff);
-          else if (clicks.length === 2 && clicks[0].distanceTo(clicks[1]) > 0.01)
-            setPreview(sampleArc3D(clicks[0], clicks[1], pt, wp));
-          break;
-        case 'SKETCH_ARC_3P':
-          if (clicks.length === 1) setPreview([clicks[0].clone(), pt.clone()]);
-          else if (clicks.length === 2) {
-            const preview = sampleArc3PPreview(clicks[0], clicks[1], pt, wp);
-            setPreview(preview ?? [clicks[0].clone(), pt.clone()]);
-          }
-          break;
-        case 'SKETCH_ELLIPSE':
-          if (clicks.length === 1 && clicks[0].distanceTo(pt) > 0.01)
-            setPreview(sampleCircle3D(clicks[0], pt, wp));
-          else if (clicks.length === 2)
-            setPreview(sampleEllipse3D(clicks[0], clicks[1], pt, wp));
-          break;
-        case 'SKETCH_POLYGON':
-          if (clicks.length === 1 && clicks[0].distanceTo(pt) > 0.01)
-            setPreview(samplePolygon3D(clicks[0], pt, useCADStore.getState().sketchPolygonSides, wp));
-          break;
-        case 'SKETCH_ROUNDED_RECT':
-          if (clicks.length === 1) setPreview(sampleRect3D(clicks[0], pt, wp));
-          else if (clicks.length === 2)
-            setPreview([clicks[0].clone(), pt.clone()], 0xff8800);
-          break;
-        case 'SKETCH_BEZIER':
-          if (clicks.length >= 1) setPreview(sampleBezier3D([...clicks, pt]));
-          break;
-        case 'SKETCH_SPLINE':
-          if (clicks.length >= 1) setPreview(sampleCatmullRom3D([...clicks, pt]));
-          break;
-        default: break;
-      }
-
-      // Live engineering dimensions for the current tool/step.
-      updateDims(useCADStore.getState().sketchPoints, { x: loc.u, y: loc.v }, wp);
+      rebuildPreview({ x: loc.u, y: loc.v });
     };
 
     const onKey = (e: KeyboardEvent) => {
@@ -708,6 +738,13 @@ export function useCADSketchTool(
       finishCurve(mode);
     };
 
+    // Typed dimension value(s) from SketchDimensionInput → lock + redraw live.
+    const onDimLock = (e: Event) => {
+      dimLockRef.current = ((e as CustomEvent).detail?.vals as Record<string, number> | null) ?? null;
+      const c = useCADStore.getState().sketchPreviewPoint;
+      if (c) rebuildPreview(c);
+    };
+
     // Hide the cursor annotation + draft dimensions when the mouse leaves
     const onLeave = () => { useCADStore.getState().setSketchPreviewPoint(null); clearDims(); };
 
@@ -718,6 +755,7 @@ export function useCADSketchTool(
     window.addEventListener('keydown', onKey);
     window.addEventListener('cad-sketch-inject-point', onInjectPoint);
     window.addEventListener('cad-sketch-finish-curve', onFinishCurve);
+    window.addEventListener('cad-sketch-dim-lock', onDimLock);
 
     return () => {
       container.removeEventListener('mousedown', onDown, true);
@@ -727,11 +765,12 @@ export function useCADSketchTool(
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('cad-sketch-inject-point', onInjectPoint);
       window.removeEventListener('cad-sketch-finish-curve', onFinishCurve);
+      window.removeEventListener('cad-sketch-dim-lock', onDimLock);
       clearPreview();
       clearDims();
       useCADStore.getState().setSketchPreviewPoint(null);
     };
   }, [interactionMode, activeWorkplane, sketchPolygonSides,
-      project, setPreview, clearPreview, addCommitted, cancelAll, cancelLastPoint,
-      processClick, registerWire]);
+      project, setPreview, clearPreview, clearDims, addCommitted, cancelAll, cancelLastPoint,
+      processClick, registerWire, rebuildPreview]);
 }

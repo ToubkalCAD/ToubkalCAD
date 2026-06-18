@@ -1,19 +1,23 @@
 // ============================================================
 // ToubkalCAD – SketchDimensionInput.tsx
 //
-// The small floating HTML value field(s) that accompany the in-viewport draft
-// dimension lines (those THREE.Line graphics are drawn by useCADSketchTool). One
-// editable <input> per active dimension, positioned by projecting the dimension's
-// label point (`vector.project(camera)`) into screen pixels — so it sits right on
-// the dimension line and tracks pan/zoom/cursor.
+// The small floating value field(s) that accompany the in-viewport THREE.Line
+// draft dimensions (drawn by useCADSketchTool). One field per active dimension,
+// positioned by projecting the dimension's label point into screen pixels.
 //
-// Geometry + which dimensions are active come from the SAME pure source the 3D
-// lines use (buildSketchDims), so the box and the line never disagree. Confirming
-// (Enter / Tab on the last field) resolves the typed/live values to a local-2D
-// point and injects it through the existing `cad-sketch-inject-point` event.
+// Editing model (Fusion-style):
+//   • The field tracks the live cursor value AND stays fully selected (blue
+//     highlight) so you can just type a value to replace it — no backspacing.
+//   • The first keystroke "locks" the field: it stops tracking the cursor and
+//     fires `cad-sketch-dim-lock`, which makes useCADSketchTool redraw the preview
+//     + dimension lines at the typed value immediately.
+//   • Tab moves between fields (rectangle W↔H); Enter confirms and injects the
+//     point via the existing `cad-sketch-inject-point` flow.
 //
-// `data-sketch-overlay` makes the tool's capture-phase mousedown ignore clicks on
-// the box, so editing never injects a stray point.
+// Inputs are UNCONTROLLED and driven imperatively from one rAF loop, so per-frame
+// value/position updates never fight the caret or clear the selection. React only
+// owns which fields exist (they change on step change). `data-sketch-overlay`
+// makes the tool's capture-phase mousedown ignore clicks on the fields.
 // ============================================================
 
 import React, { useEffect, useRef, useState } from 'react';
@@ -21,127 +25,185 @@ import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
 import type { Workplane } from '../store/cadStore';
 import { fromLocal2D } from '../services/OccSketchService';
-import { buildSketchDims } from '../utils/sketchDraftDims';
+import { buildSketchDims, SketchDimSet } from '../utils/sketchDraftDims';
+
+const f3 = (n: number) => (Math.abs(n) < 1e-9 ? '0' : n.toFixed(3));
 
 const toScreen = (p: THREE.Vector3, cam: THREE.Camera, w: number, h: number) => {
   const v = p.clone().project(cam);
   return { x: (v.x * 0.5 + 0.5) * w, y: (-v.y * 0.5 + 0.5) * h, ok: v.z < 1 };
 };
-const f3 = (n: number) => (Math.abs(n) < 1e-9 ? '0' : n.toFixed(3));
+
+/** World units per screen pixel at the workplane (draft lines are screen-constant). */
+function worldPerPixel(cam: THREE.Camera, wp: Workplane, viewportH: number): number {
+  const o = new THREE.Vector3(...wp.origin);
+  if ((cam as any).isOrthographicCamera) {
+    const oc = cam as unknown as THREE.OrthographicCamera;
+    return (oc.top - oc.bottom) / oc.zoom / (viewportH || 1);
+  }
+  const pc = cam as unknown as THREE.PerspectiveCamera;
+  return (2 * pc.position.distanceTo(o) * Math.tan((pc.fov * Math.PI / 180) / 2)) / (viewportH || 1);
+}
+
+interface FieldDef { key: string; label: string }
 
 export const SketchDimensionInput: React.FC = () => {
-  const rootRef = useRef<HTMLDivElement>(null);
-  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
-  const [edits, setEdits] = useState<Record<string, string>>({});
-  const [, setTick] = useState(0);
+  const hostRef   = useRef<HTMLDivElement>(null);
+  const pillRefs  = useRef<Map<string, HTMLDivElement>>(new Map());
+  const inputRefs = useRef<Map<string, HTMLInputElement>>(new Map());
+  const dirtyRef  = useRef<Set<string>>(new Set());
+  const keysRef   = useRef<FieldDef[]>([]);
+  // Latest geometry + context, captured each frame for submit / lock.
+  const viewRef   = useRef<{ set: SketchDimSet | null; priors: { x: number; y: number }[]; cursor: { x: number; y: number } | null; wp: Workplane | null }>(
+    { set: null, priors: [], cursor: null, wp: null },
+  );
 
-  // Re-project every frame so the boxes follow pan/zoom + the live cursor.
+  const [keys, setKeys] = useState<FieldDef[]>([]);
+
+  // Broadcast the current values so the tool redraws preview + lines live.
+  const dispatchLock = (lock: Record<string, number> | null) => {
+    window.dispatchEvent(new CustomEvent('cad-sketch-dim-lock', { detail: { vals: lock } }));
+  };
+
+  const currentVals = (): Record<string, number> => {
+    const set = viewRef.current.set;
+    const vals: Record<string, number> = {};
+    if (!set) return vals;
+    for (const d of set.dims) {
+      const input = inputRefs.current.get(d.key);
+      const raw = input ? parseFloat(input.value) : NaN;
+      vals[d.key] = isNaN(raw) ? d.value * d.disp : raw;
+    }
+    return vals;
+  };
+
+  const submit = () => {
+    const { set, priors, cursor } = viewRef.current;
+    if (!set || !cursor) return;
+    const p = set.resolve(currentVals(), priors, cursor);
+    window.dispatchEvent(new CustomEvent('cad-sketch-inject-point', { detail: { localX: p.x, localY: p.y } }));
+    dirtyRef.current.clear();
+    dispatchLock(null);
+  };
+
+  // ── One rAF loop: positions + values + selection, all imperative ──────────────
   useEffect(() => {
-    let raf = 0, last = 0;
-    const loop = (t: number) => {
+    let raf = 0;
+    const loop = () => {
       raf = requestAnimationFrame(loop);
-      if (t - last < 25) return;
-      last = t; setTick((n) => (n + 1) & 0xffff);
+      const st = useCADStore.getState();
+      const mode = st.interactionMode, step = st.sketchInputStep;
+      const cursor = st.sketchPreviewPoint, priors = st.sketchPoints as { x: number; y: number }[];
+      const wp = st.activeWorkplane as Workplane;
+      const cam = window.cadCamera as THREE.Camera | null;
+      const host = hostRef.current;
+
+      if (!mode.startsWith('SKETCH_') || !cursor || !cam || !host) {
+        if (keysRef.current.length) { keysRef.current = []; setKeys([]); }
+        viewRef.current = { set: null, priors: [], cursor: null, wp: null };
+        return;
+      }
+
+      const w = host.clientWidth, h = host.clientHeight;
+      const scale = worldPerPixel(cam, wp, h);
+      const set = buildSketchDims(mode, step, priors, cursor, scale);
+      viewRef.current = { set, priors, cursor, wp };
+      const dims = set?.dims ?? [];
+
+      // Sync which fields exist (only on real change → React render is rare).
+      const next = dims.map((d) => ({ key: d.key, label: d.label }));
+      const changed = next.length !== keysRef.current.length || next.some((k, i) => k.key !== keysRef.current[i]?.key);
+      if (changed) { keysRef.current = next; dirtyRef.current.clear(); setKeys(next); }
+
+      // Position each pill + refresh untyped values (kept selected → blue highlight).
+      for (const d of dims) {
+        const s = toScreen(fromLocal2D(d.labelLocal.x, d.labelLocal.y, wp), cam, w, h);
+        const pill = pillRefs.current.get(d.key);
+        if (pill) {
+          pill.style.display = s.ok ? 'flex' : 'none';
+          pill.style.left = `${s.x}px`;
+          pill.style.top  = `${s.y}px`;
+        }
+        const input = inputRefs.current.get(d.key);
+        if (input && !dirtyRef.current.has(d.key)) {
+          input.value = f3(d.value * d.disp);
+          if (document.activeElement === input) input.select();
+        }
+      }
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  const mode = useCADStore((s) => s.interactionMode);
-  const step = useCADStore((s) => s.sketchInputStep);
-
-  // Reset typed values + focus the first field when the step/tool changes.
+  // Focus + select the first field whenever the active fields change (new step).
   useEffect(() => {
-    setEdits({});
-    const id = setTimeout(() => { inputRefs.current[0]?.focus(); inputRefs.current[0]?.select(); }, 30);
+    if (!keys.length) return;
+    const id = setTimeout(() => {
+      const first = inputRefs.current.get(keys[0].key);
+      first?.focus(); first?.select();
+    }, 20);
     return () => clearTimeout(id);
-  }, [mode, step]);
+  }, [keys]);
 
-  if (!mode.startsWith('SKETCH_')) return null;
-
-  const st     = useCADStore.getState();
-  const cursor = st.sketchPreviewPoint;
-  const priors = st.sketchPoints as { x: number; y: number }[];
-  const wp     = st.activeWorkplane as Workplane;
-  const cam    = window.cadCamera as THREE.Camera | null;
-  const el     = rootRef.current;
-
-  const set = cursor ? buildSketchDims(mode, step, priors, cursor) : null;
-  if (!set || !cursor || !cam) return <div ref={rootRef} style={hostStyle} />;
-
-  const w = el?.clientWidth ?? 0;
-  const h = el?.clientHeight ?? 0;
-
-  // Collected display values (typed override, else live), keyed by dim.key.
-  const vals: Record<string, number> = {};
-  for (const dm of set.dims) {
-    const live = dm.value * dm.disp;
-    const typed = edits[dm.key];
-    vals[dm.key] = typed !== undefined && typed !== '' && !isNaN(parseFloat(typed)) ? parseFloat(typed) : live;
-  }
-
-  const submit = () => {
-    const p = set.resolve(vals, priors, cursor);
-    window.dispatchEvent(new CustomEvent('cad-sketch-inject-point', { detail: { localX: p.x, localY: p.y } }));
-    setEdits({});
+  const onInput = (key: string) => {
+    dirtyRef.current.add(key);          // first keystroke locks this field
+    dispatchLock(currentVals());        // preview + lines follow the typed value live
   };
 
-  const onKey = (e: React.KeyboardEvent, idx: number) => {
+  const onKeyDown = (e: React.KeyboardEvent, idx: number) => {
     if (e.key === 'Enter') {
       e.preventDefault();
       e.nativeEvent.stopImmediatePropagation();
       submit();
     } else if (e.key === 'Tab') {
       e.preventDefault();
-      if (idx < set.dims.length - 1) {
-        inputRefs.current[idx + 1]?.focus();
-        inputRefs.current[idx + 1]?.select();
+      if (idx < keys.length - 1) {
+        const nxt = inputRefs.current.get(keys[idx + 1].key);
+        nxt?.focus(); nxt?.select();
       } else {
         e.nativeEvent.stopImmediatePropagation();
         submit();
       }
     }
-    // Esc bubbles → tool steps back / cancels.
+    // Esc bubbles → the tool steps back / cancels.
   };
 
   return (
-    <div ref={rootRef} data-sketch-overlay style={hostStyle}>
-      {set.dims.map((dm, i) => {
-        const s = toScreen(fromLocal2D(dm.labelLocal.x, dm.labelLocal.y, wp), cam, w, h);
-        if (!s.ok) return null;
-        return (
-          <div
-            key={dm.key}
-            style={{
-              position: 'absolute', left: s.x, top: s.y, transform: 'translate(-50%, -50%)',
-              display: 'flex', alignItems: 'center', gap: 3,
-              padding: '1px 4px', borderRadius: 4,
-              background: 'rgba(255,255,255,0.95)', border: '1px solid rgba(40,51,64,0.55)',
-              boxShadow: '0 1px 5px rgba(0,0,0,0.25)', pointerEvents: 'auto',
-            }}
-          >
-            <span style={{ fontSize: 9, color: '#516072', fontWeight: 700 }}>{dm.label}</span>
-            <input
-              ref={(node) => { inputRefs.current[i] = node; }}
-              type="number"
-              step="any"
-              value={edits[dm.key] ?? f3(dm.value * dm.disp)}
-              onChange={(e) => setEdits((v) => ({ ...v, [dm.key]: e.target.value }))}
-              onKeyDown={(e) => onKey(e, i)}
-              onFocus={(e) => e.target.select()}
-              onMouseDown={(e) => e.stopPropagation()}
-              style={inputStyle}
-            />
-          </div>
-        );
-      })}
+    <div ref={hostRef} data-sketch-overlay style={hostStyle}>
+      {keys.map((fld, i) => (
+        <div
+          key={fld.key}
+          ref={(n) => { if (n) pillRefs.current.set(fld.key, n); else pillRefs.current.delete(fld.key); }}
+          style={pillStyle}
+        >
+          <span style={labelStyle}>{fld.label}</span>
+          <input
+            ref={(n) => { if (n) inputRefs.current.set(fld.key, n); else inputRefs.current.delete(fld.key); }}
+            type="number"
+            step="any"
+            defaultValue="0"
+            onInput={() => onInput(fld.key)}
+            onKeyDown={(e) => onKeyDown(e, i)}
+            onFocus={(e) => e.target.select()}
+            onMouseDown={(e) => e.stopPropagation()}
+            style={inputStyle}
+          />
+        </div>
+      ))}
     </div>
   );
 };
 
 const hostStyle: React.CSSProperties = { position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 26 };
+const pillStyle: React.CSSProperties = {
+  position: 'absolute', transform: 'translate(-50%, -50%)',
+  display: 'flex', alignItems: 'center', gap: 3, padding: '1px 4px', borderRadius: 4,
+  background: 'rgba(255,255,255,0.96)', border: '1px solid rgba(40,51,64,0.5)',
+  boxShadow: '0 1px 5px rgba(0,0,0,0.25)', pointerEvents: 'auto',
+};
+const labelStyle: React.CSSProperties = { fontSize: 9, color: '#516072', fontWeight: 700 };
 const inputStyle: React.CSSProperties = {
-  width: 58, background: 'transparent', border: 'none',
-  color: '#1a2330', padding: '1px 2px', fontSize: 12, fontFamily: 'monospace',
-  fontWeight: 700, textAlign: 'right', outline: 'none',
+  width: 58, background: 'transparent', border: 'none', color: '#1a2330',
+  padding: '1px 2px', fontSize: 12, fontFamily: 'monospace', fontWeight: 700,
+  textAlign: 'right', outline: 'none',
 };
