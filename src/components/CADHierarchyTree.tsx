@@ -5,10 +5,15 @@
 // ============================================================
 
 import React, { useState, useRef, useEffect } from 'react';
-import { useCADStore, CADNode, NodeType } from '../store/cadStore';
+import { useCADStore, CADNode, NodeType, canReparent } from '../store/cadStore';
 import { show3DOpPanel } from './Op3DPanel';
 import type { Op3DType } from './Op3DPanel';
 import { editPrimitive, primitiveKind } from '../utils/editPrimitive';
+
+// The node currently being dragged in the tree. Kept out-of-band (HTML5 DnD only
+// exposes dataTransfer payloads on drop, not during dragover) so we can compute
+// drop validity for the live highlight. Cleared on dragend/drop.
+let draggedNodeId: string | null = null;
 
 // Node types that MAY be re-editable via Op3DPanel (confirmed by node.params?.opType)
 // Note: fillet/chamfer produce 'compound' nodes, so 'compound' is included.
@@ -21,6 +26,8 @@ const SOLID_TYPES = new Set<NodeType>([
 ]);
 
 const NODE_ICONS: Record<NodeType, string> = {
+  assembly:          '▤',
+  component:         '◰',
   box:               '◻',
   cylinder:          '⬡',
   sphere:            '●',
@@ -40,6 +47,8 @@ const NODE_ICONS: Record<NodeType, string> = {
 };
 
 const NODE_COLORS: Record<NodeType, string> = {
+  assembly:          '#9aa0a6',
+  component:         '#6e7681',
   box:               '#5588cc',
   cylinder:          '#44aa66',
   sphere:            '#cc6644',
@@ -95,10 +104,14 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
   const openContextMenu    = useCADStore((s) => s.openTreeContextMenu);
   const interactionMode    = useCADStore((s) => s.interactionMode);
   const pickBooleanSolid   = useCADStore((s) => s.pickBooleanSolid);
+  const moveNode           = useCADStore((s) => s.moveNode);
 
   const [isEditing,  setIsEditing]  = useState(false);
   const [editValue,  setEditValue]  = useState('');
   const [collapsed,  setCollapsed]  = useState(false);
+  // Drop feedback: 'into' = drop as child (outline), 'before'/'after' = insertion
+  // line above/below this row for reordering among siblings. ok = passes validation.
+  const [dropMode,   setDropMode]   = useState<{ pos: 'into' | 'before' | 'after'; ok: boolean } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -162,9 +175,71 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
     deleteNode(nodeId); // store dispatches cad-remove-mesh for all deleted IDs
   };
 
+  // ── Drag-and-drop reparenting (wired to the validated reparentNode) ──────────
+  const onDragStart = (e: React.DragEvent) => {
+    if (isEditing) { e.preventDefault(); return; }
+    draggedNodeId = nodeId;
+    e.dataTransfer.setData('text/plain', nodeId);
+    e.dataTransfer.effectAllowed = 'move';
+    e.stopPropagation();
+  };
+  const onDragEnd = () => { draggedNodeId = null; setDropMode(null); };
+
+  // Resolve where a drag over this row would land, from the cursor's vertical
+  // position. Can this row accept the dragged node as a CHILD? Only then is the
+  // middle band an "into" drop; the top/bottom edges always mean reorder (insert
+  // before/after this row, i.e. as a sibling under THIS row's parent).
+  const computeDrop = (e: React.DragEvent, src: string | null): { pos: 'into' | 'before' | 'after'; ok: boolean } | null => {
+    if (!src || src === nodeId) return null;
+    const ns = useCADStore.getState().nodes;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const rel = (e.clientY - rect.top) / Math.max(1, rect.height);
+    const canInto = canReparent(ns, src, nodeId) === null;
+    const pos = canInto && rel > 0.3 && rel < 0.7 ? 'into' : rel < 0.5 ? 'before' : 'after';
+    const ok = pos === 'into' ? canInto : canReparent(ns, src, node.parentId) === null;
+    return { pos, ok };
+  };
+
+  const onDragOver = (e: React.DragEvent) => {
+    const d = computeDrop(e, draggedNodeId);
+    if (!d) return;
+    e.preventDefault();                       // required so onDrop fires
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = d.ok ? 'move' : 'none';
+    setDropMode(d);
+  };
+  const onDragLeave = (e: React.DragEvent) => {
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return;  // moving within the row
+    setDropMode(null);
+  };
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const src = draggedNodeId ?? e.dataTransfer.getData('text/plain');
+    const d = computeDrop(e, src);             // recompute from the drop point (not stale state)
+    setDropMode(null);
+    draggedNodeId = null;
+    if (!src || !d) return;
+    if (d.pos === 'into') {
+      moveNode(src, nodeId, null);                              // append as last child
+    } else {
+      const st = useCADStore.getState();
+      const siblings = node.parentId ? (st.nodes[node.parentId]?.children ?? []) : st.rootIds;
+      const idx = siblings.indexOf(nodeId);
+      const beforeId = d.pos === 'before' ? nodeId : (siblings[idx + 1] ?? null);
+      moveNode(src, node.parentId, beforeId);                   // logs reason if rejected
+    }
+  };
+
   return (
     <div>
       <div
+        draggable={!isEditing}
+        onDragStart={onDragStart}
+        onDragEnd={onDragEnd}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
         onClick={handleClick}
         onDoubleClick={(e) => {
           const opType   = node.params?.opType as Op3DType | undefined;
@@ -197,21 +272,15 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
           }
         }}
         onContextMenu={(e) => {
-          // Sketches, wires, and any 3D solid (for fillet/chamfer + re-edit) get a menu.
-          const isSolidType = SOLID_TYPES.has(node.type);
-          const isContextable = node.type === 'sketch'
-            || node.type === 'sketch_wire'
-            || node.type === 'datum_plane'
-            || isSolidType;
-          if (isContextable) {
-            e.preventDefault();
-            e.stopPropagation();
-            // Preserve an existing multi-selection when right-clicking one of its
-            // members (so e.g. Loft across selected sketches is offered); only
-            // collapse to this node when it wasn't already selected.
-            if (!selectedIds.includes(nodeId)) setSelectedIds([nodeId]);
-            openContextMenu(nodeId, e.clientX, e.clientY);
-          }
+          // Every node gets a menu — at minimum the universal Delete; sketches,
+          // solids, ops, datums and containers add their type-specific actions.
+          e.preventDefault();
+          e.stopPropagation();
+          // Preserve an existing multi-selection when right-clicking one of its
+          // members (so e.g. Loft across selected sketches is offered); only
+          // collapse to this node when it wasn't already selected.
+          if (!selectedIds.includes(nodeId)) setSelectedIds([nodeId]);
+          openContextMenu(nodeId, e.clientX, e.clientY);
         }}
         title={
           REEDITABLE.has(node.type) && node.params?.opType
@@ -237,6 +306,18 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
           userSelect: 'none',
           opacity: node.visible ? 1 : 0.4,
           transition: 'background 0.1s',
+          // Drop feedback: 'into' = outline + tint; 'before'/'after' = a 2px
+          // insertion line at the top/bottom edge (inset shadow → no layout shift).
+          // Green = valid, red = rejected.
+          ...(dropMode && (dropMode.pos === 'into'
+            ? {
+                outline: `1.5px solid ${dropMode.ok ? '#2f9e54' : '#c2453f'}`,
+                outlineOffset: '-1.5px',
+                background: dropMode.ok ? 'rgba(47,158,84,0.14)' : 'rgba(194,69,63,0.12)',
+              }
+            : {
+                boxShadow: `inset 0 ${dropMode.pos === 'before' ? 2 : -2}px 0 0 ${dropMode.ok ? '#2f9e54' : '#c2453f'}`,
+              })),
         }}
         onMouseEnter={(e) => { if (!isSelected && !isActiveSketch) (e.currentTarget as HTMLElement).style.background = 'var(--surface-3)'; }}
         onMouseLeave={(e) => { if (!isSelected && !isActiveSketch) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
@@ -347,7 +428,25 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
 export const CADHierarchyTree: React.FC = () => {
   const rootIds = useCADStore((s) => s.rootIds);
   const nodes   = useCADStore((s) => s.nodes);
+  const reparentNode = useCADStore((s) => s.reparentNode);
   const count   = Object.keys(nodes).length;
+  const [rootHint, setRootHint] = useState<boolean>(false);
+
+  // Empty-space drop → move to root (only structural nodes pass reparent validation).
+  const onRootDragOver = (e: React.DragEvent) => {
+    if (!draggedNodeId) return;
+    e.preventDefault();
+    const ok = canReparent(useCADStore.getState().nodes, draggedNodeId, null) === null;
+    e.dataTransfer.dropEffect = ok ? 'move' : 'none';
+    setRootHint(ok);
+  };
+  const onRootDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const src = draggedNodeId ?? e.dataTransfer.getData('text/plain');
+    draggedNodeId = null;
+    setRootHint(false);
+    if (src) reparentNode(src, null);
+  };
 
   return (
     <div style={{
@@ -373,8 +472,16 @@ export const CADHierarchyTree: React.FC = () => {
         </span>
       </div>
 
-      {/* Scrollable tree */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '2px 0' }}>
+      {/* Scrollable tree (also the empty-space drop zone → move to root) */}
+      <div
+        style={{
+          flex: 1, overflowY: 'auto', padding: '2px 0',
+          outline: rootHint ? '1.5px dashed #2f9e54' : 'none', outlineOffset: '-3px',
+        }}
+        onDragOver={onRootDragOver}
+        onDragLeave={() => setRootHint(false)}
+        onDrop={onRootDrop}
+      >
         {rootIds.length === 0 ? (
           <div style={{
             padding: '20px 12px',

@@ -11,6 +11,8 @@
 import React from 'react';
 
 export type IconName =
+  // structure (assembly tree)
+  | 'component' | 'assembly'
   // primitives
   | 'box' | 'cylinder' | 'sphere' | 'torus' | 'cone'
   // modify / boolean
@@ -29,6 +31,10 @@ export type IconName =
   | 'plane' | 'check' | 'sun' | 'moon' | 'sketch' | 'grid' | 'close';
 
 const P: Record<IconName, React.ReactNode> = {
+  // a part inside corner brackets (one body + its feature-tree boundary)
+  component: (<><rect x="6.5" y="6.5" width="11" height="11" rx="1" /><path d="M3 4.5V3h1.5M21 4.5V3h-1.5M3 19.5V21h1.5M21 19.5V21h-1.5" opacity=".6" /></>),
+  // overlapping parts grouped (structural container)
+  assembly: (<><rect x="3" y="3" width="9" height="9" rx="1" /><rect x="12" y="12" width="9" height="9" rx="1" opacity=".55" /><rect x="8" y="8" width="9" height="9" rx="1" opacity=".82" /></>),
   box: (<><path d="M12 2.6l8.5 4.6v9.6L12 21.4 3.5 16.8V7.2z" /><path d="M3.7 7.3L12 11.9l8.3-4.6" /><path d="M12 11.9v9.4" /></>),
   cylinder: (<><ellipse cx="12" cy="6" rx="7" ry="3" /><path d="M5 6v12M19 6v12" /><path d="M5 18a7 3 0 0 0 14 0" /></>),
   sphere: (<><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="9" ry="3.4" /><path d="M12 3v18" /></>),

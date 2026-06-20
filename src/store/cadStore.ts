@@ -23,6 +23,10 @@ function findDatumBind(nodes: Record<string, any>, refs: any[]): { id: string; t
 // ─── Public types ─────────────────────────────────────────────────────────────
 
 export type NodeType =
+  // ── Structural tree (assembly side) — carry NO geometry, only containment ──
+  | 'assembly'    // organic container: holds components or sub-assemblies
+  | 'component'   // a Part: one solid body + the boundary of a local feature tree
+  // ── Feature tree (per-component timeline) ──
   | 'box' | 'cylinder' | 'sphere'
   | 'extrusion' | 'boolean_operation' | 'compound'
   | 'sketch' | 'sketch_wire'
@@ -30,6 +34,70 @@ export type NodeType =
   | 'mirror' | 'pattern'
   // Reference geometry (Track D) — carry no OCC solid; render from params.
   | 'datum_plane' | 'datum_axis' | 'datum_point';
+
+// ─── Dual-tree node taxonomy ───────────────────────────────────────────────────
+// The scene graph is two trees joined at the root: a STRUCTURAL tree (assemblies
+// → components) and, inside each component, a FEATURE timeline (sketches + 3D
+// operations + datum references). 3D operations reference their profile sketches
+// by id (`params.targetWireIds`) rather than owning them as children, so one
+// sketch can feed many features (Extrusion 1 + Extrusion 2 → same Sketch).
+
+/** Containers in the structural tree. */
+export const STRUCTURAL_TYPES = new Set<NodeType>(['assembly', 'component']);
+/** Reference geometry — allowed inside a component alongside features. */
+export const DATUM_TYPES = new Set<NodeType>(['datum_plane', 'datum_axis', 'datum_point']);
+/** Feature-timeline nodes: geometry features that live directly under a component.
+ *  (sketch_wire is excluded — it is a child of its `sketch`, not of the component.) */
+export const FEATURE_TYPES = new Set<NodeType>([
+  'box', 'cylinder', 'sphere', 'extrusion', 'boolean_operation', 'compound',
+  'sketch', 'revolve', 'sweep', 'loft', 'mirror', 'pattern',
+]);
+
+export const isStructural = (t: NodeType): boolean => STRUCTURAL_TYPES.has(t);
+export const isDatum      = (t: NodeType): boolean => DATUM_TYPES.has(t);
+export const isFeature    = (t: NodeType): boolean => FEATURE_TYPES.has(t);
+
+/**
+ * The single containment rule for the dual tree. `parentType === null` means the
+ * scene root. Strict mode: only structural containers may sit at the root; a
+ * component holds features + datums; an assembly holds assemblies/components; a
+ * sketch holds its wires. Everything else is a leaf.
+ */
+export function canContain(parentType: NodeType | null, childType: NodeType): boolean {
+  if (parentType === null)        return isStructural(childType);              // root: structural only
+  if (parentType === 'assembly')  return childType === 'assembly' || childType === 'component';
+  if (parentType === 'component') return isFeature(childType) || isDatum(childType);
+  if (parentType === 'sketch')    return childType === 'sketch_wire';
+  return false;                                                               // features/datums are leaves
+}
+
+/**
+ * Validate a reparent under the dual-tree rules. Returns a human reason string if
+ * the move is rejected, or null if allowed. Shared by `reparentNode` (the commit)
+ * and the tree's drag-and-drop highlight so the rule lives in exactly one place.
+ */
+export function canReparent(
+  nodes: Record<string, CADNode>, nodeId: string, newParentId: string | null,
+): string | null {
+  const node = nodes[nodeId];
+  if (!node) return 'node no longer exists';
+  if (node.parentId === newParentId) return null;                            // no-op move
+  if (newParentId && !nodes[newParentId]) return 'drop target no longer exists';
+  const newParentType = newParentId ? nodes[newParentId].type : null;
+  if (!canContain(newParentType, node.type)) {
+    return `Can't place a ${node.type} ${newParentType ? `inside a ${newParentType}` : 'at the root'}`;
+  }
+  // A feature/datum already inside a component can't be re-homed onto another
+  // part's timeline — that would orphan its profile references.
+  if ((isFeature(node.type) || isDatum(node.type)) && node.parentId && nodes[node.parentId]?.type === 'component') {
+    return `"${node.name}" is a feature of its component — it can't move to another`;
+  }
+  // No cycles: can't drop a container into its own descendant.
+  for (let p: string | null = newParentId; p; p = nodes[p]?.parentId ?? null) {
+    if (p === nodeId) return 'Cannot move a node into its own descendant';
+  }
+  return null;
+}
 
 // ─── Workplane ────────────────────────────────────────────────────────────────
 
@@ -122,6 +190,37 @@ export interface SketchConstraint {
 export const sketchRefEq = (a: SketchRef, b: SketchRef) =>
   a.kind === b.kind && a.id === b.id && a.pt === b.pt;
 
+// ─── Live sketch dragging (soft-constraint) ────────────────────────────────────
+// The store owns only the drag STATE + the start/update/stop actions; the actual
+// soft-constraint solve loop lives behind this engine seam (SketchDragController),
+// installed once at startup via installDragEngine() — so the store never imports
+// the solver/OCC layer (it stays scene-graph metadata + UI state).
+
+export interface SketchDragState {
+  /** What the user grabbed — a point operand or an entity body to translate. */
+  entity: SketchRef;
+  /** Latest cursor position in sketch-plane local 2D (u,v), or null pre-move. */
+  mouse: [number, number] | null;
+}
+
+export interface SketchDragEngine {
+  /** Begin a drag: resolve the pinned point + grab offset from the grabbed ref. */
+  begin(sketchId: string, origin: SketchRef, grabLocal: [number, number]): void;
+  /** One drag frame: re-solve with the cursor as a soft pin and sync geometry. */
+  frame(local: [number, number]): void;
+  /** End the drag: run the downstream recompute once. */
+  end(): void;
+}
+
+// Module-scoped engine slot — injected at startup, kept off the reactive state.
+let dragEngine: SketchDragEngine | null = null;
+// Deep snapshot of the nodes taken at drag start, so stopDragging can push ONE
+// undo step spanning the whole drag (the per-frame solves don't touch history).
+let dragSnapshot: CADNode[] | null = null;
+/** Install the live-drag engine (called once at app startup, after the kernel
+ *  + registry are ready). Mirrors installSolver()'s injection pattern. */
+export function installDragEngine(engine: SketchDragEngine): void { dragEngine = engine; }
+
 export type GizmoMode = 'translate' | 'rotate' | 'scale';
 
 export interface CADMaterial {
@@ -148,7 +247,16 @@ export interface CADNode {
   };
   material: CADMaterial;
   notes:    string;
-  /** Type-specific metadata — sketch_wire nodes store their workplane here. */
+  /**
+   * Type-specific metadata. Notable contracts:
+   *  • sketch_wire → `workplane`, `sketchGeom`.
+   *  • assembly / component → none (pure structural containers, no geometry).
+   *  • 3D operations (extrusion/revolve/sweep/loft) → `targetWireIds: string[]`,
+   *    the id-reference to the profile sketch(es). This is the "profile source"
+   *    link: it lives in params (NOT parent/child), so several operations can
+   *    reference the SAME sketch without it being structurally swallowed, and the
+   *    recompute graph derives the profile DAG edge from it (see FeatureGraph).
+   */
   params?: Record<string, any>;
 }
 
@@ -169,9 +277,15 @@ export interface LogEntry {
 }
 
 interface CADAction {
-  type:        'ADD' | 'DELETE' | 'TRANSFORM' | 'RENAME' | 'MATERIAL';
+  type:        'ADD' | 'DELETE' | 'TRANSFORM' | 'RENAME' | 'MATERIAL' | 'STRUCTURE';
   description: string;
   deltas:      NodeDelta[];   // only the nodes this action changed (not a full snapshot)
+  // Exact root-order snapshots. rootIds order isn't a per-node field, so it can't
+  // ride in `deltas` — without these, undo/redo would have to DERIVE root order
+  // (losing reorders). Every action records both so any undo restores the precise
+  // order, not just node parentage.
+  rootBefore:  string[];
+  rootAfter:   string[];
 }
 
 // ─── Full state interface ─────────────────────────────────────────────────────
@@ -218,6 +332,21 @@ interface CADState {
   // ── Actions ────────────────────────────────────────────────────────────────
 
   addNode:            (node: Omit<CADNode, 'children'>) => void;
+  /** The component new features are placed under (the "active part"). */
+  activeComponentId:  string | null;
+  /** Set the active component (features added next land here). null → next feature
+   *  auto-creates/reuses a default component. */
+  setActiveComponent: (id: string | null) => void;
+  /** Create an empty component (a Part). Optionally nest under an assembly.
+   *  Becomes the active component. Returns its id. */
+  createComponent:    (name?: string, parentId?: string | null) => string;
+  /** Create an empty assembly container (root, or nested under another assembly). */
+  createAssembly:     (name?: string, parentId?: string | null) => string;
+  /** Apply a loaded scene and migrate it to the dual-tree shape (wrap stray
+   *  features into a component, un-nest adopted sketches). Used by project load. */
+  loadScene:          (nodes: Record<string, CADNode>, rootIds: string[]) => void;
+  /** Reorganize the current scene into the strict dual tree in place. Idempotent. */
+  migrateToComponentTree: () => void;
   /** Add several nodes (e.g. a decomposed rectangle's edges) + optional auto-
    *  constraints on a sketch container, as ONE undo step. */
   addSketchEntities:  (nodeList: Omit<CADNode, 'children'>[], sketchId: string | null, autoConstraints?: SketchConstraint[], label?: string) => void;
@@ -262,12 +391,13 @@ interface CADState {
 
   /** Move a node to a new parent (or to root if newParentId is null). */
   reparentNode: (nodeId: string, newParentId: string | null) => void;
+  /** Move a node to a specific position among a parent's children (or root):
+   *  insert it BEFORE `beforeId`, or append when `beforeId` is null. Same
+   *  containment validation as reparentNode (a feature stays in its component, so
+   *  this reorders its timeline; cross-container moves are gated). */
+  moveNode: (nodeId: string, newParentId: string | null, beforeId: string | null) => void;
   /** Merge extra key/value pairs into a node's params without touching other fields. */
   setNodeParams: (nodeId: string, params: Record<string, any>) => void;
-  /** Re-parent the sketch(es) that a 3D operation consumed UNDER the operation node,
-   *  giving e.g. Extrusion1 → Sketch1 → Circle1. Adopts the sketch container if the
-   *  wire has one, otherwise the wire itself. */
-  adoptSketchSources: (operationId: string, wireIds: string[]) => void;
 
   /** Right-click context menu on tree sketch nodes. */
   treeContextMenu: { nodeId: string; x: number; y: number } | null;
@@ -334,6 +464,17 @@ interface CADState {
   /** Publish the latest solve status (drives DoF readout + colour-coding). */
   setConstraintStatus:  (s: CADState['constraintStatus']) => void;
 
+  /** Live sketch-drag state — non-null only while a point/entity is being dragged. */
+  dragState: SketchDragState | null;
+  /** Begin dragging `origin` (a point operand or entity body); `grabLocal` is the
+   *  pointer's sketch-local 2D position at grab time. Pins the cursor as a soft
+   *  solver objective via the installed drag engine. */
+  startDragging:  (origin: SketchRef, grabLocal: [number, number]) => void;
+  /** Push the latest cursor position (sketch-local 2D) and re-solve one frame. */
+  updateDragging: (local: [number, number]) => void;
+  /** Finish the drag (release the pin, recompute dependents). */
+  stopDragging:   () => void;
+
   addMeasurement:    (m: Omit<CADMeasurement, 'id'>) => void;
   removeMeasurement: (id: string) => void;
   clearMeasurements: () => void;
@@ -384,6 +525,8 @@ export function normalizeMaterial(material: Partial<CADMaterial>): CADMaterial {
 }
 
 export const NODE_TYPE_COLORS: Record<NodeType, number> = {
+  assembly:          0x9aa0a6,   // neutral grey — structural containers
+  component:         0x6e7681,
   box:               0x5588cc,
   cylinder:          0x44aa66,
   sphere:            0xcc6644,
@@ -426,9 +569,24 @@ function pushPast(past: CADAction[], action: CADAction): CADAction[] {
 }
 
 /** Build a delta-based action from two full node snapshots (the push sites already
- *  have these on hand; the diff keeps only what changed). */
-function makeAction(type: CADAction['type'], description: string, before: CADNode[], after: CADNode[]): CADAction {
-  return { type, description, deltas: diffNodes(before, after) };
+ *  have these on hand; the diff keeps only what changed). `rootBefore`/`rootAfter`
+ *  capture the exact root order on each side so undo/redo restore it verbatim. */
+function makeAction(
+  type: CADAction['type'], description: string, before: CADNode[], after: CADNode[],
+  rootBefore: string[], rootAfter: string[],
+): CADAction {
+  return { type, description, deltas: diffNodes(before, after), rootBefore: [...rootBefore], rootAfter: [...rootAfter] };
+}
+
+/** Restore the root list for an undo/redo: take the snapshot's order but reconcile
+ *  it against the actual parentless nodes (so it's always exactly the root set,
+ *  ordered as recorded, with any stragglers appended). */
+function reconcileRoots(stored: string[], nodes: Record<string, CADNode>): string[] {
+  const derived = Object.values(nodes).filter((n) => !n.parentId).map((n) => n.id);
+  const rootSet = new Set(derived);
+  const ordered = stored.filter((id) => rootSet.has(id));
+  for (const id of derived) if (!ordered.includes(id)) ordered.push(id);
+  return ordered;
 }
 
 /** After an undo/redo, push each restored node's transform back onto its mesh so
@@ -456,6 +614,81 @@ function syncScene(added: string[], removed: string[], restoredNodes: Record<str
   // Re-meshed nodes rebuild at their LOCAL pose, and a plain transform-undo moves
   // no mesh on its own — push every restored node's transform back onto its mesh.
   syncTransforms(restoredNodes);
+}
+
+/** sketch_wire ids whose `sketchGeom` differs between two node maps. A plain
+ *  param-restore (undo/redo of a drag) adds/removes nothing, so syncScene won't
+ *  touch these wires — we rebuild their OCC shape + outline + dependents via
+ *  `cad-sketch-rebuild` (handled by the recompute bridge). */
+function sketchWiresWithChangedGeom(before: Record<string, CADNode>, after: Record<string, CADNode>): string[] {
+  const out: string[] = [];
+  for (const id in after) {
+    if (after[id].type !== 'sketch_wire') continue;
+    const a = JSON.stringify(after[id].params?.sketchGeom);
+    const b = JSON.stringify(before[id]?.params?.sketchGeom);
+    if (a !== b) out.push(id);
+  }
+  return out;
+}
+
+const IDENTITY_TRANSFORM = () =>
+  ({ position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } as CADNode['transform']);
+
+/** Build a structural container node (assembly/component) — no geometry. */
+function makeContainer(type: 'assembly' | 'component', name: string, parentId: string | null): CADNode {
+  return {
+    id: makeId(), name, type, visible: true, locked: false, parentId, children: [], notes: '',
+    transform: IDENTITY_TRANSFORM(),
+    material: normalizeMaterial({ color: NODE_TYPE_COLORS[type] }),
+    params: {},
+  };
+}
+
+/**
+ * Resolve the component features should land in, creating a default one if needed.
+ * Pure: returns a possibly-extended nodes map. Prefers the active component, then
+ * any existing component, else mints "Part N" at the root.
+ */
+function ensureComponentIn(
+  nodes: Record<string, CADNode>, rootIds: string[], activeId: string | null,
+): { nodes: Record<string, CADNode>; rootIds: string[]; componentId: string; created: boolean } {
+  if (activeId && nodes[activeId]?.type === 'component') {
+    return { nodes, rootIds, componentId: activeId, created: false };
+  }
+  const existing = Object.values(nodes).find((n) => n.type === 'component');
+  if (existing) return { nodes, rootIds, componentId: existing.id, created: false };
+  const count = Object.values(nodes).filter((n) => n.type === 'component').length + 1;
+  const comp = makeContainer('component', `Part ${count}`, null);
+  return {
+    nodes: { ...nodes, [comp.id]: comp }, rootIds: [...rootIds, comp.id],
+    componentId: comp.id, created: true,
+  };
+}
+
+/** Build the set() payload for a tree-structure change (reparent / reorder),
+ *  recording ONE undoable STRUCTURE action. Pushes history when the node deltas
+ *  changed OR the root order changed (a pure root reorder has no node delta but
+ *  must still be undoable — its order rides in rootBefore/rootAfter). */
+function commitStructure(
+  before: CADNode[], updated: Record<string, CADNode>,
+  rootBefore: string[], rootAfter: string[], description: string, past: CADAction[],
+): Partial<CADState> {
+  const action = makeAction('STRUCTURE', description, before, Object.values(updated), rootBefore, rootAfter);
+  const changed = action.deltas.length > 0 || rootBefore.join() !== rootAfter.join();
+  return changed
+    ? { nodes: updated, rootIds: rootAfter, past: pushPast(past, action), future: [] }
+    : { nodes: updated, rootIds: rootAfter };
+}
+
+/** Detach `nodeId` from its current parent's children (or rootIds). Mutates the
+ *  passed map by replacing the parent entry; returns the new rootIds. */
+function detachFromParent(nodes: Record<string, CADNode>, rootIds: string[], nodeId: string): string[] {
+  const pid = nodes[nodeId]?.parentId ?? null;
+  if (pid && nodes[pid]) {
+    nodes[pid] = { ...nodes[pid], children: nodes[pid].children.filter((c) => c !== nodeId) };
+    return rootIds;
+  }
+  return rootIds.filter((r) => r !== nodeId);
 }
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -495,6 +728,8 @@ export const useCADStore = create<CADState>((set, get) => ({
   constraintReq:       null,
   constraintSel:       [],
   constraintStatus:    null,
+  dragState:           null,
+  activeComponentId:   null,
 
   // ── Logging ────────────────────────────────────────────────────────────────
   log: (msg, level = 'info') =>
@@ -638,33 +873,81 @@ export const useCADStore = create<CADState>((set, get) => ({
   clearConstraintSel: () => set({ constraintSel: [] }),
   setConstraintStatus: (st) => set({ constraintStatus: st }),
 
+  // ── Live sketch dragging (soft-constraint) ───────────────────────────────────
+  startDragging: (origin, grabLocal) => {
+    const { constraintReq, sketchSession } = get();
+    const sid = constraintReq?.sketchId ?? sketchSession?.id ?? null;
+    if (!sid) return;
+    // Snapshot up front so the whole drag collapses into one undo step.
+    dragSnapshot = JSON.parse(JSON.stringify(Object.values(get().nodes)));
+    dragEngine?.begin(sid, origin, grabLocal);
+    set({ dragState: { entity: origin, mouse: grabLocal } });
+  },
+  updateDragging: (local) => {
+    if (!get().dragState) return;
+    // Re-solve this frame (soft pin → cursor) and sync geometry, then record the
+    // cursor. The seed is implicit: the engine re-reads last frame's solved geom.
+    dragEngine?.frame(local);
+    set((s) => (s.dragState ? { dragState: { ...s.dragState, mouse: local } } : {}));
+  },
+  stopDragging: () => {
+    if (!get().dragState) return;
+    dragEngine?.end();                       // final recompute of dependents
+    set({ dragState: null });
+    // Push ONE history entry covering the net move (geom params + any recompute).
+    if (dragSnapshot) {
+      const action = makeAction('TRANSFORM', 'Drag sketch', dragSnapshot, Object.values(get().nodes), get().rootIds, get().rootIds);
+      if (action.deltas.length) set({ past: pushPast(get().past, action), future: [] });
+      dragSnapshot = null;
+    }
+  },
+
   reparentNode: (nodeId, newParentId) => {
     const { nodes, rootIds } = get();
     const node = nodes[nodeId];
     if (!node || node.parentId === newParentId) return;
 
+    const reason = canReparent(nodes, nodeId, newParentId);
+    if (reason) { get().log(reason, 'warn'); return; }
+
+    const before = JSON.parse(JSON.stringify(Object.values(nodes)));
     const updated = { ...nodes };
-    // Detach from old parent
-    const oldParentId = node.parentId;
-    if (oldParentId && updated[oldParentId]) {
-      updated[oldParentId] = {
-        ...updated[oldParentId],
-        children: updated[oldParentId].children.filter((c) => c !== nodeId),
-      };
-    }
-    // Update parentId
+    const newRootIds = detachFromParent(updated, rootIds, nodeId);
     updated[nodeId] = { ...node, parentId: newParentId };
-    // Attach to new parent or rootIds
-    let newRootIds = rootIds.filter((r) => r !== nodeId);
-    if (newParentId && updated[newParentId]) {
-      updated[newParentId] = {
-        ...updated[newParentId],
-        children: [...updated[newParentId].children, nodeId],
-      };
-    } else if (!newParentId) {
-      newRootIds = [...newRootIds, nodeId];
+    let finalRoots = newRootIds;
+    if (newParentId) {
+      updated[newParentId] = { ...updated[newParentId], children: [...updated[newParentId].children, nodeId] };
+    } else {
+      finalRoots = [...newRootIds, nodeId];
     }
-    set({ nodes: updated, rootIds: newRootIds });
+    set(commitStructure(before, updated, rootIds, finalRoots, `Move "${node.name}"`, get().past));
+  },
+
+  moveNode: (nodeId, newParentId, beforeId) => {
+    const { nodes, rootIds } = get();
+    const node = nodes[nodeId];
+    if (!node || beforeId === nodeId) return;
+    const reason = canReparent(nodes, nodeId, newParentId);
+    if (reason) { get().log(reason, 'warn'); return; }
+
+    const before = JSON.parse(JSON.stringify(Object.values(nodes)));
+    const updated = { ...nodes };
+    // Detach first, THEN insert relative to beforeId (which is unaffected), so a
+    // same-parent reorder is index-shift-safe.
+    const detachedRoots = detachFromParent(updated, rootIds, nodeId);
+    updated[nodeId] = { ...node, parentId: newParentId };
+    let finalRoots = detachedRoots;
+    if (newParentId) {
+      const list = [...updated[newParentId].children];
+      const at = beforeId ? list.indexOf(beforeId) : -1;
+      at >= 0 ? list.splice(at, 0, nodeId) : list.push(nodeId);
+      updated[newParentId] = { ...updated[newParentId], children: list };
+    } else {
+      finalRoots = [...detachedRoots];
+      const at = beforeId ? finalRoots.indexOf(beforeId) : -1;
+      at >= 0 ? finalRoots.splice(at, 0, nodeId) : finalRoots.push(nodeId);
+    }
+    set(commitStructure(before, updated, rootIds, finalRoots, `Reorder "${node.name}"`, get().past));
   },
 
   setNodeParams: (nodeId, params) => {
@@ -678,52 +961,103 @@ export const useCADStore = create<CADState>((set, get) => ({
     });
   },
 
-  adoptSketchSources: (operationId, wireIds) => {
-    const { nodes } = get();
-    if (!nodes[operationId]) return;
-    // Resolve each wire to the node we should re-parent: its sketch container if any.
-    const toAdopt = new Set<string>();
-    for (const wid of wireIds) {
-      const wire = nodes[wid];
-      if (!wire) continue;
-      const parent = wire.parentId ? nodes[wire.parentId] : null;
-      if (parent && parent.type === 'sketch') toAdopt.add(parent.id);
-      else toAdopt.add(wid);
-    }
-    // Don't adopt the operation itself or create a cycle.
-    toAdopt.delete(operationId);
-    for (const id of toAdopt) {
-      // Skip if already a descendant chain issue (operation can't be under its own source)
-      if (nodes[id]?.children?.includes(operationId)) continue;
-      get().reparentNode(id, operationId);
-    }
-  },
-
   // ── Nodes ──────────────────────────────────────────────────────────────────
 
   addNode: (nodeData) => {
-    const { nodes, rootIds } = get();
-    const newNode: CADNode = {
-      ...nodeData,
-      children: [],
-      material: normalizeMaterial(nodeData.material),
-    };
-    const updatedNodes = { ...nodes, [newNode.id]: newNode };
-    const updatedRootIds = [...rootIds];
+    const { nodes, rootIds, activeComponentId } = get();
+    let working: Record<string, CADNode> = { ...nodes };
+    let workingRoots = [...rootIds];
+    let nextActive = activeComponentId;
 
-    if (newNode.parentId && updatedNodes[newNode.parentId]) {
-      updatedNodes[newNode.parentId] = {
-        ...updatedNodes[newNode.parentId],
-        children: [...updatedNodes[newNode.parentId].children, newNode.id],
-      };
-    } else {
-      updatedRootIds.push(newNode.id);
+    const newNode: CADNode = { ...nodeData, children: [], material: normalizeMaterial(nodeData.material) };
+    const t = newNode.type;
+    let parentId = newNode.parentId ?? null;
+
+    // ── Resolve a valid parent under the strict dual-tree rules ───────────────
+    const requestedOk = parentId !== null && !!working[parentId] && canContain(working[parentId].type, t);
+    if (!requestedOk) {
+      if (isStructural(t)) {
+        // assembly/component → keep a valid assembly parent, else root.
+        parentId = parentId && working[parentId]?.type === 'assembly' ? parentId : null;
+      } else if (isFeature(t) || isDatum(t)) {
+        // Features + datums MUST live under a component — ensure one exists.
+        const ensured = ensureComponentIn(working, workingRoots, activeComponentId);
+        working = ensured.nodes; workingRoots = ensured.rootIds;
+        parentId = ensured.componentId;
+        nextActive = ensured.componentId;
+      } else {
+        // sketch_wire / other child nodes: honour the requested parent if real,
+        // else fall back to root (legacy leaf behaviour).
+        if (!(parentId && working[parentId])) parentId = null;
+      }
+    } else if (working[parentId!].type === 'component') {
+      nextActive = parentId;            // dropped explicitly into a component → make it active
     }
 
-    const action = makeAction('ADD', `Add "${newNode.name}"`, Object.values(nodes), Object.values(updatedNodes));
-    set({ nodes: updatedNodes, rootIds: updatedRootIds,
+    newNode.parentId = parentId;
+    working[newNode.id] = newNode;
+    if (parentId && working[parentId]) {
+      working[parentId] = { ...working[parentId], children: [...working[parentId].children, newNode.id] };
+    } else {
+      workingRoots.push(newNode.id);
+    }
+
+    const action = makeAction('ADD', `Add "${newNode.name}"`, Object.values(nodes), Object.values(working), rootIds, workingRoots);
+    set({ nodes: working, rootIds: workingRoots, activeComponentId: nextActive,
           past: pushPast(get().past, action), future: [] });
     get().log(`Created: ${newNode.name} (${newNode.type})`, 'success');
+  },
+
+  setActiveComponent: (id) => set({ activeComponentId: id && get().nodes[id]?.type === 'component' ? id : null }),
+
+  createComponent: (name, parentId = null) => {
+    const { nodes } = get();
+    const count = Object.values(nodes).filter((n) => n.type === 'component').length + 1;
+    const parent = parentId && nodes[parentId]?.type === 'assembly' ? parentId : null;
+    const comp = makeContainer('component', name ?? `Part ${count}`, parent);
+    get().addNode(comp);              // addNode routes structural nodes to root / assembly
+    set({ activeComponentId: comp.id });
+    return comp.id;
+  },
+
+  createAssembly: (name, parentId = null) => {
+    const { nodes } = get();
+    const count = Object.values(nodes).filter((n) => n.type === 'assembly').length + 1;
+    const parent = parentId && nodes[parentId]?.type === 'assembly' ? parentId : null;
+    const asm = makeContainer('assembly', name ?? `Assembly ${count}`, parent);
+    get().addNode(asm);
+    return asm.id;
+  },
+
+  loadScene: (nodes, rootIds) => {
+    set({ nodes: { ...nodes }, rootIds: [...rootIds], selectedIds: [], activeComponentId: null, past: [], future: [] });
+    get().migrateToComponentTree();
+  },
+
+  migrateToComponentTree: () => {
+    const { nodes, rootIds } = get();
+    // Misplaced = a feature/datum NOT directly under a component (root-level, or
+    // nested under a 3D op via the old adoptSketchSources behaviour).
+    const misplaced = Object.values(nodes).filter((n) => {
+      if (!isFeature(n.type) && !isDatum(n.type)) return false;
+      const parent = n.parentId ? nodes[n.parentId] : null;
+      return !parent || parent.type !== 'component';
+    });
+    if (misplaced.length === 0) { set({ activeComponentId: Object.values(nodes).find((n) => n.type === 'component')?.id ?? null }); return; }
+
+    const ensured = ensureComponentIn({ ...nodes }, [...rootIds], null);
+    const working = ensured.nodes;
+    let workingRoots = ensured.rootIds;
+    for (const n of misplaced) {
+      workingRoots = detachFromParent(working, workingRoots, n.id);
+      working[n.id] = { ...working[n.id], parentId: ensured.componentId };
+      working[ensured.componentId] = {
+        ...working[ensured.componentId],
+        children: [...working[ensured.componentId].children, n.id],
+      };
+    }
+    set({ nodes: working, rootIds: workingRoots, activeComponentId: ensured.componentId });
+    get().log(`Organized ${misplaced.length} feature(s) under "${working[ensured.componentId].name}".`, 'info');
   },
 
   addSketchEntities: (nodeList, sketchId, autoConstraints, label) => {
@@ -751,7 +1085,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       };
     }
     const name = label ?? nodeList[0]?.name ?? 'entities';
-    const action = makeAction('ADD', `Add "${name}"`, Object.values(nodes), Object.values(updated));
+    const action = makeAction('ADD', `Add "${name}"`, Object.values(nodes), Object.values(updated), rootIds, updatedRootIds);
     set({ nodes: updated, rootIds: updatedRootIds, past: pushPast(get().past, action), future: [] });
     get().log(`Created: ${name} (${nodeList.length} edges)`, 'success');
   },
@@ -803,22 +1137,16 @@ export const useCADStore = create<CADState>((set, get) => ({
     const nodesBefore  = Object.values(nodes);
     const updatedNodes = { ...nodes };
     const deletedIds:  string[] = [];
-    const preservedSketchIds: string[] = [];
 
-    const removeRecursive = (targetId: string, isTarget = false) => {
+    // Recursive subtree delete. With profiles referenced by id (params.targetWireIds)
+    // rather than owned as children, a 3D operation has no sketch children — so
+    // deleting an Extrusion/Revolve removes only the operation and leaves its
+    // profile Sketch as a sibling in the component (reuse-safe). Deleting a
+    // component/assembly walks its children, so every feature/sub-component goes
+    // with it.
+    const removeRecursive = (targetId: string) => {
       const node = updatedNodes[targetId];
       if (!node) return;
-      // Adopted source sketches OUTLIVE the op that consumed them: deleting an
-      // extrusion/revolve/loft/sweep should leave its sketch in the tree (lifted
-      // back to root) so you can reuse it — e.g. decide you want a revolve instead
-      // of the extrude you just removed — without redrawing it. This only applies
-      // when the sketch is a SIDE-EFFECT of deleting an ancestor; deleting a sketch
-      // directly (isTarget) still removes it and its wires.
-      if (!isTarget && node.type === 'sketch') {
-        updatedNodes[targetId] = { ...node, parentId: null };
-        preservedSketchIds.push(targetId);
-        return;
-      }
       node.children.forEach((cid) => removeRecursive(cid));
       deletedIds.push(targetId);
       delete updatedNodes[targetId];
@@ -826,7 +1154,7 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     const parentId    = nodes[id].parentId;
     const deletedName = nodes[id].name;
-    removeRecursive(id, true);
+    removeRecursive(id);
 
     // Restore visibility of any input solids a deleted op had hidden (booleans
     // hide base+tools, fillet/chamfer hide the source). Without this, deleting
@@ -868,7 +1196,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       }
     }
 
-    const updatedRootIds = rootIds.filter((r) => r !== id).concat(preservedSketchIds);
+    const updatedRootIds = rootIds.filter((r) => !deletedIds.includes(r));
     if (parentId && updatedNodes[parentId]) {
       updatedNodes[parentId] = {
         ...updatedNodes[parentId],
@@ -880,13 +1208,15 @@ export const useCADStore = create<CADState>((set, get) => ({
     // sketch session — otherwise the app stays "in" a sketch that no longer
     // exists, blocking starting another sketch or extruding a different one.
     const activeSketchDeleted = !!sketchSession && deletedIds.includes(sketchSession.id);
+    const activeComponentDeleted = !!get().activeComponentId && deletedIds.includes(get().activeComponentId!);
 
     set({
       nodes: updatedNodes, rootIds: updatedRootIds,
       selectedIds: get().selectedIds.filter((s) => s !== id),
-      past: pushPast(get().past, makeAction('DELETE', `Delete "${deletedName}"`, nodesBefore, Object.values(updatedNodes))),
+      past: pushPast(get().past, makeAction('DELETE', `Delete "${deletedName}"`, nodesBefore, Object.values(updatedNodes), rootIds, updatedRootIds)),
       future: [],
       ...(activeSketchDeleted ? { sketchSession: null, interactionMode: 'SELECT' as InteractionMode } : {}),
+      ...(activeComponentDeleted ? { activeComponentId: null } : {}),
     });
 
     if (activeSketchDeleted) {
@@ -904,7 +1234,7 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     const notes = [
       restoredIds.length ? `restored ${restoredIds.length} input${restoredIds.length > 1 ? 's' : ''}` : '',
-      preservedSketchIds.length ? `kept ${preservedSketchIds.length} sketch${preservedSketchIds.length > 1 ? 'es' : ''}` : '',
+      deletedIds.length > 1 ? `removed ${deletedIds.length} node${deletedIds.length > 1 ? 's' : ''}` : '',
     ].filter(Boolean).join(', ');
     get().log(`Deleted: ${deletedName}${notes ? ` (${notes})` : ''}`, 'warn');
   },
@@ -933,20 +1263,20 @@ export const useCADStore = create<CADState>((set, get) => ({
   },
 
   renameNode: (id, name) => {
-    const { nodes } = get();
+    const { nodes, rootIds } = get();
     if (!nodes[id]) return;
     const nodesBefore  = Object.values(nodes);
     const updatedNodes = { ...nodes, [id]: { ...nodes[id], name } };
     set({
       nodes: updatedNodes,
-      past: pushPast(get().past, makeAction('RENAME', `Rename → "${name}"`, nodesBefore, Object.values(updatedNodes))),
+      past: pushPast(get().past, makeAction('RENAME', `Rename → "${name}"`, nodesBefore, Object.values(updatedNodes), rootIds, rootIds)),
       future: [],
     });
   },
 
   // Commits a final transform to undo history (drag-end, panel input)
   updateTransform: (id, position, rotation, scale) => {
-    const { nodes } = get();
+    const { nodes, rootIds } = get();
     if (!nodes[id]) return;
     const nodesBefore  = JSON.parse(JSON.stringify(Object.values(nodes)));
     const updatedNodes: Record<string, any> = {
@@ -963,7 +1293,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     }
     set({
       nodes: updatedNodes,
-      past:  pushPast(get().past, makeAction('TRANSFORM', 'Transform', nodesBefore, Object.values(updatedNodes))),
+      past:  pushPast(get().past, makeAction('TRANSFORM', 'Transform', nodesBefore, Object.values(updatedNodes), rootIds, rootIds)),
       future: [],
     });
   },
@@ -984,7 +1314,7 @@ export const useCADStore = create<CADState>((set, get) => ({
   },
 
   updateMaterial: (id, partial) => {
-    const { nodes } = get();
+    const { nodes, rootIds } = get();
     if (!nodes[id]) return;
     const nodesBefore  = Object.values(nodes);
     const updatedNodes = {
@@ -996,7 +1326,7 @@ export const useCADStore = create<CADState>((set, get) => ({
     };
     set({
       nodes: updatedNodes,
-      past:  pushPast(get().past, makeAction('MATERIAL', 'Change material', nodesBefore, Object.values(updatedNodes))),
+      past:  pushPast(get().past, makeAction('MATERIAL', 'Change material', nodesBefore, Object.values(updatedNodes), rootIds, rootIds)),
       future: [],
     });
     get().log(`Material updated: ${nodes[id].name}`, 'info');
@@ -1036,13 +1366,15 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     set({
       nodes:       restoredNodes,
-      rootIds:     Object.values(restoredNodes).filter((n) => !n.parentId).map((n) => n.id),
+      rootIds:     reconcileRoots(action.rootBefore, restoredNodes),   // exact pre-action order
       selectedIds: [],
       past:        past.slice(0, -1),
       future:      [action, ...future],
     });
 
     syncScene(added, removed, restoredNodes);
+    const reWires = sketchWiresWithChangedGeom(currentNodes, restoredNodes);
+    if (reWires.length) window.dispatchEvent(new CustomEvent('cad-sketch-rebuild', { detail: { ids: reWires } }));
     get().log(`Undo: ${action.description}`, 'info');
   },
 
@@ -1057,13 +1389,15 @@ export const useCADStore = create<CADState>((set, get) => ({
 
     set({
       nodes:       restoredNodes,
-      rootIds:     Object.values(restoredNodes).filter((n) => !n.parentId).map((n) => n.id),
+      rootIds:     reconcileRoots(action.rootAfter, restoredNodes),    // exact post-action order
       selectedIds: [],
       past:        [...past, action],
       future:      future.slice(1),
     });
 
     syncScene(added, removed, restoredNodes);
+    const reWires = sketchWiresWithChangedGeom(currentNodes, restoredNodes);
+    if (reWires.length) window.dispatchEvent(new CustomEvent('cad-sketch-rebuild', { detail: { ids: reWires } }));
     get().log(`Redo: ${action.description}`, 'info');
   },
 }));

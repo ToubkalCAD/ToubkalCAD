@@ -62,8 +62,12 @@ emcc \
   -s EXPORT_NAME=createSlvsModule \
   -s ENVIRONMENT=web,worker \
   -s ALLOW_MEMORY_GROWTH=1 \
-  -s SINGLE_FILE=0 \
+  -s SINGLE_FILE=1 \
   -o "$OUT/libslvs.mjs"
+# SINGLE_FILE=1 base64-embeds the (small) .wasm into libslvs.mjs → one
+# self-contained artifact. Avoids a second .wasm fetch whose path would have to
+# be resolved relative to the bundle; CopyRspackPlugin just drops this one file
+# next to the browser bundle, and the Node harness imports it directly.
 
 echo ">> done. Artifacts:"
 ls -la "$OUT"/libslvs.* 2>/dev/null || true

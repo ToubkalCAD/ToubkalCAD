@@ -383,6 +383,33 @@ const AppInitializer: React.FC = () => {
         ThreeMeshCache.getInstance();
         installRecomputeBridge();   // step 5: undo regenerates freed shapes via the engine
 
+        // Live sketch-drag engine (soft-constraint solver loop) behind the store's
+        // start/update/stopDragging actions. Imported here (not from the store) so
+        // the store keeps no static dependency on the solver/OCC layer.
+        {
+          const [{ installDragEngine }, { SketchDragController }] = await Promise.all([
+            import('./store/cadStore'),
+            import('./services/SketchDragController'),
+          ]);
+          installDragEngine(new SketchDragController());
+        }
+
+        // Opt into the SolveSpace WASM solver IF its glue is deployed; otherwise
+        // the legacy LM solver stays active. Lazily imported so it lives in its
+        // own chunk and never blocks startup — installSolver() awaits the
+        // adapter's init() (loads libslvs.mjs), which rejects when the artifact
+        // is absent, leaving the default solver in place.
+        try {
+          const [{ installSolver }, { SolveSpaceSolverAdapter }] = await Promise.all([
+            import('./services/solver'),
+            import('./services/solver/SolveSpaceSolverAdapter'),
+          ]);
+          await installSolver(new SolveSpaceSolverAdapter());
+          console.info('[solver] SolveSpace WASM active');
+        } catch {
+          console.info('[solver] SolveSpace unavailable — legacy solver active');
+        }
+
         setStep('Loading interface…');
         await new Promise<void>((r) => setTimeout(r, 60));
         setReady(true);

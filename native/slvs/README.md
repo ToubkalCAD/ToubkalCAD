@@ -12,7 +12,17 @@ wrapped by a thin Embind shim, for use behind ToubkalCAD's `ISketchSolver` seam.
 | `test/smoke.mjs` | Standalone Node test — solves a tiny system, no app/browser. |
 | `third_party/` | SolveSpace clone (gitignored, fetched by `build.sh`). |
 
-Build outputs land in **`src/services/solver/wasm/`** as `libslvs.mjs` + `libslvs.wasm` (gitignored). The TypeScript side (`loadSlvs.ts`, `libslvs.d.ts`, `slvsConstants.ts`) already lives there and typechecks against the hand-written `.d.ts` before the artifact exists.
+The build emits a single self-contained **`src/services/solver/wasm/libslvs.mjs`** (`SINGLE_FILE=1` base64-embeds the wasm; gitignored). The TypeScript side (`loadSlvs.ts`, `libslvs.d.ts`, `slvsConstants.ts`) already lives there and typechecks against the hand-written `.d.ts` before the artifact exists.
+
+## Activation (already wired)
+
+The app **auto-activates** SolveSpace at startup once `libslvs.mjs` exists — no code change needed:
+
+- `loadSlvs.ts` imports `./libslvs.mjs` with a `webpackIgnore` magic comment, so the bundler resolves it at runtime only — the app builds fine when the artifact is absent.
+- `rspack.config.ts` has a `CopyRspackPlugin` (`noErrorOnMissing`) that copies `libslvs.mjs` to the dist root next to the bundle, where the runtime import resolves.
+- `src/index.tsx` calls `installSolver(new SolveSpaceSolverAdapter())` in a guarded `try` after kernel init; if the glue isn't deployed it logs and keeps the legacy solver. Check the console: `[solver] SolveSpace WASM active` vs `… legacy solver active` (or `getSolver().id`).
+
+So the flow is: run `./build.sh` → rebuild/redeploy the app → SolveSpace becomes the live solver. For `npm run dev`, restart the dev server after building so the copy is picked up.
 
 ## Build
 

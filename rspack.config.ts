@@ -14,7 +14,7 @@
 //     pour SharedArrayBuffer et les Web Workers WASM
 // ============================================================
 
-import { HtmlRspackPlugin } from '@rspack/core';
+import { HtmlRspackPlugin, CopyRspackPlugin } from '@rspack/core';
 import type { Configuration } from '@rspack/core';
 // defineConfig is a no-op type helper — inline the type instead
 const defineConfig = (c: Configuration): Configuration => c;
@@ -122,6 +122,15 @@ export default defineConfig({
   plugins: [
     new HtmlRspackPlugin({
       template: './public/index.html',
+    }),
+    // SolveSpace solver glue (native/slvs/build.sh output). Emitted to the dist
+    // root so loadSlvs()'s `webpackIgnore` runtime import (./libslvs.mjs)
+    // resolves next to the bundle. noErrorOnMissing → the build still succeeds
+    // when the WASM hasn't been built (legacy solver stays active).
+    new CopyRspackPlugin({
+      patterns: [
+        { from: 'src/services/solver/wasm/libslvs.mjs', to: 'libslvs.mjs', noErrorOnMissing: true },
+      ],
     }),
   ],
 

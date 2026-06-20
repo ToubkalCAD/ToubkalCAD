@@ -64,6 +64,9 @@ export const TreeContextMenu: React.FC = () => {
   const isSolid           = hasShape; // eligible for per-edge fillet/chamfer + boolean
   const isPrimitive       = !!primitiveKind(node); // box/cylinder/sphere/torus/cone → editable dims
   const isDatumPlane      = node.type === 'datum_plane';
+  const isAssembly        = node.type === 'assembly';
+  const isComponent       = node.type === 'component';
+  const isActiveComponent = isComponent && useCADStore.getState().activeComponentId === menu.nodeId;
 
   // Sketch wire IDs available for 3D operations (sketch container) or just this wire
   const wireIds: string[] = isSketchWire
@@ -72,14 +75,15 @@ export const TreeContextMenu: React.FC = () => {
       ? node.children.filter((id) => nodes[id]?.type === 'sketch_wire')
       : [];
 
-  // Nothing to show for unrecognised types
-  if (!isSketchContainer && !isSketchWire && !isOp3D && !isBlendResult && !isSolid && !isDatumPlane) return null;
+  // Every node renders at least the universal Delete action below, so we no longer
+  // bail for "unrecognised" types — type-specific sections are simply omitted.
 
   const firstWireId = wireIds[0];
 
   // ── Position clamped to viewport ──────────────────────────────────────────────
   const mW = 210;
-  const mH = isSketchContainer ? 260 : (isOp3D || isBlendResult || isBooleanResult ? 180 : 150);
+  // + the universal Delete row (~32px).
+  const mH = 32 + (isSketchContainer ? 260 : (isAssembly || isComponent ? 170 : (isOp3D || isBlendResult || isBooleanResult ? 180 : 150)));
   const x  = menu.x + mW > window.innerWidth  ? menu.x - mW : menu.x;
   const y  = menu.y + mH > window.innerHeight ? menu.y - mH : menu.y;
 
@@ -301,6 +305,24 @@ export const TreeContextMenu: React.FC = () => {
         </div>
       )}
 
+      {/* ── Assembly: nest components / sub-assemblies ───────────────────────── */}
+      {isAssembly && (
+        <div style={{ padding: '3px 0 1px' }}>
+          <Item icon="◰" label="New Component" accent="#6e7681"
+            onClick={() => { closeMenu(); const id = useCADStore.getState().createComponent(undefined, menu.nodeId); useCADStore.getState().setSelectedIds([id]); }} />
+          <Item icon="▤" label="New Sub-Assembly" accent="#9aa0a6"
+            onClick={() => { closeMenu(); const id = useCADStore.getState().createAssembly(undefined, menu.nodeId); useCADStore.getState().setSelectedIds([id]); }} />
+        </div>
+      )}
+
+      {/* ── Component: make it the target for new features ────────────────────── */}
+      {isComponent && (
+        <div style={{ padding: '3px 0 1px' }}>
+          <Item icon="◎" label={isActiveComponent ? 'Active component ✓' : 'Set as active'} accent="#6e7681"
+            onClick={() => { closeMenu(); useCADStore.getState().setActiveComponent(menu.nodeId); }} />
+        </div>
+      )}
+
       {/* ── Primitive: edit dimensions (rebuilds + propagates downstream) ──── */}
       {isPrimitive && (
         <div style={{ padding: '3px 0 1px' }}>
@@ -376,6 +398,12 @@ export const TreeContextMenu: React.FC = () => {
           )}
         </>
       )}
+
+      {/* ── Delete (every node) — recursive for containers; undoable ───────────── */}
+      <Sep />
+      <Item icon="✕" label="Delete" accent="#c2453f"
+        sub={node.children.length ? `+ ${node.children.length} inside` : undefined}
+        onClick={() => { closeMenu(); useCADStore.getState().deleteNode(menu.nodeId); }} />
     </div>
   );
 };
@@ -383,6 +411,7 @@ export const TreeContextMenu: React.FC = () => {
 // ─── Icon / colour maps ───────────────────────────────────────────────────────
 
 const NODE_ICON: Partial<Record<NodeType, string>> = {
+  assembly: '▤', component: '◰',
   sketch: '✦', sketch_wire: '╱',
   extrusion: '↑', revolve: '↻', loft: '⊿', sweep: '⌇', compound: '◈',
   box: '◻', cylinder: '⬡', sphere: '●', boolean_operation: '⊕',
@@ -390,6 +419,7 @@ const NODE_ICON: Partial<Record<NodeType, string>> = {
 };
 
 const NODE_COLOR: Partial<Record<NodeType, string>> = {
+  assembly: '#9aa0a6', component: '#6e7681',
   sketch: '#ff9900', sketch_wire: '#ffcc00',
   extrusion: '#aa44cc', revolve: '#cc4488', loft: '#cc8844', sweep: '#44bbcc', compound: '#888888',
   box: '#5588cc', cylinder: '#44aa66', sphere: '#cc6644', boolean_operation: '#ccaa22',

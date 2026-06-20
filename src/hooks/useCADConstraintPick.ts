@@ -17,12 +17,9 @@
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
-import type { SketchRef, SketchConstraint, Workplane } from '../store/cadStore';
+import type { SketchRef, Workplane } from '../store/cadStore';
 import { fromLocal2D, toLocal2D } from '../services/OccSketchService';
-import { getSolver } from '../services/solver';
-import { DATUM_UAXIS, DATUM_VAXIS, ORIGIN_REF, datumGeoms, datumFixedConstraints, isDatumId } from '../services/SketchDatums';
-import { collectSolverGeoms, rebuildSketchEntity, geomKey } from '../services/SketchSolveBridge';
-import { propagateFromStore } from '../services/RecomputeEngine.live';
+import { DATUM_UAXIS, DATUM_VAXIS, ORIGIN_REF } from '../services/SketchDatums';
 
 const COLOR_COMMIT = 0x003388;
 const COLOR_PICK   = 0xff8800;
@@ -53,9 +50,20 @@ export function useCADConstraintPick(
   const status        = useCADStore((s) => s.constraintStatus);
   const litRef        = useRef<Set<string>>(new Set());
 
+  // The sketch that drag/pick operates on: the constraint panel's sketch in
+  // CONSTRAIN mode, else the open sketch session in SELECT mode (free-drag while
+  // editing a sketch). Null in every other context → drag/pick are inert.
+  const activeSketchId = (): string | null => {
+    const st = useCADStore.getState();
+    if (st.interactionMode === 'CONSTRAIN') return st.constraintReq?.sketchId ?? null;
+    if (st.interactionMode === 'SELECT')    return st.sketchSession?.id ?? null;
+    return null;
+  };
+  const isDragMode = (): boolean => activeSketchId() !== null;
+
   const pickableIds = (): Set<string> => {
     const st = useCADStore.getState();
-    const sketchId = st.constraintReq?.sketchId;
+    const sketchId = activeSketchId();
     if (!sketchId) return new Set();
     const ids = new Set<string>();
     for (const id of st.nodes[sketchId]?.children ?? []) {
@@ -68,7 +76,7 @@ export function useCADConstraintPick(
   // Workplane of the active sketch (datums live in it).
   const sketchWP = (): Workplane | null => {
     const st = useCADStore.getState();
-    const sid = st.constraintReq?.sketchId;
+    const sid = activeSketchId();
     if (!sid) return null;
     for (const id of st.nodes[sid]?.children ?? []) {
       const wp = st.nodes[id]?.params?.workplane as Workplane | undefined;
@@ -115,9 +123,11 @@ export function useCADConstraintPick(
     return out;
   };
 
-  // Draggable points = those backed by a direct solver variable (line endpoints,
-  // circle/arc centres). The origin is fixed and arc endpoints are derived, so
-  // they are pickable for constraints but not directly draggable.
+  // Draggable points. Line endpoints + circle/arc centres map to direct solver
+  // coordinate variables. Arc ENDPOINTS map instead to the arc's parametric sweep
+  // angles (a1/a2) — the drag engine handles them in "arc-angle" mode (mouse →
+  // atan2 about the centre), so they are draggable even though they aren't raw
+  // coordinate variables.
   const dragCands = (): PointCand[] => {
     const st = useCADStore.getState();
     const out: PointCand[] = [];
@@ -128,8 +138,12 @@ export function useCADConstraintPick(
       if (g.kind === 'line') {
         out.push({ ref: { kind: 'point', id, pt: 'a' }, world: fromLocal2D(g.a[0], g.a[1], wp) });
         out.push({ ref: { kind: 'point', id, pt: 'b' }, world: fromLocal2D(g.b[0], g.b[1], wp) });
-      } else if (g.kind === 'circle' || g.kind === 'arc') {
+      } else if (g.kind === 'circle') {
         out.push({ ref: { kind: 'point', id, pt: 'c' }, world: fromLocal2D(g.c[0], g.c[1], wp) });
+      } else if (g.kind === 'arc') {
+        out.push({ ref: { kind: 'point', id, pt: 'c' }, world: fromLocal2D(g.c[0], g.c[1], wp) });
+        out.push({ ref: { kind: 'point', id, pt: 'a' }, world: fromLocal2D(g.c[0] + g.r * Math.cos(g.a1), g.c[1] + g.r * Math.sin(g.a1), wp) });
+        out.push({ ref: { kind: 'point', id, pt: 'b' }, world: fromLocal2D(g.c[0] + g.r * Math.cos(g.a2), g.c[1] + g.r * Math.sin(g.a2), wp) });
       }
     }
     return out;
@@ -220,27 +234,15 @@ export function useCADConstraintPick(
       return bestAxis?.ref ?? null;
     };
 
-    // ── Live drag: drag a draggable point and re-solve every frame ─────────────
+    // ── Live drag (soft constraint) ────────────────────────────────────────────
+    // The pointer math (pick + plane projection) lives here; the solve/sync/seed
+    // loop lives in the store's start/update/stopDragging actions (→ the injected
+    // SketchDragController). This hook only feeds the store sketch-local cursor
+    // coordinates each frame.
     const drag: {
-      ref: SketchRef | null; active: boolean; raf: number;
-      local: { x: number; y: number } | null; orbitWas?: boolean; changed: Set<string>;
-    } = { ref: null, active: false, raf: 0, local: null, changed: new Set() };
-
-    const nearestDragPoint = (e: MouseEvent): SketchRef | null => {
-      const camera = cameraRef.current;
-      if (!camera) return null;
-      const rect = container.getBoundingClientRect();
-      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-      let best: { ref: SketchRef; d: number } | null = null;
-      for (const cand of dragCands()) {
-        const v = cand.world.clone().project(camera);
-        if (v.z > 1) continue;
-        const sx = (v.x * 0.5 + 0.5) * rect.width, sy = (-v.y * 0.5 + 0.5) * rect.height;
-        const d = Math.hypot(sx - mx, sy - my);
-        if (d < POINT_PX && (!best || d < best.d)) best = { ref: cand.ref, d };
-      }
-      return best?.ref ?? null;
-    };
+      origin: SketchRef | null; grabLocal: [number, number] | null;
+      active: boolean; raf: number; local: { x: number; y: number } | null; orbitWas?: boolean;
+    } = { origin: null, grabLocal: null, active: false, raf: 0, local: null };
 
     // Mouse → sketch-plane local 2D (u,v).
     const mouseLocal = (e: MouseEvent): { x: number; y: number } | null => {
@@ -257,40 +259,57 @@ export function useCADConstraintPick(
       return { x: loc.u, y: loc.v };
     };
 
-    // Re-solve with the dragged point softly pinned to the cursor (the pin yields
-    // to real constraints, so a constrained point only slides within its
-    // manifold); rebuild every wire that moved.
-    const liveSolve = (dragRef: SketchRef, local: { x: number; y: number }): string[] => {
-      const st = useCADStore.getState();
-      const sid = st.constraintReq?.sketchId;
-      if (!sid) return [];
-      const real = collectSolverGeoms(sid);
-      if (!real.length) return [];
-      const persisted: SketchConstraint[] = ((st.nodes[sid]?.params?.constraints as any[]) ?? []).map((c) =>
-        c.refs ? c : { id: c.id, type: c.type, value: c.value, refs: (c.entityIds ?? []).map((id: string) => ({ kind: 'entity', id })) });
-      const cons: SketchConstraint[] = [...persisted, ...datumFixedConstraints()];
-      const beforeKey = new Map(real.map((g) => [g.id, geomKey(g)]));
-      const res = getSolver().solve([...real, ...datumGeoms()], cons, { ref: dragRef, target: [local.x, local.y] });
-      const changed: string[] = [];
-      for (const g of Object.values(res.geoms)) {
-        if (isDatumId(g.id)) continue;
-        if (beforeKey.get(g.id) !== geomKey(g)) { rebuildSketchEntity(g.id, g); changed.push(g.id); }
+    // Nearest draggable control point within POINT_PX (line endpoint / centre).
+    const nearestDragPoint = (e: MouseEvent): SketchRef | null => {
+      const camera = cameraRef.current;
+      if (!camera) return null;
+      const rect = container.getBoundingClientRect();
+      const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+      let best: { ref: SketchRef; d: number } | null = null;
+      for (const cand of dragCands()) {
+        const v = cand.world.clone().project(camera);
+        if (v.z > 1) continue;
+        const sx = (v.x * 0.5 + 0.5) * rect.width, sy = (-v.y * 0.5 + 0.5) * rect.height;
+        const d = Math.hypot(sx - mx, sy - my);
+        if (d < POINT_PX && (!best || d < best.d)) best = { ref: cand.ref, d };
       }
-      return changed;
+      return best?.ref ?? null;
+    };
+
+    // What a press would grab: a control point (preferred) else an entity body —
+    // so the user can grab anywhere on a line/circle/arc to drag the whole shape.
+    const grabTarget = (e: MouseEvent): { origin: SketchRef; grabLocal: [number, number] } | null => {
+      const local = mouseLocal(e);
+      if (!local) return null;
+      const pt = nearestDragPoint(e);
+      if (pt) return { origin: pt, grabLocal: [local.x, local.y] };
+      const camera = cameraRef.current, scene = sceneRef.current;
+      const avail = pickableIds();
+      if (camera && scene && avail.size) {
+        const rect = container.getBoundingClientRect();
+        ndc.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+        raycaster.setFromCamera(ndc, camera);
+        const lines = scene.children.filter((c) => c instanceof THREE.Line && avail.has(c.userData?.cadNodeId));
+        const hits = raycaster.intersectObjects(lines, false);
+        if (hits.length) return { origin: { kind: 'entity', id: hits[0].object.userData.cadNodeId as string }, grabLocal: [local.x, local.y] };
+      }
+      return null;
     };
 
     const solveStep = () => {
       drag.raf = 0;
-      if (!drag.ref || !drag.local) return;
-      for (const id of liveSolve(drag.ref, drag.local)) drag.changed.add(id);
+      if (!drag.active || !drag.local) return;
+      useCADStore.getState().updateDragging([drag.local.x, drag.local.y]);
     };
 
     const onDown = (e: MouseEvent) => {
       if (e.button !== 0) return;
-      if (useCADStore.getState().interactionMode !== 'CONSTRAIN') return;
+      if (!isDragMode()) return;
       downPos.x = e.clientX; downPos.y = e.clientY; downPos.active = true;
-      drag.ref = nearestDragPoint(e); drag.active = false; drag.local = null; drag.changed.clear();
-      if (drag.ref) {
+      const t = grabTarget(e);
+      drag.origin = t?.origin ?? null; drag.grabLocal = t?.grabLocal ?? null;
+      drag.active = false; drag.local = null;
+      if (drag.origin) {
         // Suppress orbit/pan so the drag moves geometry, not the camera.
         const orbit = window.cadControls as { enabled: boolean } | null;
         if (orbit) { drag.orbitWas = orbit.enabled; orbit.enabled = false; }
@@ -298,10 +317,13 @@ export function useCADConstraintPick(
     };
 
     const onMove = (e: MouseEvent) => {
-      if (!downPos.active || !drag.ref) return;
-      if (useCADStore.getState().interactionMode !== 'CONSTRAIN') return;
+      if (!downPos.active || !drag.origin) return;
+      if (!isDragMode()) return;
       if (!drag.active && Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) <= CLICK_SLOP_PX) return;
-      drag.active = true;
+      if (!drag.active) {
+        drag.active = true;
+        useCADStore.getState().startDragging(drag.origin, drag.grabLocal ?? [0, 0]);
+      }
       e.stopPropagation();
       const local = mouseLocal(e);
       if (!local) return;
@@ -319,17 +341,15 @@ export function useCADConstraintPick(
     const onUp = (e: MouseEvent) => {
       if (e.button !== 0) return;
       const wasDrag = drag.active;
-      const dragRef = drag.ref;
       endDrag();
-      drag.ref = null; drag.active = false;
+      drag.origin = null; drag.grabLocal = null; drag.active = false;
 
-      if (wasDrag && dragRef) {
-        // Final solve at the release point, then recompute dependents once.
+      if (wasDrag) {
+        // Final frame at the release point, then release the pin + recompute once.
         const local = mouseLocal(e) ?? drag.local;
-        if (local) for (const id of liveSolve(dragRef, local)) drag.changed.add(id);
+        if (local) useCADStore.getState().updateDragging([local.x, local.y]);
+        useCADStore.getState().stopDragging();
         drag.local = null;
-        if (drag.changed.size) propagateFromStore([...drag.changed]);
-        drag.changed.clear();
         downPos.active = false;
         e.stopPropagation();
         return;
