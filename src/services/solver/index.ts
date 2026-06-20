@@ -26,4 +26,14 @@ export async function installSolver(solver: ISketchSolver): Promise<void> {
 
 export type { ISketchSolver, ISolveSession };
 export { LegacySolverAdapter };
-export { SolveSpaceSolverAdapter } from './SolveSpaceSolverAdapter';
+
+// NOTE: SolveSpaceSolverAdapter is deliberately NOT re-exported here. This
+// barrel is in the app's import graph (ConstraintPanel/useCADConstraintPick →
+// getSolver), and the adapter statically imports the WASM glue (./wasm/libslvs),
+// which does not exist until native/slvs/build.sh has run — re-exporting it
+// would break `npm run dev`/`build` with a "Can't resolve ./libslvs" error and
+// would also pull the solver WASM into the main bundle.
+//
+// Once the WASM is built, wire it lazily so it stays in its own chunk, e.g.:
+//   const { SolveSpaceSolverAdapter } = await import('./SolveSpaceSolverAdapter');
+//   await installSolver(new SolveSpaceSolverAdapter());
