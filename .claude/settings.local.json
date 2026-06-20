@@ -50,7 +50,25 @@
       "Bash(npx playwright *)",
       "Bash(echo \"started pid $!\")",
       "Bash(sed -i \"s/SKETCH_INTERSECT_PICK/INTERSECT_PICK/g\" src/hooks/useCADSketchIntersectPick.ts)",
-      "Bash(sed -i \"s/SKETCH_PROJECT_PICK/PROJECT_PICK/g; s/SKETCH_INTERSECT_PICK/INTERSECT_PICK/g\" src/components/Ribbon.tsx)"
+      "Bash(sed -i \"s/SKETCH_PROJECT_PICK/PROJECT_PICK/g; s/SKETCH_INTERSECT_PICK/INTERSECT_PICK/g\" src/components/Ribbon.tsx)",
+      "Bash(grep -nE 'HasNormals|HasUVNodes|UVNode|SetNormal|class Poly_Triangulation|Normal\\\\\\(|class Poly_Connect|ComputeNormals' node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(awk 'NR>=16400 && NR<=16485 && /export declare class/' node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(git rm *)",
+      "Bash(grep -E \"\\\\.js$|\\\\.wasm$\")",
+      "Bash(grep -rnE \"params = \\\\{|setNodeParams\\\\\\(id, \\\\{|boolOp|baseId|toolIds\" src/components/BooleanActionPanel.tsx)",
+      "Bash(sed -i \"/import '.\\\\/services\\\\/__verifyBridge';/d\" src/index.tsx)",
+      "Bash(pkill -f \"rspack serve\")",
+      "Bash(grep -v \"^$\")",
+      "Bash(echo \"tsc exit: $?\")",
+      "Bash(awk '/class BRepExtrema_DistShapeShape_1/{f=1} f&&/constructor|Value\\\\\\(|Perform/{print; c++} f&&c>4{exit}' node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(awk '/class BRepBuilderAPI_MakeVertex /{f=1} f&&/constructor|Vertex\\\\\\(/{print} f&&/\\\\}/{exit}' node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(grep -a -E \"^===|solids=|IsDone|THREW|EXCEPTION|null$\")",
+      "Bash(npx tsx *)",
+      "Bash(npx ts-node *)",
+      "Bash(echo \"TEST EXIT: $?\")",
+      "Skill(run)",
+      "Bash(rm -f /tmp/undo.mjs /tmp/reorder.mjs /tmp/shot-*.png /tmp/toubkal-dev.log)",
+      "Bash(curl -s -o /dev/null -w \"server: %{http_code}\\\\n\" http://localhost:8080)"
     ]
   }
 }
