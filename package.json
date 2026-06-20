@@ -16,7 +16,8 @@
     "test:stableref-datum": "node scripts/test-stableref-datum.mjs",
     "test:stableref-sketch": "node scripts/test-stableref-sketch.mjs",
     "test:history-delta": "node scripts/test-history-delta.mjs",
-    "test:region-backfill": "node scripts/test-region-backfill.mjs"
+    "test:region-backfill": "node scripts/test-region-backfill.mjs",
+    "test:solver": "tsx native/slvs/test/crosscheck.ts"
   },
   "dependencies": {
     "dockview": "^1.11.0",

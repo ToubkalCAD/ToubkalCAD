@@ -9,7 +9,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
-import type { Workplane } from '../store/cadStore';
+import type { Workplane, SketchConstraint } from '../store/cadStore';
 import { OccSketchService, workplaneBasis, toLocal2D, fromLocal2D } from '../services/OccSketchService';
 import { buildSketchDims } from '../utils/sketchDraftDims';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
@@ -375,6 +375,65 @@ export function useCADSketchTool(
 
   // ─── Register finalized sketch ───────────────────────────────────────────────
 
+  // ─── Register a decomposed straight-edge shape (rectangle / polygon) ─────────
+  // Emits one `line` sketch_wire per edge plus auto-constraints (corner
+  // coincidences, and edge Horizontal/Vertical for rectangles) on the active
+  // sketch container, so the shape is a first-class constrainable/draggable set
+  // of lines instead of an opaque polyline. Returns false (caller falls back to
+  // the single-polyline path) when there's no sketch session to host the
+  // constraints. `hv[i]` optionally pins edge i Horizontal ('H') or Vertical ('V').
+  const registerStraightShape = useCallback((
+    oc: any, wp: Workplane, corners2D: [number, number][], baseName: string,
+    hv?: (('H' | 'V') | null)[],
+  ): boolean => {
+    const { sketchSession } = useCADStore.getState();
+    if (!sketchSession) return false;
+    const N = corners2D.length;
+    if (N < 3) return false;
+
+    const reg = CADGeometryRegistry.getInstance();
+    const ids = corners2D.map(() => crypto.randomUUID());
+    const nodes: any[] = [];
+    const visuals: { id: string; pts: number[][] }[] = [];
+    const constraints: SketchConstraint[] = [];
+
+    for (let i = 0; i < N; i++) {
+      const a2 = corners2D[i], b2 = corners2D[(i + 1) % N];
+      const a3 = fromLocal2D(a2[0], a2[1], wp), b3 = fromLocal2D(b2[0], b2[1], wp);
+      const wire = OccSketchService.createClosedWireFromEdges(oc, [OccSketchService.createLineEdge(oc, a3, b3)]);
+      reg.registerShape(ids[i], wire);
+      nodes.push({
+        id: ids[i], name: `${baseName} ${i + 1}`, type: 'sketch_wire',
+        visible: true, locked: false, parentId: sketchSession.id, notes: '',
+        transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
+        material: { color: 0x003388, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
+        params: { workplane: wp, sketchGeom: { kind: 'line', a: a2, b: b2 } },
+      });
+      visuals.push({ id: ids[i], pts: [[a3.x, a3.y, a3.z], [b3.x, b3.y, b3.z]] });
+    }
+    // Corner coincidences: edge[i].b ≡ edge[i+1].a (closing the loop).
+    for (let i = 0; i < N; i++) {
+      constraints.push({ id: crypto.randomUUID(), type: 'COINCIDENT',
+        refs: [{ kind: 'point', id: ids[i], pt: 'b' }, { kind: 'point', id: ids[(i + 1) % N], pt: 'a' }] });
+    }
+    if (hv) for (let i = 0; i < N; i++) {
+      if (hv[i] === 'H') constraints.push({ id: crypto.randomUUID(), type: 'HORIZONTAL', refs: [{ kind: 'entity', id: ids[i] }] });
+      if (hv[i] === 'V') constraints.push({ id: crypto.randomUUID(), type: 'VERTICAL',   refs: [{ kind: 'entity', id: ids[i] }] });
+    }
+
+    useCADStore.getState().addSketchEntities(nodes, sketchSession.id, constraints, baseName);
+    for (const v of visuals) window.dispatchEvent(new CustomEvent('cad-sketch-add-visual', { detail: v }));
+
+    clearPreview();
+    clearDims();
+    committedRef.current = [];
+    clicksRef.current = [];
+    useCADStore.getState().resetSketchInput();
+    useCADStore.getState().setSelectedIds(ids);
+    useCADStore.getState().setInteractionMode('SELECT');
+    return true;
+  }, [clearPreview, clearDims]);
+
   const registerWire = useCallback((oc: any, wire: any, shapeLabel: string, wp: Workplane, geom?: any) => {
     const id = crypto.randomUUID();
     CADGeometryRegistry.getInstance().registerShape(id, wire);
@@ -464,12 +523,18 @@ export function useCADSketchTool(
         case 'SKETCH_RECTANGLE': {
           if (clicks.length === 2) {
             const [c1, c2] = clicks;
-            const wire = OccSketchService.createRectangleWire(oc, c1, c2, wp);
-            const samp = sampleRect3D(c1, c2, wp);
-            addCommitted(samp);
-            // Closed polyline geom → rectangle becomes a trim/extend/split target
-            // and a cutter for other entities (its 4 edges).
-            registerWire(oc, wire, 'Rectangle', wp, { kind: 'polyline', pts: localPts2D(samp, wp) });
+            const l1 = toLocal2D(c1, wp), l2 = toLocal2D(c2, wp);
+            if (Math.abs(l2.u - l1.u) < 0.01 || Math.abs(l2.v - l1.v) < 0.01) { clicks.pop(); break; }
+            // Decompose into 4 constrained lines (bottom-H, right-V, top-H, left-V)
+            // so the rectangle is fully constrainable/draggable. Falls back to a
+            // single closed polyline when there's no sketch container.
+            const corners: [number, number][] = [[l1.u, l1.v], [l2.u, l1.v], [l2.u, l2.v], [l1.u, l2.v]];
+            if (!registerStraightShape(oc, wp, corners, 'Rectangle', ['H', 'V', 'H', 'V'])) {
+              const wire = OccSketchService.createRectangleWire(oc, c1, c2, wp);
+              const samp = sampleRect3D(c1, c2, wp);
+              addCommitted(samp);
+              registerWire(oc, wire, 'Rectangle', wp, { kind: 'polyline', pts: localPts2D(samp, wp) });
+            }
           }
           break;
         }
@@ -530,10 +595,22 @@ export function useCADSketchTool(
         case 'SKETCH_POLYGON': {
           if (clicks.length === 2) {
             const [c, rim] = clicks;
-            const wire  = OccSketchService.createPolygonWire(oc, c, rim, sides, wp);
-            const samp = samplePolygon3D(c, rim, sides, wp);
-            addCommitted(samp);
-            registerWire(oc, wire, `Polygon-${sides}`, wp, { kind: 'polyline', pts: localPts2D(samp, wp) });
+            const lc = toLocal2D(c, wp), lr = toLocal2D(rim, wp);
+            const r = Math.hypot(lr.u - lc.u, lr.v - lc.v);
+            if (r < 0.01) { clicks.pop(); break; }
+            // Decompose into `sides` constrained lines (corner coincidences only —
+            // the polygon stays a closed loop but its vertices are individually
+            // constrainable). Corners match samplePolygon3D (angle 0 start).
+            const corners: [number, number][] = Array.from({ length: sides }, (_, i) => {
+              const ang = (2 * Math.PI * i) / sides;
+              return [lc.u + r * Math.cos(ang), lc.v + r * Math.sin(ang)] as [number, number];
+            });
+            if (!registerStraightShape(oc, wp, corners, `Polygon-${sides}`)) {
+              const wire = OccSketchService.createPolygonWire(oc, c, rim, sides, wp);
+              const samp = samplePolygon3D(c, rim, sides, wp);
+              addCommitted(samp);
+              registerWire(oc, wire, `Polygon-${sides}`, wp, { kind: 'polyline', pts: localPts2D(samp, wp) });
+            }
           }
           break;
         }
@@ -562,7 +639,7 @@ export function useCADSketchTool(
       useCADStore.getState().log(`Sketch error: ${err.message}`, 'error');
       cancelAll();
     }
-  }, [addCommitted, registerWire, cancelAll]);
+  }, [addCommitted, registerWire, registerStraightShape, cancelAll]);
 
   // ─── Cleanup wires when nodes are deleted ────────────────────────────────────
 

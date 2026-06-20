@@ -14,41 +14,48 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
-import type { SketchConstraint, SketchConstraintType, SketchRef, Workplane } from '../store/cadStore';
-import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
+import type { SketchConstraint, SketchConstraintType, SketchRef } from '../store/cadStore';
 import { propagateFromStore }  from '../services/RecomputeEngine.live';
-import { OccSketchService, workplaneBasis, fromLocal2D } from '../services/OccSketchService';
 import {
-  solveConstraints, canApply, computeDoF,
+  canApply, constraintBlocked, computeDoF,
   CONSTRAINT_META, GEOMETRIC_TYPES, DIMENSIONAL_TYPES,
 } from '../services/SketchConstraintSolver';
 import type { EntityGeom } from '../services/SketchConstraintSolver';
+import { getSolver } from '../services/solver';
+import { datumGeoms, datumFixedConstraints, datumLabel, isDatumId } from '../services/SketchDatums';
+import { collectSolverGeoms, rebuildSketchEntity, geomKey } from '../services/SketchSolveBridge';
 import { useDragPanel } from '../hooks/useDragPanel';
 
-const reg = CADGeometryRegistry.getInstance();
 const ACCENT = '#1d9e74';
 
-const STATE_COLOR = { under: '#2a86d6', full: '#1d9e74', over: '#cc3a3a' } as const;
-const STATE_LABEL = { under: 'Under-constrained', full: 'Fully constrained', over: 'Over-constrained' } as const;
+const STATE_COLOR = { under: '#2a86d6', full: '#1d9e74', over: '#cc3a3a', conflict: '#d98a26' } as const;
+const STATE_LABEL = { under: 'Under-constrained', full: 'Fully constrained', over: 'Over-constrained', conflict: 'Conflicting constraints' } as const;
 
 export function showConstraintPanel(sketchId: string): void {
   useCADStore.getState().openConstraintPanel(sketchId);
 }
 
 // ─── Geometry helpers ─────────────────────────────────────────────────────────
+// collectSolverGeoms / rebuildSketchEntity / geomKey live in SketchSolveBridge
+// (shared with the live-drag hook). `collectGeoms` aliases the bridge collector.
 
-function collectGeoms(sketchId: string): EntityGeom[] {
+const collectGeoms = collectSolverGeoms;
+
+/**
+ * Sketch entities the variational solver does not yet model (rectangles/polygons/
+ * splines stored as sampled polylines, arcs, ellipses). They still occupy real
+ * degrees of freedom, so we count them as free rigid bodies — otherwise a sketch
+ * holding only a fresh rectangle would falsely report DoF 0 / "Fully constrained".
+ */
+function unsupportedDoF(sketchId: string): number {
   const st = useCADStore.getState();
-  const out: EntityGeom[] = [];
+  let dof = 0;
   for (const id of st.nodes[sketchId]?.children ?? []) {
     const g = st.nodes[id]?.params?.sketchGeom;
-    if (!g) continue;
-    if (g.kind === 'line')   out.push({ id, kind: 'line',   a: [g.a[0], g.a[1]], b: [g.b[0], g.b[1]] });
-    if (g.kind === 'circle') out.push({ id, kind: 'circle', c: [g.c[0], g.c[1]], r: g.r });
+    if (g && g.kind !== 'line' && g.kind !== 'circle' && g.kind !== 'arc') dof += 3; // free placement (x,y,θ)
   }
-  return out;
+  return dof;
 }
 
 function resolvePoint(ref: SketchRef, geoms: EntityGeom[]): [number, number] | null {
@@ -56,42 +63,20 @@ function resolvePoint(ref: SketchRef, geoms: EntityGeom[]): [number, number] | n
   if (!g) return null;
   if (g.kind === 'line')   return ref.pt === 'b' ? g.b : g.a;
   if (g.kind === 'circle') return g.c;
+  if (g.kind === 'arc') {
+    if (ref.pt === 'a' || ref.pt === 'b') {
+      const ang = ref.pt === 'a' ? g.a1 : g.a2;
+      return [g.c[0] + g.r * Math.cos(ang), g.c[1] + g.r * Math.sin(ang)];
+    }
+    return g.c;
+  }
   return null;
 }
 
-function sampleCircle(center: THREE.Vector3, r: number, wp: Workplane, segs = 72): number[][] {
-  const { uAxis, vAxis } = workplaneBasis(wp);
-  return Array.from({ length: segs + 1 }, (_, i) => {
-    const a = (2 * Math.PI * i) / segs;
-    const p = center.clone().addScaledVector(uAxis, r * Math.cos(a)).addScaledVector(vAxis, r * Math.sin(a));
-    return [p.x, p.y, p.z];
-  });
-}
+const rebuildEntity = rebuildSketchEntity;
 
-function rebuildEntity(id: string, g: EntityGeom): void {
-  const st = useCADStore.getState();
-  const wp = st.nodes[id]?.params?.workplane as Workplane | undefined;
-  if (!wp || !window.oc) return;
-  const oc = window.oc;
-  let wire: any; let pts: number[][];
-  if (g.kind === 'line') {
-    const a3 = fromLocal2D(g.a[0], g.a[1], wp);
-    const b3 = fromLocal2D(g.b[0], g.b[1], wp);
-    wire = OccSketchService.createClosedWireFromEdges(oc, [OccSketchService.createLineEdge(oc, a3, b3)]);
-    pts  = [[a3.x, a3.y, a3.z], [b3.x, b3.y, b3.z]];
-  } else {
-    const c3  = fromLocal2D(g.c[0], g.c[1], wp);
-    const rim = fromLocal2D(g.c[0] + g.r, g.c[1], wp);
-    wire = OccSketchService.createCircleWire(oc, c3, rim, wp);
-    pts  = sampleCircle(c3, g.r, wp);
-  }
-  reg.registerShape(id, wire);
-  st.setNodeParams(id, { sketchGeom: g });
-  window.dispatchEvent(new CustomEvent('cad-sketch-replace-visual', { detail: { id, pts } }));
-}
-
-const geomKey = (g: EntityGeom) =>
-  g.kind === 'line' ? `${g.a[0]},${g.a[1]},${g.b[0]},${g.b[1]}` : `${g.c[0]},${g.c[1]},${g.r}`;
+/** Stable signature of a constraint set (by id) — for external-change detection. */
+const conSig = (cs: SketchConstraint[]): string => cs.map((c) => c.id).sort().join(',');
 
 /** Normalise legacy {entityIds} constraints → {refs}. */
 function migrate(stored: any[]): SketchConstraint[] {
@@ -119,6 +104,12 @@ export const ConstraintPanel: React.FC = () => {
   const [valueDraft, setValueDraft]   = useState<Record<string, string>>({});
   const [msg, setMsg]                 = useState<string | null>(null);
   const doCloseRef = useRef<() => void>(() => {});
+  // Signature of the constraint set we last wrote/loaded ourselves. The external-
+  // removal effect compares against it so it only reacts to changes made OUTSIDE
+  // the panel (cascade delete) and never to its own setNodeParams write — without
+  // this the effect re-triggers on its own store write and React throws "Maximum
+  // update depth exceeded".
+  const appliedSigRef = useRef<string>('');
 
   const { pos, onHandleMouseDown } = useDragPanel(Math.max(20, Math.round(window.innerWidth - 372)), 96);
 
@@ -127,6 +118,7 @@ export const ConstraintPanel: React.FC = () => {
     if (!sketchId) return;
     const loaded = migrate(nodes[sketchId]?.params?.constraints as any[]);
     setConstraints(loaded);
+    appliedSigRef.current = conSig(loaded);
     publishStatus(loaded, 0, true);
     setMsg(null);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -135,9 +127,15 @@ export const ConstraintPanel: React.FC = () => {
   const publishStatus = (cs: SketchConstraint[], residual: number, converged: boolean) => {
     if (!sketchId) return;
     const geoms = collectGeoms(sketchId);
-    const { dof } = computeDoF(geoms, cs);
-    const state: 'under' | 'full' | 'over' =
-      !converged ? 'over' : dof > 0 ? 'under' : 'full';
+    const dof = computeDoF(geoms, cs).dof + unsupportedDoF(sketchId);
+    // Over-constrained is a STRUCTURAL property: more constraint equations than
+    // DoF (dof < 0). It must NOT be inferred from non-convergence — a solve that
+    // lands a hair above tolerance with positive DoF is at worst a numerical
+    // CONFLICT, never "over-constrained" (you can't be over-constrained with 4
+    // free DoF). Decoupling the two is what fixes the "same constraints read
+    // OVER one time, UNDER the next" inconsistency.
+    const state: 'under' | 'full' | 'over' | 'conflict' =
+      dof < 0 ? 'over' : !converged ? 'conflict' : dof > 0 ? 'under' : 'full';
     useCADStore.getState().setConstraintStatus({ dof, state, residual });
   };
 
@@ -148,12 +146,16 @@ export const ConstraintPanel: React.FC = () => {
     if (!before.length) { setMsg('No constrainable Line/Circle entities yet.'); return; }
     const beforeKey = new Map(before.map((g) => [g.id, geomKey(g)]));
     try {
-      const res = solveConstraints(before, next);
+      // Inject the fixed Origin/axis datums so constraints can pin to them; they
+      // carry equal vars + FIXED so they add no DoF and are never rebuilt.
+      const res = getSolver().solve([...before, ...datumGeoms()], [...next, ...datumFixedConstraints()]);
       let rebuilt = 0;
       const changed: string[] = [];
       for (const g of Object.values(res.geoms)) {
+        if (isDatumId(g.id)) continue;
         if (beforeKey.get(g.id) !== geomKey(g)) { rebuildEntity(g.id, g); changed.push(g.id); rebuilt++; }
       }
+      appliedSigRef.current = conSig(next);   // mark as our own write (see resync effect)
       useCADStore.getState().setNodeParams(sketchId, { constraints: next });
       // Propagate the moved sketch geometry to every dependent op (the region
       // wire, the extrude/revolve/… built on it, and anything stacked above).
@@ -167,11 +169,38 @@ export const ConstraintPanel: React.FC = () => {
     }
   }, [sketchId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const geoms = sketchId ? collectGeoms(sketchId) : [];
+  // External-removal resync: when a sketch entity is deleted, the store strips
+  // every constraint referencing it (cascading delete). Mirror that into the
+  // open panel and re-solve so dangling constraints never linger in the list.
+  const storedCons = sketchId ? (nodes[sketchId]?.params?.constraints as any[] | undefined) : undefined;
+  useEffect(() => {
+    if (!sketchId) return;
+    const loaded = migrate(storedCons as any[]);
+    const sig = conSig(loaded);
+    if (sig === appliedSigRef.current) return;  // our own write (or unchanged) → ignore
+    // Genuine external change (cascade delete stripped a dangling constraint):
+    // adopt it and re-solve. Record the sig FIRST so the re-solve's write doesn't
+    // bounce back through this effect.
+    appliedSigRef.current = sig;
+    setConstraints(loaded);
+    solveAndApply(loaded);
+  }, [storedCons]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Real entities + selectable datums (Origin/axes) so canApply / value seeding
+  // recognise datum operands. DoF accounting elsewhere uses real entities only.
+  const geoms = sketchId ? [...collectGeoms(sketchId), ...datumGeoms()] : [];
+
+  // Combined gate: operand shape must match AND no conflict/duplicate with the
+  // constraints already on this exact selection.
+  const blockedReason = (type: SketchConstraintType): string | null => {
+    if (!canApply(type, sel, geoms)) return 'Selection does not match this constraint';
+    return constraintBlocked(type, sel, constraints);
+  };
 
   const addConstraint = (type: SketchConstraintType) => {
     if (!sketchId) return;
-    if (!canApply(type, sel, geoms)) { setMsg('Selection does not match this constraint.'); return; }
+    const blocked = blockedReason(type);
+    if (blocked) { setMsg(blocked); return; }
 
     let value: number | undefined;
     const meta = CONSTRAINT_META[type];
@@ -236,6 +265,8 @@ export const ConstraintPanel: React.FC = () => {
 
   // ── Display helpers ──────────────────────────────────────────────────────────
   const refLabel = (r: SketchRef) => {
+    const datum = datumLabel(r);
+    if (datum) return datum;
     const name = nodes[r.id]?.name ?? r.id.slice(0, 6);
     return r.kind === 'point' ? `${name}·${r.pt}` : name;
   };
@@ -245,7 +276,7 @@ export const ConstraintPanel: React.FC = () => {
 
   // ── Styles ───────────────────────────────────────────────────────────────────
   const opBtn = (type: SketchConstraintType): React.CSSProperties => {
-    const ok = canApply(type, sel, geoms);
+    const ok = blockedReason(type) === null;
     return {
       display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
       width: 52, padding: '5px 0', fontSize: 9, cursor: ok ? 'pointer' : 'not-allowed',
@@ -261,13 +292,17 @@ export const ConstraintPanel: React.FC = () => {
 
   const btnGroup = (types: SketchConstraintType[]) => (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-      {types.map((type) => (
-        <button key={type} style={opBtn(type)} title={CONSTRAINT_META[type].label}
-          onClick={() => canApply(type, sel, geoms) && addConstraint(type)}>
-          <span style={{ fontSize: 13, lineHeight: 1 }}>{CONSTRAINT_META[type].glyph}</span>
-          <span style={{ lineHeight: 1.1 }}>{CONSTRAINT_META[type].label}</span>
-        </button>
-      ))}
+      {types.map((type) => {
+        const reason = blockedReason(type);
+        return (
+          <button key={type} style={opBtn(type)} disabled={reason !== null}
+            title={reason ?? CONSTRAINT_META[type].label}
+            onClick={() => { if (reason === null) addConstraint(type); }}>
+            <span style={{ fontSize: 13, lineHeight: 1 }}>{CONSTRAINT_META[type].glyph}</span>
+            <span style={{ lineHeight: 1.1 }}>{CONSTRAINT_META[type].label}</span>
+          </button>
+        );
+      })}
     </div>
   );
 
