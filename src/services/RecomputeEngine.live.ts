@@ -26,7 +26,9 @@ import { ThreeMeshCache } from './ThreeMeshCache';
 import { fromLocal2D } from './OccSketchService';
 import { toRegionEntity, findRegions, RegionEntity } from './SketchRegions';
 import { buildSketchProfileWire, healOpProfileTargets } from '../utils/sketchProfile';
+import { rebuildSketchEntity } from './SketchSolveBridge';
 import { useCADStore, Workplane } from '../store/cadStore';
+import type { EntityGeom } from './SketchConstraintSolver';
 
 /** World-space display polyline for a sketch wire's local-2D `sketchGeom`, placed
  *  through `wp`. Sketch wires render as imperative THREE.Line objects that ignore
@@ -194,6 +196,21 @@ export function installRecomputeBridge(): void {
         if (n.params?.opType && (n.children ?? []).includes(id)) healOpProfileTargets(n.id);
       }
       propagateFromStore(id);
+    } catch { /* engine isolates per-feature errors */ }
+  });
+  // Undo/redo of a sketch drag restored only `sketchGeom` params (no add/remove),
+  // so the wires' own OCC shape + outline must be rebuilt, then dependents
+  // re-propagated. (propagateFromStore alone rebuilds only DESCENDANTS.)
+  window.addEventListener('cad-sketch-rebuild', (e) => {
+    const ids = (e as CustomEvent).detail?.ids as string[] | undefined;
+    if (!ids?.length) return;
+    try {
+      const st = useCADStore.getState();
+      for (const id of ids) {
+        const g = st.nodes[id]?.params?.sketchGeom;
+        if (g) rebuildSketchEntity(id, { ...g, id } as EntityGeom);
+      }
+      propagateFromStore(ids);
     } catch { /* engine isolates per-feature errors */ }
   });
 }

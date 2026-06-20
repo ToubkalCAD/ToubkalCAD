@@ -38,7 +38,9 @@ export const CADProjectPanel: React.FC = () => {
     // Back-fill memberIds on legacy region wires so they recompute/follow (saved
     // before region members were persisted — see backfillRegionMembers).
     const nodes = backfillRegionMembers(proj.nodes);
-    useCADStore.setState({ nodes, rootIds: proj.rootIds, selectedIds: [] });
+    // loadScene applies the scene AND migrates it to the dual tree (wrap stray
+    // features into a component, un-nest legacy adopted sketches).
+    useCADStore.getState().loadScene(nodes, proj.rootIds);
     setActiveId(proj.id);
     setProjectName(proj.name);
     log(`Project loaded: "${proj.name}" (WASM geometry must be recreated)`, 'warn');

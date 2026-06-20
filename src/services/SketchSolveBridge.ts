@@ -14,7 +14,7 @@
 
 import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
-import type { Workplane } from '../store/cadStore';
+import type { Workplane, SketchConstraint } from '../store/cadStore';
 import { CADGeometryRegistry } from './CADGeometryRegistry';
 import { OccSketchService, workplaneBasis, fromLocal2D } from './OccSketchService';
 import type { EntityGeom } from './SketchConstraintSolver';
@@ -35,9 +35,28 @@ export function collectSolverGeoms(sketchId: string): EntityGeom[] {
   return out;
 }
 
-/** A change key for a solved geom — only c/r/endpoints matter (a1/a2 are static). */
+/**
+ * A sketch's persisted constraints in the solver's SketchConstraint shape.
+ * Tolerates the legacy `{ entityIds: [...] }` form by lifting it to `refs`.
+ * Datum-fixed constraints are NOT included — callers append
+ * `datumFixedConstraints()` so the datum axes/origin stay pinned during a solve.
+ */
+export function collectSketchConstraints(sketchId: string): SketchConstraint[] {
+  const raw = (useCADStore.getState().nodes[sketchId]?.params?.constraints as any[]) ?? [];
+  return raw.map((c) =>
+    c.refs ? c : {
+      id: c.id, type: c.type, value: c.value,
+      refs: (c.entityIds ?? []).map((id: string) => ({ kind: 'entity', id })),
+    });
+}
+
+/** A change key for a solved geom. Arcs include a1/a2 because dragging an arc
+ *  ENDPOINT changes only its sweep angles (centre/radius held by constraints) —
+ *  omitting them would make an angle-only drag look "unchanged" and skip rebuild. */
 export const geomKey = (g: EntityGeom): string =>
-  g.kind === 'line' ? `${g.a[0]},${g.a[1]},${g.b[0]},${g.b[1]}` : `${g.c[0]},${g.c[1]},${g.r}`;
+  g.kind === 'line'  ? `${g.a[0]},${g.a[1]},${g.b[0]},${g.b[1]}`
+  : g.kind === 'arc' ? `${g.c[0]},${g.c[1]},${g.r},${g.a1},${g.a2}`
+  :                    `${g.c[0]},${g.c[1]},${g.r}`;
 
 function sampleCircle(center: THREE.Vector3, r: number, wp: Workplane, segs = 72): number[][] {
   const { uAxis, vAxis } = workplaneBasis(wp);

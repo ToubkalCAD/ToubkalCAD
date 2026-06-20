@@ -66,6 +66,7 @@ const RIBBON_TABS: RibbonTab[] = [
     { label: 'Constrain',   ids: ['constraints'] },
   ] },
   { id: 'model', label: 'Model', groups: [
+    { label: 'Structure',   ids: ['component', 'assembly'] },
     { label: 'Primitives',  ids: ['box', 'cylinder', 'sphere', 'torus', 'cone'] },
     { label: 'From Sketch', ids: ['extrude', 'revolve', 'loft', 'sweep'] },
     { label: 'Transform',   ids: ['mirror', 'array-lin', 'array-circ'] },
@@ -264,6 +265,25 @@ export const Ribbon: React.FC = () => {
   const withOC = (fn: () => Promise<void> | void) => {
     if (!window.oc) { log('OCC kernel not initialized.', 'error'); return; }
     Promise.resolve().then(fn).catch((e: any) => { log(e.message, 'error'); });
+  };
+
+  // ─── Structure (assembly tree) ────────────────────────────────────────────────
+  // Create a component/assembly and select it. A new component becomes active, so
+  // the next sketch/primitive/op lands inside it. If an assembly is selected, the
+  // new container nests under it.
+  const mkComponent = () => {
+    const st = useCADStore.getState();
+    const sel = st.selectedIds[0];
+    const parent = sel && st.nodes[sel]?.type === 'assembly' ? sel : null;
+    const id = st.createComponent(undefined, parent);
+    st.setSelectedIds([id]);
+  };
+  const mkAssembly = () => {
+    const st = useCADStore.getState();
+    const sel = st.selectedIds[0];
+    const parent = sel && st.nodes[sel]?.type === 'assembly' ? sel : null;
+    const id = st.createAssembly(undefined, parent);
+    st.setSelectedIds([id]);
   };
 
   // ─── Primitives ─────────────────────────────────────────────────────────────
@@ -511,7 +531,6 @@ export const Ribbon: React.FC = () => {
         create(id, `Revolve${v.angle.toFixed(0)}°/${axisLabels[idx]}`, 'revolve',
           OccRevolutionService.revolveProfile(window.oc, prof.shape, [0,0,0], axisVecs[idx], v.angle),
           { opType: 'revolve', targetWireIds: [targetId], opParams: { axis: idx, angle: v.angle } });
-        useCADStore.getState().adoptSketchSources(id, [targetId]);
       } finally {
         if (prof.temp && prof.shape) try { prof.shape.delete(); } catch { /*noop*/ }
         setProc(false);
@@ -576,7 +595,6 @@ export const Ribbon: React.FC = () => {
         create(id, `Loft(${sketchIds.length})`, 'loft',
           OccLoftService.loftProfiles(window.oc, wires, v.solid >= 0.5, v.ruled >= 0.5),
           { opType: 'loft', targetWireIds: [...sketchIds], opParams: { solid: v.solid >= 0.5 ? 1 : 0, ruled: v.ruled >= 0.5 ? 1 : 0 } });
-        useCADStore.getState().adoptSketchSources(id, sketchIds);
       } finally {
         resolved.forEach((r) => { if (r.temp && r.shape) try { r.shape.delete(); } catch { /*noop*/ } });
         setProc(false);
@@ -597,7 +615,6 @@ export const Ribbon: React.FC = () => {
         const id = crypto.randomUUID();
         create(id, 'Sweep', 'sweep', OccSweepService.sweepProfile(window.oc, profile, spine),
           { opType: 'sweep', targetWireIds: [sketchIds[0], sketchIds[1]], opParams: { spineIndex: 1 } });
-        useCADStore.getState().adoptSketchSources(id, [sketchIds[0], sketchIds[1]]);
       } finally { setProc(false); }
     });
   };
@@ -859,6 +876,11 @@ export const Ribbon: React.FC = () => {
     'datum-curvenormal':{id:'datum-curvenormal',icon:'plane',label:'Normal to Curve', run:datumCurveNormal, active: mode==='DATUM_CURVE_NORMAL_PICK', accent:'#f0a30a' },
     'datum-2edge':{id:'datum-2edge',icon:'plane',label:'Through 2 Edges', run:datum2Edge, active: mode==='DATUM_2EDGE_PICK', accent:'#f0a30a' },
     // primitives
+    // structure
+    component: { id:'component', icon:'component', label:'Component', run:mkComponent, accent:'#6e7681',
+                 tooltip:'New component (a Part) — features you create land inside it' },
+    assembly:  { id:'assembly',  icon:'assembly',  label:'Assembly',  run:mkAssembly,  accent:'#9aa0a6',
+                 tooltip:'New assembly — a container for components / sub-assemblies' },
     box:       { id:'box',       icon:'box',       label:'Box',      run:mkBox },
     cylinder:  { id:'cylinder',  icon:'cylinder',  label:'Cylinder', run:mkCyl },
     sphere:    { id:'sphere',    icon:'sphere',    label:'Sphere',   run:mkSph },

@@ -97,8 +97,8 @@ export function createAndEditOp(op: Op3DType, targetIds: string[]): void {
       params:    { opType: op, targetWireIds: targetIds, opParams: defaults },
     });
     window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }));
-    // Nest the consumed sketch(es) under the operation: Extrusion1 → Sketch1 → Circle1
-    if (['extrude', 'revolve', 'loft', 'sweep'].includes(op)) store.adoptSketchSources(id, targetIds);
+    // The operation references its profile sketch(es) by id (params.targetWireIds);
+    // they stay independent siblings in the component so they can be reused.
     store.log(`${name} created — adjust in the panel.`, 'success');
 
     // Open panel in EDIT mode. ephemeral=true → Cancel/Esc deletes this node (the
@@ -660,16 +660,15 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
           params:    { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined },
         });
 
-        // Verify the node is actually in the store
+        // Verify the node is actually in the store (now placed under a component,
+        // not at the root — features live in the active component's feature tree).
         const afterNodes = useCADStore.getState();
-        const inTree = afterNodes.rootIds.includes(id);
-        store.log(`Op3D: addNode done — in rootIds=${inTree}, rootIds count=${afterNodes.rootIds.length}`, inTree ? 'success' : 'error');
+        const inTree = !!afterNodes.nodes[id];
+        store.log(`Op3D: addNode done — in tree=${inTree}, node count=${Object.keys(afterNodes.nodes).length}`, inTree ? 'success' : 'error');
 
         window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }));
-        // Nest the consumed sketch(es) under the operation: Extrusion1 → Sketch1 → Circle1
-        if (['extrude', 'revolve', 'loft', 'sweep'].includes(req.op)) {
-          store.adoptSketchSources(id, req.targetIds);
-        }
+        // The operation references its profile sketch(es) by id (targetWireIds);
+        // they remain independent siblings in the component (reuse-safe).
         store.log(`${name} created ✓`, 'success');
       }
 
