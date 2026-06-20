@@ -218,6 +218,9 @@ interface CADState {
   // ── Actions ────────────────────────────────────────────────────────────────
 
   addNode:            (node: Omit<CADNode, 'children'>) => void;
+  /** Add several nodes (e.g. a decomposed rectangle's edges) + optional auto-
+   *  constraints on a sketch container, as ONE undo step. */
+  addSketchEntities:  (nodeList: Omit<CADNode, 'children'>[], sketchId: string | null, autoConstraints?: SketchConstraint[], label?: string) => void;
   /** Create a reference (datum) plane node from a workplane. Returns its id. */
   createDatumPlane:   (wp: Workplane, method?: string, refs?: any[]) => string;
   /** Create a reference (datum) axis node from an origin + unit direction (D7). */
@@ -319,7 +322,7 @@ interface CADState {
   /** Entity/point operands currently picked in the viewport for a new constraint. */
   constraintSel: SketchRef[];
   /** Live solver status for the active sketch (degrees of freedom + state). */
-  constraintStatus: { dof: number; state: 'under' | 'full' | 'over'; residual: number } | null;
+  constraintStatus: { dof: number; state: 'under' | 'full' | 'over' | 'conflict'; residual: number } | null;
   /** Open the constraint panel for a sketch container + enter CONSTRAIN mode. */
   openConstraintPanel:  (sketchId: string) => void;
   /** Close the constraint panel and return to SELECT mode. */
@@ -723,6 +726,36 @@ export const useCADStore = create<CADState>((set, get) => ({
     get().log(`Created: ${newNode.name} (${newNode.type})`, 'success');
   },
 
+  addSketchEntities: (nodeList, sketchId, autoConstraints, label) => {
+    if (!nodeList.length) return;
+    const { nodes, rootIds } = get();
+    const updated: Record<string, CADNode> = { ...nodes };
+    for (const nd of nodeList) {
+      updated[nd.id] = { ...nd, children: [], material: normalizeMaterial(nd.material) };
+    }
+    const updatedRootIds = [...rootIds];
+    for (const nd of nodeList) {
+      if (nd.parentId && updated[nd.parentId]) {
+        updated[nd.parentId] = { ...updated[nd.parentId], children: [...updated[nd.parentId].children, nd.id] };
+      } else {
+        updatedRootIds.push(nd.id);
+      }
+    }
+    // Append the auto-constraints (corner coincidences, edge H/V) to the sketch
+    // container so the solver treats the decomposed shape as a real rectangle.
+    if (sketchId && updated[sketchId] && autoConstraints?.length) {
+      const existing = (updated[sketchId].params?.constraints as SketchConstraint[] | undefined) ?? [];
+      updated[sketchId] = {
+        ...updated[sketchId],
+        params: { ...updated[sketchId].params, constraints: [...existing, ...autoConstraints] },
+      };
+    }
+    const name = label ?? nodeList[0]?.name ?? 'entities';
+    const action = makeAction('ADD', `Add "${name}"`, Object.values(nodes), Object.values(updated));
+    set({ nodes: updated, rootIds: updatedRootIds, past: pushPast(get().past, action), future: [] });
+    get().log(`Created: ${name} (${nodeList.length} edges)`, 'success');
+  },
+
   createDatumPlane: (wp, method = 'custom', refs = []) => {
     const id = makeId();
     const count = Object.values(get().nodes).filter((n) => n.type === 'datum_plane').length + 1;
@@ -814,6 +847,26 @@ export const useCADStore = create<CADState>((set, get) => ({
         restoredIds.push(rid);
       }
     });
+
+    // Cascading constraint cleanup: a deleted sketch entity must take its
+    // constraints with it. Strip every constraint on a SURVIVING sketch
+    // container that references any deleted node — otherwise dangling
+    // constraints linger in params.constraints, pollute the panel, and falsely
+    // over/under-constrain the system.
+    const deletedSet = new Set(deletedIds);
+    for (const nid of Object.keys(updatedNodes)) {
+      const n = updatedNodes[nid];
+      const cons = n.params?.constraints as SketchConstraint[] | undefined;
+      if (!Array.isArray(cons) || cons.length === 0) continue;
+      const kept = cons.filter((c) => {
+        const refs = (c.refs ?? []) as SketchRef[];
+        const legacy = ((c as any).entityIds ?? []) as string[];
+        return !refs.some((r) => deletedSet.has(r.id)) && !legacy.some((e) => deletedSet.has(e));
+      });
+      if (kept.length !== cons.length) {
+        updatedNodes[nid] = { ...n, params: { ...n.params, constraints: kept } };
+      }
+    }
 
     const updatedRootIds = rootIds.filter((r) => r !== id).concat(preservedSketchIds);
     if (parentId && updatedNodes[parentId]) {

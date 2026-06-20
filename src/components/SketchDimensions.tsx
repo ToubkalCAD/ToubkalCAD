@@ -22,9 +22,10 @@ import { useCADStore, sketchRefEq } from '../store/cadStore';
 import type { SketchConstraint, SketchRef, Workplane } from '../store/cadStore';
 import { fromLocal2D, workplaneBasis } from '../services/OccSketchService';
 import { CONSTRAINT_META } from '../services/SketchConstraintSolver';
+import { DATUM_UAXIS, DATUM_VAXIS, ORIGIN_REF, isDatumId } from '../services/SketchDatums';
 
 const COLOR = '#0f8f63';
-const STATE_COLOR = { under: '#2a86d6', full: '#16a06a', over: '#cc3a3a' } as const;
+const STATE_COLOR = { under: '#2a86d6', full: '#16a06a', over: '#cc3a3a', conflict: '#d98a26' } as const;
 
 interface Pt { x: number; y: number; ok: boolean }
 const toScreen = (p: THREE.Vector3, cam: THREE.Camera, w: number, h: number): Pt => {
@@ -73,17 +74,38 @@ export const SketchDimensions: React.FC = () => {
     const wp = n?.params?.workplane as Workplane | undefined;
     return g && wp ? { g, wp } : null;
   };
+  // Workplane of the sketch as a whole (for the Origin/axis datums).
+  const sketchWP = ((): Workplane | null => {
+    for (const id of sketch.children ?? []) {
+      const wp = nodes[id]?.params?.workplane as Workplane | undefined;
+      if (wp) return wp;
+    }
+    return useCADStore.getState().activeWorkplane ?? null;
+  })();
   const pointWorld = (r: SketchRef): THREE.Vector3 | null => {
+    // Datum operands resolve against the sketch plane, not a node.
+    if (isDatumId(r.id)) {
+      if (!sketchWP) return null;
+      if (r.id === DATUM_VAXIS) return fromLocal2D(0, 0, sketchWP);   // axis → origin as representative
+      return fromLocal2D(0, 0, sketchWP);                            // U axis / Origin
+    }
     const e = geomOf(r.id); if (!e) return null;
     if (r.kind === 'point') {
       if (e.g.kind === 'line')   return fromLocal2D(...(r.pt === 'b' ? e.g.b : e.g.a) as [number, number], e.wp);
       if (e.g.kind === 'circle') return fromLocal2D(e.g.c[0], e.g.c[1], e.wp);
+      if (e.g.kind === 'arc') {
+        if (r.pt === 'a' || r.pt === 'b') {
+          const ang = r.pt === 'a' ? e.g.a1 : e.g.a2;
+          return fromLocal2D(e.g.c[0] + e.g.r * Math.cos(ang), e.g.c[1] + e.g.r * Math.sin(ang), e.wp);
+        }
+        return fromLocal2D(e.g.c[0], e.g.c[1], e.wp);
+      }
       return null;
     }
     // entity ref → representative point (midpoint / center)
-    return e.g.kind === 'line'
-      ? fromLocal2D((e.g.a[0] + e.g.b[0]) / 2, (e.g.a[1] + e.g.b[1]) / 2, e.wp)
-      : fromLocal2D(e.g.c[0], e.g.c[1], e.wp);
+    if (e.g.kind === 'line') return fromLocal2D((e.g.a[0] + e.g.b[0]) / 2, (e.g.a[1] + e.g.b[1]) / 2, e.wp);
+    if (e.g.kind === 'circle' || e.g.kind === 'arc') return fromLocal2D(e.g.c[0], e.g.c[1], e.wp);
+    return null;
   };
 
   const lines: React.ReactNode[] = [];
@@ -105,8 +127,9 @@ export const SketchDimensions: React.FC = () => {
   for (const id of sketch.children ?? []) {
     const e = geomOf(id);
     if (!e) continue;
-    const cands: SketchRef[] = e.g.kind === 'line'
-      ? [{ kind: 'point', id, pt: 'a' }, { kind: 'point', id, pt: 'b' }]
+    const cands: SketchRef[] =
+      e.g.kind === 'line' ? [{ kind: 'point', id, pt: 'a' }, { kind: 'point', id, pt: 'b' }]
+      : e.g.kind === 'arc' ? [{ kind: 'point', id, pt: 'c' }, { kind: 'point', id, pt: 'a' }, { kind: 'point', id, pt: 'b' }]
       : [{ kind: 'point', id, pt: 'c' }];
     for (const r of cands) {
       const wp = pointWorld(r); if (!wp) continue;
@@ -115,6 +138,32 @@ export const SketchDimensions: React.FC = () => {
       marks.push(
         <circle key={`${id}-${r.pt}`} cx={s.x} cy={s.y} r={picked ? 4.5 : 3}
           fill={picked ? '#ff8800' : 'rgba(10,107,214,0.25)'} stroke={picked ? '#ff8800' : '#0a6bd6'} strokeWidth={1.2} />,
+      );
+    }
+  }
+
+  // ── Origin + axis datums (faint reference, selectable) ─────────────────────
+  if (sketchWP) {
+    const o = toScreen(fromLocal2D(0, 0, sketchWP), cam, w, h);
+    const axis = (id: string, far: THREE.Vector3, neg: THREE.Vector3, dash: string) => {
+      const p = toScreen(far, cam, w, h), n = toScreen(neg, cam, w, h);
+      if (!p.ok || !n.ok) return;
+      const lit = sel.some((r) => r.kind === 'entity' && r.id === id);
+      lines.push(<line key={`ax${id}`} x1={n.x} y1={n.y} x2={p.x} y2={p.y}
+        stroke={lit ? '#ff8800' : '#4a6a8a'} strokeWidth={lit ? 1.6 : 1}
+        strokeDasharray={dash} opacity={lit ? 0.95 : 0.5} />);
+    };
+    axis(DATUM_UAXIS, fromLocal2D(1e4, 0, sketchWP), fromLocal2D(-1e4, 0, sketchWP), '6 4');
+    axis(DATUM_VAXIS, fromLocal2D(0, 1e4, sketchWP), fromLocal2D(0, -1e4, sketchWP), '6 4');
+    if (o.ok) {
+      const litO = sel.some((r) => sketchRefEq(r, ORIGIN_REF));
+      marks.push(
+        <g key="origin">
+          <circle cx={o.x} cy={o.y} r={litO ? 5 : 3.5}
+            fill={litO ? '#ff8800' : 'rgba(74,106,138,0.4)'} stroke={litO ? '#ff8800' : '#4a6a8a'} strokeWidth={1.4} />
+          <line x1={o.x - 7} y1={o.y} x2={o.x + 7} y2={o.y} stroke={litO ? '#ff8800' : '#4a6a8a'} strokeWidth={1} opacity={0.7} />
+          <line x1={o.x} y1={o.y - 7} x2={o.x} y2={o.y + 7} stroke={litO ? '#ff8800' : '#4a6a8a'} strokeWidth={1} opacity={0.7} />
+        </g>,
       );
     }
   }
@@ -138,10 +187,11 @@ export const SketchDimensions: React.FC = () => {
         <line x1={b.x} y1={b.y} x2={b2.x} y2={b2.y} strokeDasharray="2 2" />
         <line x1={a2.x} y1={a2.y} x2={b2.x} y2={b2.y} /></g>);
       badge(`Ll${ci}`, { x: (a2.x + b2.x) / 2, y: (a2.y + b2.y) / 2, ok: true }, (c.value ?? 0).toFixed(1));
-    } else if (c.type === 'RADIUS' && first?.g.kind === 'circle') {
+    } else if (c.type === 'RADIUS' && (first?.g.kind === 'circle' || first?.g.kind === 'arc')) {
       const g = first.g, wp = first.wp;
+      const ang = g.kind === 'arc' ? (g.a1 + g.a2) / 2 : 0;   // point the leader along the arc's mid-sweep
       const ctr = toScreen(fromLocal2D(g.c[0], g.c[1], wp), cam, w, h);
-      const rim = toScreen(fromLocal2D(g.c[0] + g.r, g.c[1], wp), cam, w, h);
+      const rim = toScreen(fromLocal2D(g.c[0] + g.r * Math.cos(ang), g.c[1] + g.r * Math.sin(ang), wp), cam, w, h);
       if (!ctr.ok || !rim.ok) return;
       lines.push(<line key={`R${ci}`} x1={ctr.x} y1={ctr.y} x2={rim.x} y2={rim.y} stroke={COLOR} strokeWidth={1.2} />);
       badge(`Rl${ci}`, { x: (ctr.x + rim.x) / 2, y: (ctr.y + rim.y) / 2 - 8, ok: true }, `R${(c.value ?? 0).toFixed(1)}`);
@@ -168,7 +218,9 @@ export const SketchDimensions: React.FC = () => {
 
   // ── DoF readout ────────────────────────────────────────────────────────────
   const dofText = status
-    ? (status.state === 'over' ? 'Over-constrained' : `DoF: ${status.dof}${status.dof === 0 ? ' · fully constrained' : ''}`)
+    ? (status.state === 'over' ? 'Over-constrained'
+       : status.state === 'conflict' ? `Conflict · residual ${status.residual.toFixed(3)}`
+       : `DoF: ${status.dof}${status.dof === 0 ? ' · fully constrained' : ''}`)
     : null;
 
   return (

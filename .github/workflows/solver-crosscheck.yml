@@ -1,0 +1,36 @@
+name: solver cross-check
+
+# Runs the headless solver cross-check battery (npm run test:solver).
+# Validates every supported sketch constraint against the legacy LM oracle via
+# an independent geometric checker. SolveSpace is auto-SKIPPED until the WASM is
+# built, so this gate exercises the legacy path + the harness itself.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'src/services/solver/**'
+      - 'src/services/SketchConstraintSolver.ts'
+      - 'src/services/SketchDatums.ts'
+      - 'native/slvs/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/solver-crosscheck.yml'
+
+jobs:
+  crosscheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Solver cross-check
+        run: npm run test:solver

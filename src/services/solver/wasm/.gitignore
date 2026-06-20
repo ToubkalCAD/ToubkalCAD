@@ -1,0 +1,4 @@
+# Build artifacts from native/slvs/build.sh — regenerate, do not commit.
+libslvs.mjs
+libslvs.wasm
+libslvs.js
