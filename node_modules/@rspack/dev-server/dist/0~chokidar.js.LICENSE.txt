@@ -1,1 +1,0 @@
-/*! chokidar - MIT License (c) 2012 Paul Miller (paulmillr.com) */
