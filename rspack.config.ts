@@ -19,6 +19,11 @@ import type { Configuration } from '@rspack/core';
 // defineConfig is a no-op type helper — inline the type instead
 const defineConfig = (c: Configuration): Configuration => c;
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+// __dirname is not defined in ES modules — derive it from import.meta.url.
+// (Required now that package.json declares "type": "module".)
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   entry: {
@@ -39,7 +44,7 @@ export default defineConfig({
     },
     fallback: {
       // Modules Node.js non disponibles dans le navigateur
-      // requis par Emscripten (OpenCascade.js)
+      // requis par Emscripten (OpenCascade.js + PlaneGCS)
       fs:             false,
       path:           false,
       crypto:         false,
@@ -47,11 +52,26 @@ export default defineConfig({
       stream:         false,
       perf_hooks:     false,
       worker_threads: false,
+      // PlaneGCS's emscripten glue has a Node-only branch (`await import('module')`)
+      // that never runs in the browser; stub it so the build doesn't try to bundle it.
+      module:         false,
+      url:            false,
     },
   },
 
   module: {
     rules: [
+      // ── PlaneGCS emscripten glue ────────────────────────────────
+      // Its Node-only branch uses `new URL('./', import.meta.url)` and
+      // `new URL('planegcs.wasm', import.meta.url)`; disable Rspack's new-URL
+      // asset parsing for this file so it isn't resolved/emitted at build time.
+      // The browser gets the .wasm URL via init_planegcs_module's `locateFile`
+      // (a file-loader URL passed from src/index.tsx) instead.
+      {
+        test: /planegcs\.js$/,
+        parser: { url: false },
+      },
+
       // ── TypeScript / TSX via builtin SWC loader ─────────────────
       {
         test: /\.(ts|tsx)$/,

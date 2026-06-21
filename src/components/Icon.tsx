@@ -22,13 +22,15 @@ export type IconName =
   | 'bezier' | 'spline' | 'polygon' | 'roundrect' | 'constraint'
   // 3d ops
   | 'extrude' | 'revolve' | 'loft' | 'sweep'
+  // datum / reference geometry
+  | 'datumPlane' | 'datumAxis' | 'datumPoint'
   // transforms
   | 'mirror' | 'array' | 'circarray' | 'mate' | 'align' | 'concentric'
   // sketch editing
   | 'trim' | 'extend' | 'split' | 'powertrim' | 'region'
   // tools / chrome
   | 'select' | 'measure' | 'import' | 'export' | 'undo' | 'redo'
-  | 'plane' | 'check' | 'sun' | 'moon' | 'sketch' | 'grid' | 'close';
+  | 'plane' | 'check' | 'sun' | 'moon' | 'sketch' | 'grid' | 'close' | 'fitAll';
 
 const P: Record<IconName, React.ReactNode> = {
   // a part inside corner brackets (one body + its feature-tree boundary)
@@ -40,8 +42,10 @@ const P: Record<IconName, React.ReactNode> = {
   sphere: (<><circle cx="12" cy="12" r="9" /><ellipse cx="12" cy="12" rx="9" ry="3.4" /><path d="M12 3v18" /></>),
   torus: (<><ellipse cx="12" cy="12" rx="9.2" ry="5.4" /><ellipse cx="12" cy="12" rx="3.6" ry="1.7" /></>),
   cone: (<><path d="M12 3.5L20 18.5H4z" /><ellipse cx="12" cy="18.5" rx="8" ry="2.6" /></>),
-  fillet: (<><path d="M5 5v4a10 10 0 0 0 10 10h4" /><path d="M5 5h2M5 5v2" opacity=".45" /><path d="M19 19h-2M19 19v-2" opacity=".45" /></>),
-  chamfer: (<><path d="M5 5v6l8 8h6" /><path d="M5 5h2M5 5v2" opacity=".45" /><path d="M19 19h-2M19 19v-2" opacity=".45" /></>),
+  // sharp corner (dashed, "before") rounded into a tangent arc (solid, "after")
+  fillet: (<><path d="M4 14V20H10" strokeDasharray="2.4 2.4" opacity=".5" /><path d="M4 4V13A7 7 0 0 0 11 20H21" /></>),
+  // sharp corner (dashed) cut off by a flat angled bevel (solid)
+  chamfer: (<><path d="M4 13V20H11" strokeDasharray="2.4 2.4" opacity=".5" /><path d="M4 4V12L12 20H21" /></>),
   union: (<><path d="M9 8.2A4.8 4.8 0 1 0 15.8 15 4.8 4.8 0 1 0 9 8.2z" /></>),
   subtract: (<><circle cx="10" cy="12" r="5.4" /><circle cx="15.5" cy="12" r="5.4" strokeDasharray="2.4 2.4" /></>),
   intersect: (<><circle cx="9.6" cy="12" r="5.2" opacity=".5" /><circle cx="14.4" cy="12" r="5.2" opacity=".5" /><path d="M12 7.7a5.2 5.2 0 0 1 0 8.6 5.2 5.2 0 0 1 0-8.6z" /></>),
@@ -56,10 +60,20 @@ const P: Record<IconName, React.ReactNode> = {
   polygon: (<path d="M12 3l7.8 4.5v9L12 21l-7.8-4.5v-9z" />),
   roundrect: (<rect x="4" y="6" width="16" height="12" rx="4" />),
   constraint: (<><path d="M6 4v14h14" /><path d="M6 14h4v4" opacity=".5" /><circle cx="18" cy="6" r="2.2" /></>),
-  extrude: (<><rect x="5.5" y="11" width="13" height="9.5" rx="1" /><path d="M12 8.5V2.5M9 5.3L12 2.5l3 2.8" /></>),
-  revolve: (<><path d="M5.5 8a8 8 0 1 1-1.2 6" /><path d="M4 8.5L5.5 8 6 9.6" /><path d="M12 2.5v19" strokeDasharray="2.5 2.5" opacity=".5" /></>),
-  loft: (<><ellipse cx="12" cy="5.5" rx="6" ry="2" /><ellipse cx="12" cy="18.5" rx="8" ry="2.3" /><path d="M6 5.5L4 18.5M18 5.5l2 13" /></>),
-  sweep: (<><circle cx="6" cy="7" r="2.6" /><path d="M6 9.6C6 16 12 14 14 18" /><path d="M11.6 17.4l2.4.6.6-2.4" /></>),
+  // flat profile (top diamond) pulled into a prism + pull-direction arrow
+  extrude: (<><path d="M13 3.5L20 7.5L13 11.5L6 7.5Z" /><path d="M6 7.5V14.5M20 7.5V14.5M13 11.5V18.5" /><path d="M6 14.5L13 18.5L20 14.5" /><path d="M3 19V7M1.4 8.6L3 7L4.6 8.6" opacity=".55" /></>),
+  // profile beside a dashed rotation axis with a sweeping directional arrow
+  revolve: (<><path d="M12 2.5V21.5" strokeDasharray="2.4 2.4" opacity=".5" /><path d="M14 8H18.5V16H14Z" /><path d="M12 6.2A5.8 5.8 0 1 0 12 17.8" /><path d="M9.9 15.6L12 17.8L9.7 19" /></>),
+  // square + circle sections joined by blending skin curves
+  loft: (<><path d="M4 13H10V19H4Z" /><circle cx="17" cy="8" r="3.8" /><path d="M4 13C9 7 12 5.6 14.3 5.2" opacity=".85" /><path d="M10 19C14 16 16.8 14 19.4 10.8" opacity=".85" /></>),
+  // cross-section profile driven along a winding path
+  sweep: (<><path d="M4.5 17C10 17 9 6 14 6S19 10.5 21 8.5" /><path d="M2.5 13.5H6.5V20.5H2.5Z" /></>),
+  // angled reference plane in perspective with an internal grid and normal axis
+  datumPlane: (<><path d="M3.5 9.5L14.5 6.5L20.5 12.5L9.5 15.5Z" /><g opacity=".4"><path d="M5.5 11.5L16.5 8.5" /><path d="M7.5 13.5L18.5 10.5" /><path d="M7.2 8.5L13.2 14.5" /><path d="M10.8 7.5L16.8 13.5" /></g><path d="M12 11V3.5" opacity=".7" /><path d="M10.4 5L12 3.5L13.6 5" opacity=".7" /></>),
+  // a directional reference axis (dashed = infinite) with an origin node
+  datumAxis: (<><path d="M4 20L20 4" strokeDasharray="2.6 2.6" opacity=".55" /><path d="M16.6 4.5L20 4L19.5 7.4" /><circle cx="4" cy="20" r="1.7" /></>),
+  // a located reference point — guide crosshair around a solid centre dot
+  datumPoint: (<><path d="M12 4V9M12 15V20M4 12H9M15 12H20" opacity=".55" /><circle cx="12" cy="12" r="2.4" fill="currentColor" stroke="none" /></>),
   mirror: (<><path d="M12 3.5v17" strokeDasharray="2.4 2.4" opacity=".5" /><path d="M8.5 7l-4 5 4 5z" /><path d="M15.5 7l4 5-4 5z" opacity=".5" /></>),
   array: (<><rect x="3.5" y="3.5" width="7" height="7" rx="1" /><rect x="13.5" y="3.5" width="7" height="7" rx="1" opacity=".5" /><rect x="3.5" y="13.5" width="7" height="7" rx="1" opacity=".5" /><rect x="13.5" y="13.5" width="7" height="7" rx="1" opacity=".5" /></>),
   circarray: (<><circle cx="12" cy="12" r="8" strokeDasharray="2.4 2.4" opacity=".4" /><circle cx="12" cy="4" r="2.1" /><circle cx="20" cy="12" r="1.7" opacity=".55" /><circle cx="12" cy="20" r="1.7" opacity=".55" /><circle cx="4" cy="12" r="1.7" opacity=".55" /></>),
@@ -84,6 +98,8 @@ const P: Record<IconName, React.ReactNode> = {
   sketch: (<><path d="M4 20l1.2-4L16 5.2a2 2 0 0 1 2.8 2.8L8 18.8z" /><path d="M14.5 6.7l2.8 2.8" /></>),
   grid: (<><rect x="3.5" y="3.5" width="17" height="17" rx="1.5" /><path d="M9 3.5v17M15 3.5v17M3.5 9h17M3.5 15h17" opacity=".55" /></>),
   close: (<path d="M6 6l12 12M18 6L6 18" />),
+  // viewfinder corner brackets framing a small body — "zoom to fit all"
+  fitAll: (<><path d="M3 8V4a1 1 0 0 1 1-1h4M16 3h4a1 1 0 0 1 1 1v4M21 16v4a1 1 0 0 1-1 1h-4M8 21H4a1 1 0 0 1-1-1v-4" /><rect x="9" y="9" width="6" height="6" rx="1" opacity=".5" /></>),
 };
 
 interface IconProps {

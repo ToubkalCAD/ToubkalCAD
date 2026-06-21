@@ -7,6 +7,7 @@
 import { create } from 'zustand';
 import { computeDatumUpdates } from '../utils/recomputeDatums';
 import { NodeDelta, diffNodes, applyDeltas } from './historyDelta';
+import { ProjectFileService } from '../services/ProjectFileService';
 
 // D13 — capture the body a datum is derived from (first ref pointing to a solid),
 // so a later move of that body can rigidly recompute the datum. Datum-sourced
@@ -345,6 +346,14 @@ interface CADState {
   /** Apply a loaded scene and migrate it to the dual-tree shape (wrap stray
    *  features into a component, un-nest adopted sketches). Used by project load. */
   loadScene:          (nodes: Record<string, CADNode>, rootIds: string[]) => void;
+  /** Clear the scene to an empty document (wipes nodes, history, selection) and
+   *  resets the viewport. */
+  newProject:         () => void;
+  /** Serialize the current scene to a downloadable `.tkcad` file. */
+  saveProject:        (name?: string) => void;
+  /** Validate + load a `.tkcad` JSON string: wipe the viewport, replace the
+   *  scene, then rebuild geometry from the parametric tree. */
+  loadProject:        (jsonString: string) => void;
   /** Reorganize the current scene into the strict dual tree in place. Idempotent. */
   migrateToComponentTree: () => void;
   /** Add several nodes (e.g. a decomposed rectangle's edges) + optional auto-
@@ -1032,6 +1041,39 @@ export const useCADStore = create<CADState>((set, get) => ({
   loadScene: (nodes, rootIds) => {
     set({ nodes: { ...nodes }, rootIds: [...rootIds], selectedIds: [], activeComponentId: null, past: [], future: [] });
     get().migrateToComponentTree();
+  },
+
+  newProject: () => {
+    // Wipe the viewport (meshes + sketch/datum visuals) BEFORE clearing the
+    // store — the registry frees orphaned shapes via its store subscription.
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cad-scene-reset'));
+    set({ nodes: {}, rootIds: [], selectedIds: [], activeComponentId: null, past: [], future: [] });
+    get().log('New project.', 'info');
+  },
+
+  saveProject: (name) => {
+    const { nodes, rootIds } = get();
+    const doc = ProjectFileService.build(nodes, rootIds, name);
+    ProjectFileService.download(doc);
+    get().log(`Project saved as "${doc.name}.tkcad".`, 'success');
+  },
+
+  loadProject: (jsonString) => {
+    let doc;
+    try {
+      doc = ProjectFileService.parse(jsonString);
+    } catch (err: any) {
+      get().log(`Open failed: ${err?.message ?? err}`, 'error');
+      return;
+    }
+    // Clear stale meshes first: a loaded scene uses the saved node ids, so the
+    // old meshes would never receive a cad-remove-mesh on their own.
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cad-scene-reset'));
+    // loadScene replaces nodes/rootIds and clears past/future + selection.
+    get().loadScene(doc.nodes, doc.rootIds);
+    // Shapes aren't serialized — rebuild all geometry from the feature tree.
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cad-rebuild-all'));
+    get().log(`Opened "${doc.name}" — rebuilding geometry…`, 'success');
   },
 
   migrateToComponentTree: () => {

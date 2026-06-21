@@ -14,7 +14,7 @@
 // ============================================================
 
 import React, { useState } from 'react';
-import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS, InteractionMode, STANDARD_WORKPLANES } from '../store/cadStore';
+import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS, InteractionMode, STANDARD_WORKPLANES, DATUM_TYPES } from '../store/cadStore';
 import { Icon, IconName }            from './Icon';
 import { showParamModal }           from './ParameterModal';
 import { OccPrimitivesService }     from '../services/OccPrimitivesService';
@@ -79,6 +79,7 @@ const RIBBON_TABS: RibbonTab[] = [
   ] },
   { id: 'tools', label: 'Tools', groups: [
     { label: 'Interact',    ids: ['select', 'measure'] },
+    { label: 'View',        ids: ['fit-all'] },
     { label: 'File',        ids: ['import', 'export'] },
   ] },
 ];
@@ -146,7 +147,17 @@ export const Ribbon: React.FC = () => {
   // ─── Reference geometry (Track D) — datum planes are pure data, no OCC needed ──
   const datumOrigin = () => {
     const st = useCADStore.getState();
+    // Only auto-frame when this is a fresh scene (no real geometry yet) — so the
+    // origin planes are framed on first load, but creating them later beside an
+    // existing model doesn't yank the camera.
+    const wasEmpty = !Object.values(st.nodes).some((n) => !DATUM_TYPES.has(n.type));
     (['XY', 'YZ', 'ZX'] as const).forEach((k) => st.createDatumPlane(STANDARD_WORKPLANES[k], 'origin'));
+    if (wasEmpty) {
+      // Defer past React's commit so the datum visuals have synced into the
+      // scene (they're built in a post-render effect) before we measure them.
+      requestAnimationFrame(() => requestAnimationFrame(() =>
+        window.dispatchEvent(new CustomEvent('cad-frame-all'))));
+    }
   };
   const sketchOnDatum = () => {
     if (useCADStore.getState().sketchSession) { log('Quit the current sketch before starting a new one.', 'warn'); return; }
@@ -865,16 +876,16 @@ export const Ribbon: React.FC = () => {
     'sketch-datum':{id:'sketch-datum',icon:'plane',label:'On Datum', run:sketchOnDatum, active: mode==='DATUM_SKETCH', enabled:!sketchSession, accent:SK },
     'sketch-project':{id:'sketch-project',icon:'plane',label:'Project', run:sketchProject, active: mode==='PROJECT_PICK', enabled:!!sketchSession && hasAnySolid, accent:SK },
     'sketch-intersect':{id:'sketch-intersect',icon:'plane',label:'Intersect', run:sketchIntersect, active: mode==='INTERSECT_PICK', enabled:!!sketchSession && hasAnySolid, accent:SK },
-    'datum-origin':{id:'datum-origin',icon:'plane',label:'Origin Planes', run:datumOrigin, accent:'#f0a30a' },
-    'datum-offset':{id:'datum-offset',icon:'plane',label:'Offset Plane', run:datumOffset, active: mode==='DATUM_OFFSET_PICK', accent:'#f0a30a' },
-    'datum-3point':{id:'datum-3point',icon:'plane',label:'3-Point Plane', run:datum3Point, active: mode==='DATUM_3POINT_PICK', accent:'#f0a30a' },
-    'datum-midplane':{id:'datum-midplane',icon:'plane',label:'Midplane', run:datumMidplane, active: mode==='DATUM_MIDPLANE_PICK', accent:'#f0a30a' },
-    'datum-angle':{id:'datum-angle',icon:'plane',label:'Plane at Angle', run:datumAngle, active: mode==='DATUM_ANGLE_PICK', accent:'#f0a30a' },
-    'datum-axis':{id:'datum-axis',icon:'plane',label:'Datum Axis', run:datumAxis, active: mode==='DATUM_AXIS_PICK', accent:'#f0a30a' },
-    'datum-point':{id:'datum-point',icon:'plane',label:'Datum Point', run:datumPoint, active: mode==='DATUM_POINT_PICK', accent:'#f0a30a' },
-    'datum-tangent':{id:'datum-tangent',icon:'plane',label:'Tangent Plane', run:datumTangent, active: mode==='DATUM_TANGENT_PICK', accent:'#f0a30a' },
-    'datum-curvenormal':{id:'datum-curvenormal',icon:'plane',label:'Normal to Curve', run:datumCurveNormal, active: mode==='DATUM_CURVE_NORMAL_PICK', accent:'#f0a30a' },
-    'datum-2edge':{id:'datum-2edge',icon:'plane',label:'Through 2 Edges', run:datum2Edge, active: mode==='DATUM_2EDGE_PICK', accent:'#f0a30a' },
+    'datum-origin':{id:'datum-origin',icon:'datumPlane',label:'Origin Planes', run:datumOrigin, accent:'#f0a30a' },
+    'datum-offset':{id:'datum-offset',icon:'datumPlane',label:'Offset Plane', run:datumOffset, active: mode==='DATUM_OFFSET_PICK', accent:'#f0a30a' },
+    'datum-3point':{id:'datum-3point',icon:'datumPlane',label:'3-Point Plane', run:datum3Point, active: mode==='DATUM_3POINT_PICK', accent:'#f0a30a' },
+    'datum-midplane':{id:'datum-midplane',icon:'datumPlane',label:'Midplane', run:datumMidplane, active: mode==='DATUM_MIDPLANE_PICK', accent:'#f0a30a' },
+    'datum-angle':{id:'datum-angle',icon:'datumPlane',label:'Plane at Angle', run:datumAngle, active: mode==='DATUM_ANGLE_PICK', accent:'#f0a30a' },
+    'datum-axis':{id:'datum-axis',icon:'datumAxis',label:'Datum Axis', run:datumAxis, active: mode==='DATUM_AXIS_PICK', accent:'#f0a30a' },
+    'datum-point':{id:'datum-point',icon:'datumPoint',label:'Datum Point', run:datumPoint, active: mode==='DATUM_POINT_PICK', accent:'#f0a30a' },
+    'datum-tangent':{id:'datum-tangent',icon:'datumPlane',label:'Tangent Plane', run:datumTangent, active: mode==='DATUM_TANGENT_PICK', accent:'#f0a30a' },
+    'datum-curvenormal':{id:'datum-curvenormal',icon:'datumPlane',label:'Normal to Curve', run:datumCurveNormal, active: mode==='DATUM_CURVE_NORMAL_PICK', accent:'#f0a30a' },
+    'datum-2edge':{id:'datum-2edge',icon:'datumPlane',label:'Through 2 Edges', run:datum2Edge, active: mode==='DATUM_2EDGE_PICK', accent:'#f0a30a' },
     // primitives
     // structure
     component: { id:'component', icon:'component', label:'Component', run:mkComponent, accent:'#6e7681',
@@ -907,6 +918,7 @@ export const Ribbon: React.FC = () => {
     // tools
     select:    { id:'select',    icon:'select',    label:'Select',  run:() => setMode('SELECT'),           active: mode==='SELECT' },
     measure:   { id:'measure',   icon:'measure',   label:'Measure', run:() => setMode('MEASURE_DISTANCE'), active: mode==='MEASURE_DISTANCE', accent:'#2aaccc' },
+    'fit-all': { id:'fit-all',   icon:'fitAll',    label:'Fit All', run:() => window.dispatchEvent(new CustomEvent('cad-frame-all')), tooltip:'Frame all objects (Shift+F)' },
     import:    { id:'import',    icon:'import',    label:'Import',  run:importFile },
     export:    { id:'export',    icon:'export',    label:'Export',  run:exportFile, enabled:hasSel },
   };

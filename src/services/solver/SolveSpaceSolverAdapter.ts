@@ -188,12 +188,24 @@ function emitConstraint(c: SketchConstraint, ctx: Ctx): void {
     }
     case 'DISTANCE': {
       if (c.value == null) return;
+      // A line operand is an ENTITY ref onto a line geom. resolvePoint() would
+      // collapse it to an endpoint ('a'), so detect it explicitly and emit a
+      // point-to-line distance (the form parallel-line / segment↔axis distances
+      // are normalized into) instead of a wrong point-to-point.
+      const r0Line = r0.kind === 'entity' && geomById.get(r0.id)?.kind === 'line';
+      const r1Line = r1.kind === 'entity' && geomById.get(r1.id)?.kind === 'line';
+      if (r1Line && !r0Line) {
+        const p = point(r0);
+        if (p) addC(SlvsC.PT_LINE_DISTANCE, { valA: c.value, ptA: p.h, entityA: ent(r1) });
+        return;
+      }
+      if (r0Line && !r1Line) {
+        const p = point(r1);
+        if (p) addC(SlvsC.PT_LINE_DISTANCE, { valA: c.value, ptA: p.h, entityA: ent(r0) });
+        return;
+      }
       const a = point(r0), b = point(r1);
-      if (a && b) { addC(SlvsC.PT_PT_DISTANCE, { valA: c.value, ptA: a.h, ptB: b.h }); return; }
-      // point ↔ line
-      const pt = a ?? b;
-      const lineRef = a ? r1 : r0;
-      if (pt) addC(SlvsC.PT_LINE_DISTANCE, { valA: c.value, ptA: pt.h, entityA: ent(lineRef) });
+      if (a && b) addC(SlvsC.PT_PT_DISTANCE, { valA: c.value, ptA: a.h, ptB: b.h });
       return;
     }
     case 'TANGENT': {

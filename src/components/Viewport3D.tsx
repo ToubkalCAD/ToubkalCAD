@@ -137,6 +137,48 @@ function disposeGroup(g: THREE.Object3D) {
   });
 }
 
+// Frame a world-space bounding box in the active camera's CURRENT view
+// direction — a projection-aware "zoom to fit". For perspective we dolly along
+// the view axis to the distance at which the box's bounding sphere fits both the
+// vertical and horizontal FOV; for orthographic we hold position and size the
+// frustum via `zoom`. Shared by the initial origin-plane framing and the
+// `cad-frame-all` event so the static default view matches the programmatic fit.
+function fitCameraToBox(
+  camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
+  controls: OrbitControls,
+  box: THREE.Box3,
+  margin = 1.15,
+) {
+  if (box.isEmpty()) return;
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 1e-3);
+
+  // Preserve the current viewing direction; fall back to a friendly iso angle.
+  const dir = new THREE.Vector3().subVectors(camera.position, controls.target);
+  if (dir.lengthSq() < 1e-9) dir.set(1, 0.85, 1);
+  dir.normalize();
+
+  if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera) {
+    const cam  = camera as THREE.PerspectiveCamera;
+    const vFov = THREE.MathUtils.degToRad(cam.fov);
+    const hFov = 2 * Math.atan(Math.tan(vFov / 2) * cam.aspect);
+    const dist = Math.max(radius / Math.sin(vFov / 2), radius / Math.sin(hFov / 2)) * margin;
+    cam.position.copy(center).addScaledVector(dir, dist);
+    cam.near = Math.max(dist - radius * 2, 0.01);
+    cam.far  = dist + radius * 4;
+    cam.updateProjectionMatrix();
+  } else {
+    const cam   = camera as THREE.OrthographicCamera;
+    const halfH = (cam.top - cam.bottom) / 2;          // base frustum half-height
+    cam.position.copy(center).addScaledVector(dir, radius * 4);
+    cam.zoom = halfH / (radius * margin);              // effective half-height = halfH / zoom
+    cam.updateProjectionMatrix();
+  }
+  controls.target.copy(center);
+  camera.lookAt(center);
+  controls.update();
+}
+
 // Two-tier Fusion-style sketch grid: minor sub-divisions every 1 unit, kept
 // exceptionally faint; major lines every 10 units, a muted light gray. Built in
 // the XZ plane (normal +Y) so the caller's yUp→normal quaternion lays it onto the
@@ -521,7 +563,14 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     const PERSP_FOV = 45;
 
     const perspCam = new THREE.PerspectiveCamera(PERSP_FOV, aspect0, 0.01, 5000);
-    perspCam.position.set(20, 18, 20);
+    // Strategy 1 — frame the initial view to the standard 100mm origin planes so
+    // they don't overwhelm the viewport on first load. Distance is derived the
+    // same way fitCameraToBox would frame the XY/YZ/ZX corner (bounding-sphere
+    // radius = DATUM_SIZE·√3/2), keeping the static default == programmatic fit.
+    const initDir  = new THREE.Vector3(1, 0.85, 1).normalize();
+    const initR    = DATUM_SIZE * Math.sqrt(3) / 2;
+    const initDist = (initR / Math.sin(THREE.MathUtils.degToRad(PERSP_FOV) / 2)) * 1.15;
+    perspCam.position.copy(initDir).multiplyScalar(initDist);
     perspCam.up.set(0, 1, 0);
     perspCam.lookAt(0, 0, 0);
     perspCamRef.current = perspCam;
@@ -769,6 +818,22 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     };
     window.addEventListener('cad-set-projection', onSetProjection);
 
+    // Strategy 2 — programmatic "zoom to fit": box every visible solid + datum
+    // (top-level so ancestor visibility is honoured) and frame it in the active
+    // projection. Fired e.g. right after the origin planes are created on load.
+    const onFrameAll = () => {
+      const box = new THREE.Box3();
+      for (const o of scene.children) {
+        if (!o.visible) continue;
+        const ud = o.userData || {};
+        if (ud.cadNodeId || ud.datumNodeId) box.expandByObject(o);
+      }
+      if (box.isEmpty()) return;
+      fitCameraToBox(camera, orbit, box);
+      requestRender();
+    };
+    window.addEventListener('cad-frame-all', onFrameAll);
+
     // Render loop
     let rafId: number;
     const animate = () => {
@@ -851,6 +916,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       window.removeEventListener('wheel', onWheelZoom, { capture: true });
       window.removeEventListener('cad-view-preset', onViewPreset);
       window.removeEventListener('cad-set-projection', onSetProjection);
+      window.removeEventListener('cad-frame-all', onFrameAll);
       window.removeEventListener('cad-theme-changed', onThemeChanged);
       orbit.removeEventListener('change', requestRender);
       tc.removeEventListener('change', requestRender);
@@ -977,7 +1043,23 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       }
     };
 
+    // Full viewport wipe (New / Open project): dispose every tessellated mesh,
+    // then sweep any leftover imperative objects (sketch wire lines carry
+    // cadNodeId; datum helpers carry datumNodeId).
+    const onSceneReset = () => {
+      const scene = sceneRef.current;
+      if (!scene) return;
+      transformRef.current?.detach();
+      ThreeMeshCache.getInstance().clearAll(scene);
+      const stray = scene.children.filter(
+        (c) => c.userData?.cadNodeId || c.userData?.datumNodeId,
+      );
+      stray.forEach((obj) => { scene.remove(obj); disposeGroup(obj); });
+      datumGroupsRef.current.clear();
+    };
+
     window.addEventListener('cad-add-mesh',          onAdd);
+    window.addEventListener('cad-scene-reset',        onSceneReset);
     window.addEventListener('cad-remove-mesh',        onRemove);
     window.addEventListener('cad-duplicate-mesh',     onDuplicate);
     window.addEventListener('cad-material-changed',   onMaterial);
@@ -986,6 +1068,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     window.addEventListener('cad-update-mesh',        onUpdate);
     return () => {
       window.removeEventListener('cad-add-mesh',          onAdd);
+      window.removeEventListener('cad-scene-reset',        onSceneReset);
       window.removeEventListener('cad-remove-mesh',        onRemove);
       window.removeEventListener('cad-duplicate-mesh',     onDuplicate);
       window.removeEventListener('cad-material-changed',   onMaterial);

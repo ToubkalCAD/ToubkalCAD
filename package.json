@@ -2,6 +2,7 @@
   "name": "atlascad",
   "version": "1.0.0",
   "description": "Application CAO 3D dans le navigateur - AtlasCAD",
+  "type": "module",
   "main": "src/index.tsx",
   "scripts": {
     "dev": "rspack serve --config rspack.config.ts",
@@ -17,9 +18,12 @@
     "test:stableref-sketch": "node scripts/test-stableref-sketch.mjs",
     "test:history-delta": "node scripts/test-history-delta.mjs",
     "test:region-backfill": "node scripts/test-region-backfill.mjs",
-    "test:solver": "tsx native/slvs/test/crosscheck.ts"
+    "test:solver": "tsx native/slvs/test/crosscheck.ts",
+    "test:planegcs": "tsx native/slvs/test/crosscheck.ts",
+    "test:distance": "tsx scripts/test-distance-lineline.mjs"
   },
   "dependencies": {
+    "@salusoft89/planegcs": "^1.1.7",
     "dockview": "^1.11.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

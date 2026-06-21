@@ -73,6 +73,48 @@ function resolvePoint(ref: SketchRef, geoms: EntityGeom[]): [number, number] | n
   return null;
 }
 
+/** Perpendicular distance from a point to the infinite line carrying `line`. */
+function perpDistToLine(p: [number, number], line: EntityGeom): number {
+  if (line.kind !== 'line') return 0;
+  const dx = line.b[0] - line.a[0], dy = line.b[1] - line.a[1];
+  const n = Math.hypot(dx, dy) || 1;
+  return Math.abs((p[0] - line.a[0]) * -dy + (p[1] - line.a[1]) * dx) / n;
+}
+
+/**
+ * The solver models DISTANCE as point↔point or point↔line — never line↔line. A
+ * two-line selection (parallel rectangle sides, or a segment + datum axis) is
+ * rewritten to point-to-line: the START point of a real sketch line measured to
+ * the other line's infinite body. A datum axis has arbitrary endpoints, so it is
+ * only ever used as the line operand, never as the point. Non-line selections
+ * (already point↔point / point↔line) pass through unchanged.
+ */
+function normalizeDistanceRefs(sel: SketchRef[], geoms: EntityGeom[]): SketchRef[] {
+  const isLineOperand = (r: SketchRef) =>
+    r.kind === 'entity' && geoms.find((e) => e.id === r.id)?.kind === 'line';
+  if (sel.length !== 2 || !isLineOperand(sel[0]) || !isLineOperand(sel[1]))
+    return sel.map((r) => ({ ...r }));
+  const ptIdx   = isDatumId(sel[0].id) ? 1 : 0;   // never take the point from a datum axis
+  const lineIdx = ptIdx === 0 ? 1 : 0;
+  return [
+    { kind: 'point',  id: sel[ptIdx].id,   pt: 'a' },
+    { kind: 'entity', id: sel[lineIdx].id },
+  ];
+}
+
+/** Default driving value for a DISTANCE on the given (already-normalized) refs:
+ *  perpendicular gap for point↔line, Euclidean for point↔point. */
+function distanceSeed(refs: SketchRef[], geoms: EntityGeom[]): number {
+  const [a, b] = refs;
+  const ga = geoms.find((e) => e.id === a?.id), gb = geoms.find((e) => e.id === b?.id);
+  const aLine = a?.kind === 'entity' && ga?.kind === 'line';
+  const bLine = b?.kind === 'entity' && gb?.kind === 'line';
+  if (bLine && !aLine) { const p = resolvePoint(a, geoms); return p ? perpDistToLine(p, gb!) : 10; }
+  if (aLine && !bLine) { const p = resolvePoint(b, geoms); return p ? perpDistToLine(p, ga!) : 10; }
+  const p1 = resolvePoint(a, geoms), p2 = resolvePoint(b, geoms);
+  return (p1 && p2) ? Math.hypot(p1[0] - p2[0], p1[1] - p2[1]) : 10;
+}
+
 const rebuildEntity = rebuildSketchEntity;
 
 /** Stable signature of a constraint set (by id) — for external-change detection. */
@@ -202,20 +244,25 @@ export const ConstraintPanel: React.FC = () => {
     const blocked = blockedReason(type);
     if (blocked) { setMsg(blocked); return; }
 
+    // DISTANCE between two lines isn't solver-native — rewrite it to the
+    // point-to-line form both solvers support (see normalizeDistanceRefs).
+    const refs = type === 'DISTANCE'
+      ? normalizeDistanceRefs(sel, geoms)
+      : sel.map((r) => ({ ...r }));
+
     let value: number | undefined;
     const meta = CONSTRAINT_META[type];
     if (meta.hasValue) {
       if (type === 'LENGTH') {
-        const g = geoms.find((e) => e.id === sel[0].id);
+        const g = geoms.find((e) => e.id === refs[0].id);
         if (g?.kind === 'line') value = Math.hypot(g.b[0] - g.a[0], g.b[1] - g.a[1]);
       } else if (type === 'RADIUS') {
-        const g = geoms.find((e) => e.id === sel[0].id);
+        const g = geoms.find((e) => e.id === refs[0].id);
         if (g?.kind === 'circle') value = g.r;
       } else if (type === 'DISTANCE') {
-        const p1 = resolvePoint(sel[0], geoms), p2 = resolvePoint(sel[1], geoms);
-        value = (p1 && p2) ? Math.hypot(p1[0] - p2[0], p1[1] - p2[1]) : 10;
+        value = distanceSeed(refs, geoms);
       } else if (type === 'ANGLE') {
-        const a = geoms.find((e) => e.id === sel[0].id), b = geoms.find((e) => e.id === sel[1].id);
+        const a = geoms.find((e) => e.id === refs[0].id), b = geoms.find((e) => e.id === refs[1].id);
         if (a?.kind === 'line' && b?.kind === 'line') {
           const u1 = a.b[0] - a.a[0], v1 = a.b[1] - a.a[1];
           const u2 = b.b[0] - b.a[0], v2 = b.b[1] - b.a[1];
@@ -224,7 +271,7 @@ export const ConstraintPanel: React.FC = () => {
       }
     }
 
-    const c: SketchConstraint = { id: crypto.randomUUID(), type, refs: sel.map((r) => ({ ...r })), value };
+    const c: SketchConstraint = { id: crypto.randomUUID(), type, refs, value };
     const next = [...constraints, c];
     setConstraints(next);
     clearSel();

@@ -91,10 +91,11 @@ export function useCADGizmoHotkeys(options: UseCADGizmoHotkeysOptions = {}) {
         return;
       }
 
-      // ── Frame Selection (F) ───────────────────────────────────────────
+      // ── Frame Selection (F) · Fit All (Shift+F) ───────────────────────
       if (!ctrl && key === 'f') {
         e.preventDefault();
-        options.onFrameSelection?.();
+        if (shift) window.dispatchEvent(new CustomEvent('cad-frame-all'));
+        else       options.onFrameSelection?.();
         return;
       }
 

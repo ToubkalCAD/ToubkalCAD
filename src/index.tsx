@@ -9,6 +9,7 @@ import { createRoot }          from 'react-dom/client';
 import initOpenCascade         from 'opencascade.js';
 import { CADLayout }           from './components/CADLayout';
 import { ParameterModal }      from './components/ParameterModal';
+import { AppDialog }           from './components/AppDialog';
 import { ErrorBoundary }       from './components/ErrorBoundary';
 import { CADGeometryRegistry } from './services/CADGeometryRegistry';
 import { ThreeMeshCache }      from './services/ThreeMeshCache';
@@ -394,20 +395,30 @@ const AppInitializer: React.FC = () => {
           installDragEngine(new SketchDragController());
         }
 
-        // Opt into the SolveSpace WASM solver IF its glue is deployed; otherwise
-        // the legacy LM solver stays active. Lazily imported so it lives in its
-        // own chunk and never blocks startup — installSolver() awaits the
-        // adapter's init() (loads libslvs.mjs), which rejects when the artifact
-        // is absent, leaving the default solver in place.
+        // Install the constraint solver behind the ISketchSolver seam, preferring
+        // PlaneGCS → SolveSpace → legacy LM (the default if both fail). All are
+        // lazily imported so each lives in its own chunk and never blocks startup;
+        // installSolver() awaits the adapter's init(), which rejects when its WASM
+        // artifact is absent — leaving the next fallback (or the default) in place.
         try {
-          const [{ installSolver }, { SolveSpaceSolverAdapter }] = await Promise.all([
+          const [{ installSolver }, { PlaneGCSSolverAdapter }, wasm] = await Promise.all([
             import('./services/solver'),
-            import('./services/solver/SolveSpaceSolverAdapter'),
+            import('./services/solver/PlaneGCSSolverAdapter'),
+            import('@salusoft89/planegcs/dist/planegcs_dist/planegcs.wasm'),
           ]);
-          await installSolver(new SolveSpaceSolverAdapter());
-          console.info('[solver] SolveSpace WASM active');
+          await installSolver(new PlaneGCSSolverAdapter((wasm as { default: string }).default));
+          console.info('[solver] PlaneGCS WASM active');
         } catch {
-          console.info('[solver] SolveSpace unavailable — legacy solver active');
+          try {
+            const [{ installSolver }, { SolveSpaceSolverAdapter }] = await Promise.all([
+              import('./services/solver'),
+              import('./services/solver/SolveSpaceSolverAdapter'),
+            ]);
+            await installSolver(new SolveSpaceSolverAdapter());
+            console.info('[solver] SolveSpace WASM active (PlaneGCS unavailable)');
+          } catch {
+            console.info('[solver] PlaneGCS & SolveSpace unavailable — legacy solver active');
+          }
         }
 
         setStep('Loading interface…');
@@ -447,6 +458,7 @@ if (container) {
     <>
       <AppInitializer />
       <ParameterModal />
+      <AppDialog />
     </>,
   );
 }

@@ -79,6 +79,47 @@ export class OccTransformService {
   }
 
   /**
+   * Bake an arbitrary world matrix into a COPY of `shape`. Same gp_Trsf.SetValues
+   * convention as placeShape, but takes a pre-composed THREE.Matrix4 (e.g. an
+   * assembly→component→feature chain) instead of a single node placement.
+   *
+   * Returns the ORIGINAL shape unchanged when the matrix is identity (so callers
+   * can skip freeing it — it's still owned by the registry). A non-orthogonal
+   * (non-uniform-scale) matrix is rejected by gp_Trsf, so we fall back to the
+   * rigid part (rotation + translation, scale dropped).
+   */
+  static placeByMatrix(oc: any, shape: any, m: THREE.Matrix4): any {
+    const e = m.elements;
+    const isIdentity =
+      e[0] === 1 && e[5] === 1 && e[10] === 1 && e[15] === 1 &&
+      e[1] === 0 && e[2] === 0 && e[3] === 0 &&
+      e[4] === 0 && e[6] === 0 && e[7] === 0 &&
+      e[8] === 0 && e[9] === 0 && e[11] === 0 &&
+      e[12] === 0 && e[13] === 0 && e[14] === 0;
+    if (isIdentity) return shape;
+
+    const scope = new WasmScope();
+    try {
+      const trsf = scope.keep(new oc.gp_Trsf_1());
+      const setFrom = (a: THREE.Matrix4Tuple) =>
+        trsf.SetValues(a[0], a[4], a[8], a[12], a[1], a[5], a[9], a[13], a[2], a[6], a[10], a[14]);
+      try {
+        setFrom(e);
+      } catch {
+        // Non-uniform scale → keep the rigid placement only.
+        const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scl = new THREE.Vector3();
+        m.decompose(pos, quat, scl);
+        setFrom(new THREE.Matrix4().compose(pos, quat, new THREE.Vector3(1, 1, 1)).elements);
+      }
+      const xf = scope.keep(new oc.BRepBuilderAPI_Transform_2(shape, trsf, true));
+      if (!xf.IsDone()) return shape;
+      return xf.Shape();
+    } finally {
+      scope.free();
+    }
+  }
+
+  /**
    * Mirror a shape across a standard plane through the origin.
    * Returns a mirrored COPY (the source is untouched).
    */

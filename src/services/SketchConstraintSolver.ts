@@ -553,7 +553,7 @@ export const CONSTRAINT_META: Record<SketchConstraintType, ConstraintMeta> = {
   FIXED:         { label: 'Fixed',         glyph: '⚓', group: 'geometric',   hasValue: false, sigs: [['line'], ['circle']], eqs: 0 },
   LENGTH:        { label: 'Length',        glyph: '↦', group: 'dimensional', hasValue: true,  sigs: [['line']], eqs: 1 },
   RADIUS:        { label: 'Radius',        glyph: 'R', group: 'dimensional', hasValue: true,  sigs: [['circle']], eqs: 1 },
-  DISTANCE:      { label: 'Distance',      glyph: '↔', group: 'dimensional', hasValue: true,  sigs: [['point', 'point'], ['point', 'line'], ['line', 'point']], eqs: 1 },
+  DISTANCE:      { label: 'Distance',      glyph: '↔', group: 'dimensional', hasValue: true,  sigs: [['point', 'point'], ['point', 'line'], ['line', 'point'], ['line', 'line']], eqs: 1 },
   ANGLE:         { label: 'Angle',         glyph: '∠', group: 'dimensional', hasValue: true,  sigs: [['line', 'line']], eqs: 1 },
 };
 
@@ -598,6 +598,20 @@ const EXCLUSIVE: Partial<Record<SketchConstraintType, SketchConstraintType[]>> =
 const refsKey = (refs: SketchRef[]) =>
   refs.map((r) => `${r.id}:${r.pt ?? ''}`).sort().join('|');
 
+/** Absolute orientation a line is already locked to by an existing Horizontal or
+ *  Vertical constraint, or null if free. Two such lines have a DETERMINED
+ *  relative orientation, so adding Parallel/Perpendicular between them is either
+ *  redundant or contradictory — caught up-front so the solver never sees the
+ *  duplicate/conflicting equation (which can stall the GCS loop). */
+function lockedOrientation(id: string, constraints: SketchConstraint[]): 'H' | 'V' | null {
+  for (const c of constraints) {
+    if (c.refs[0]?.id !== id) continue;
+    if (c.type === 'HORIZONTAL') return 'H';
+    if (c.type === 'VERTICAL')   return 'V';
+  }
+  return null;
+}
+
 /**
  * Reason this constraint type cannot be added to the current selection given the
  * already-applied constraints, or null if it's allowed. Drives UI disabling so
@@ -613,6 +627,23 @@ export function constraintBlocked(
     if (refsKey(c.refs) !== selKey) continue;
     if (c.type === type) return `${CONSTRAINT_META[type].label} already applied`;
     if (EXCLUSIVE[type]?.includes(c.type)) return `Conflicts with ${CONSTRAINT_META[c.type].label}`;
+  }
+
+  // Orientation redundancy: two lines each pinned Horizontal/Vertical already have
+  // a fixed relative orientation. Re-asserting Parallel (same orientation) or
+  // Perpendicular (opposite) duplicates that equation → over-constrained; the
+  // opposite case contradicts it. Either way, gate it with a clear reason rather
+  // than feeding a redundant/conflicting equation to the solver.
+  if ((type === 'PARALLEL' || type === 'PERPENDICULAR') && sel.length === 2) {
+    const o0 = lockedOrientation(sel[0].id, constraints);
+    const o1 = lockedOrientation(sel[1].id, constraints);
+    if (o0 && o1) {
+      const sameAxis = o0 === o1;   // both H or both V ⇒ the lines are parallel
+      const redundant = type === 'PARALLEL' ? sameAxis : !sameAxis;
+      return redundant
+        ? `Already ${type === 'PARALLEL' ? 'parallel' : 'perpendicular'} via Horizontal/Vertical — redundant`
+        : 'Conflicts with Horizontal/Vertical orientation';
+    }
   }
   return null;
 }

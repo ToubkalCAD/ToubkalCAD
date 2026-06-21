@@ -182,6 +182,23 @@ export function installRecomputeBridge(): void {
   window.addEventListener('cad-regenerate', () => {
     try { regenerateMissing(); } catch { /* engine already isolates per-feature errors */ }
   });
+  // Project opened (cadStore.loadProject): the scene was replaced but no shapes
+  // were serialized, so every feature node is missing geometry — rebuild the
+  // whole tree from its recipe (regenerateMissing treats all as dirty when the
+  // registry is empty), emitting cad-add-mesh per body.
+  window.addEventListener('cad-rebuild-all', () => {
+    try {
+      const rep = regenerateMissing();
+      const st = useCADStore.getState();
+      const failed = Object.keys(rep.errors);
+      if (failed.length) {
+        const names = failed.map((id) => st.nodes[id]?.name ?? id.slice(0, 6)).join(', ');
+        st.log(`Rebuild ▸ ${rep.ok} built, ${failed.length} failed: ${names}`, 'error');
+      } else {
+        st.log(`Rebuild ▸ ${rep.ok} feature(s) regenerated`, 'success');
+      }
+    } catch { /* engine already isolates per-feature errors */ }
+  });
   // Sketch edited & exited → rebuild everything downstream of that sketch (loft /
   // extrude / revolve bound to it re-derive their profile from the new shape).
   window.addEventListener('cad-sketch-committed', (e) => {

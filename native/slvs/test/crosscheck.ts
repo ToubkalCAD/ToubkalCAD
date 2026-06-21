@@ -314,10 +314,48 @@ async function loadSolveSpace(): Promise<ISketchSolver | null> {
   }
 }
 
+async function loadPlaneGCS(): Promise<ISketchSolver | null> {
+  try {
+    const mod = await import('../../../src/services/solver/PlaneGCSSolverAdapter');
+    // No wasmUrl in Node: the unbundled emscripten glue resolves its sibling
+    // planegcs.wasm itself (the browser path passes a file-loader URL instead).
+    const pg = new mod.PlaneGCSSolverAdapter();
+    await pg.init();
+    return pg;
+  } catch (e: any) {
+    console.log(`\n⚠ PlaneGCS adapter unavailable — cross-check SKIPPED.\n  (${e?.message ?? e})`);
+    console.log('  Install it first:  npm i @salusoft89/planegcs\n');
+    return null;
+  }
+}
+
 const fmt = (v: number) => v.toExponential(2);
+
+/** Run one adapter over a case, scoring its violation (and coord-agreement with
+ *  the legacy oracle for gauge-fixed cases). Returns a display column + #failures. */
+function runSolver(
+  name: string,
+  solver: ISketchSolver,
+  tc: Case,
+  legacy: Record<string, EntityGeom>,
+): { col: string; fail: number } {
+  const r = solver.solve([...tc.geoms, ...datumGeoms()], [...tc.constraints, ...datumFixedConstraints()], tc.drag);
+  const viol = maxViolation(r.geoms, tc.constraints);
+  const ok = viol <= TOL && r.converged;
+  let fail = ok ? 0 : 1;
+  let col = `${ok ? '✓' : '✗'} ${name} ${fmt(viol).padStart(8)} (conv=${r.converged})`;
+  if (tc.compareCoords) {
+    const diff = coordDiff(legacy, r.geoms);
+    const agree = diff <= TOL;
+    if (!agree) fail++;
+    col += ` ${agree ? '≈' : '≠'} agree ${fmt(diff)}`;
+  }
+  return { col, fail };
+}
 
 async function main() {
   const ss = await loadSolveSpace();
+  const pg = await loadPlaneGCS();
   let failures = 0;
 
   console.log(`\nsolver cross-check — ${cases.length} cases   (tol ${TOL})\n` + '─'.repeat(64));
@@ -328,26 +366,13 @@ async function main() {
     if (!lOk) failures++;
 
     let line = `${lOk ? '✓' : '✗'} legacy ${fmt(lViol).padStart(8)}`;
-
-    if (ss) {
-      const slv = ss.solve([...tc.geoms, ...datumGeoms()], [...tc.constraints, ...datumFixedConstraints()], tc.drag);
-      const sViol = maxViolation(slv.geoms, tc.constraints);
-      const sOk = sViol <= TOL && slv.converged;
-      if (!sOk) failures++;
-      line += `   |   ${sOk ? '✓' : '✗'} solvespace ${fmt(sViol).padStart(8)} (conv=${slv.converged})`;
-
-      if (tc.compareCoords) {
-        const diff = coordDiff(legacy, slv.geoms);
-        const agree = diff <= TOL;
-        if (!agree) failures++;
-        line += `   |   ${agree ? '≈' : '≠'} agree ${fmt(diff).padStart(8)}`;
-      }
-    }
+    if (ss) { const r = runSolver('solvespace', ss, tc, legacy); line += `   |   ${r.col}`; failures += r.fail; }
+    if (pg) { const r = runSolver('planegcs',   pg, tc, legacy); line += `   |   ${r.col}`; failures += r.fail; }
     console.log(`${tc.name.padEnd(38)} ${line}`);
   }
   console.log('─'.repeat(64));
 
-  if (!ss) { console.log('legacy-only run complete (SolveSpace skipped).'); process.exit(failures > 0 ? 1 : 0); }
+  if (!ss && !pg) { console.log('legacy-only run complete (no WASM solver available).'); process.exit(failures > 0 ? 1 : 0); }
   console.log(failures === 0 ? 'ALL PASS ✅' : `${failures} FAILURE(S) ❌`);
   process.exit(failures > 0 ? 1 : 0);
 }
