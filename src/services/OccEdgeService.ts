@@ -18,9 +18,17 @@
 
 import { WasmScope } from '../utils/WasmScope';
 
+/** Analytic classification of an edge's underlying 3D curve. `other` covers
+ *  ellipses / b-splines / etc. that aren't a single sketch primitive. */
+export type EdgeCurve =
+  | { type: 'line' }
+  | { type: 'circle'; center: [number, number, number]; radius: number; normal: [number, number, number]; closed: boolean }
+  | { type: 'other' };
+
 export interface ExtractedEdge {
   index:  number;                          // stable 0-based edge index
   points: [number, number, number][];      // world-space polyline
+  curve?: EdgeCurve;                        // analytic type (for clean projection)
 }
 
 export class OccEdgeService {
@@ -72,7 +80,27 @@ export class OccEdgeService {
             pts.push([p.X(), p.Y(), p.Z()]);
             p.delete();
           }
-          if (pts.length >= 2) result.push({ index: i - 1, points: pts });
+
+          // Analytic classification — lets a projected edge become a real sketch
+          // line/circle/arc the solver can freeze + dimension, not a sampled polyline.
+          let curveInfo: EdgeCurve = { type: 'other' };
+          const ctype = curve.GetType();
+          if (ctype === oc.GeomAbs_CurveType.GeomAbs_Line) {
+            curveInfo = { type: 'line' };
+          } else if (ctype === oc.GeomAbs_CurveType.GeomAbs_Circle) {
+            const circ = scope.keep(curve.Circle());
+            const ctr  = scope.keep(circ.Location());
+            const nrm  = scope.keep(scope.keep(circ.Axis()).Direction());
+            curveInfo = {
+              type:   'circle',
+              center: [ctr.X(), ctr.Y(), ctr.Z()],
+              radius: circ.Radius(),
+              normal: [nrm.X(), nrm.Y(), nrm.Z()],
+              closed: Math.abs((u1 - u0) - 2 * Math.PI) < 1e-6,
+            };
+          }
+
+          if (pts.length >= 2) result.push({ index: i - 1, points: pts, curve: curveInfo });
         } catch {
           /* skip edge without a usable 3D curve */
         } finally {

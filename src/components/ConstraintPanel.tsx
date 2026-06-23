@@ -24,7 +24,7 @@ import {
 import type { EntityGeom } from '../services/SketchConstraintSolver';
 import { getSolver } from '../services/solver';
 import { datumGeoms, datumFixedConstraints, datumLabel, isDatumId } from '../services/SketchDatums';
-import { collectSolverGeoms, rebuildSketchEntity, geomKey } from '../services/SketchSolveBridge';
+import { collectSolverGeoms, constructionFixedConstraints, rebuildSketchEntity, geomKey } from '../services/SketchSolveBridge';
 import { useDragPanel } from '../hooks/useDragPanel';
 
 const ACCENT = '#1d9e74';
@@ -53,7 +53,9 @@ function unsupportedDoF(sketchId: string): number {
   let dof = 0;
   for (const id of st.nodes[sketchId]?.children ?? []) {
     const g = st.nodes[id]?.params?.sketchGeom;
-    if (g && g.kind !== 'line' && g.kind !== 'circle' && g.kind !== 'arc') dof += 3; // free placement (x,y,θ)
+    // Ellipses ARE solver-modelled now (rigid translate-only), so they're counted
+    // by computeDoF via collectGeoms — don't double-count them here.
+    if (g && g.kind !== 'line' && g.kind !== 'circle' && g.kind !== 'arc' && !(g.kind === 'polyline' && g.ellipse)) dof += 3; // free placement (x,y,θ)
   }
   return dof;
 }
@@ -63,6 +65,7 @@ function resolvePoint(ref: SketchRef, geoms: EntityGeom[]): [number, number] | n
   if (!g) return null;
   if (g.kind === 'line')   return ref.pt === 'b' ? g.b : g.a;
   if (g.kind === 'circle') return g.c;
+  if (g.kind === 'ellipse') return g.c;   // only the centre is a referenceable point
   if (g.kind === 'arc') {
     if (ref.pt === 'a' || ref.pt === 'b') {
       const ang = ref.pt === 'a' ? g.a1 : g.a2;
@@ -190,7 +193,7 @@ export const ConstraintPanel: React.FC = () => {
     try {
       // Inject the fixed Origin/axis datums so constraints can pin to them; they
       // carry equal vars + FIXED so they add no DoF and are never rebuilt.
-      const res = getSolver().solve([...before, ...datumGeoms()], [...next, ...datumFixedConstraints()]);
+      const res = getSolver().solve([...before, ...datumGeoms()], [...next, ...datumFixedConstraints(), ...constructionFixedConstraints(sketchId)]);
       let rebuilt = 0;
       const changed: string[] = [];
       for (const g of Object.values(res.geoms)) {

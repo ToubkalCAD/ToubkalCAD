@@ -14,8 +14,9 @@ import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { useCADStore } from '../store/cadStore';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
-import { OccEdgeService } from '../services/OccEdgeService';
-import { toLocal2D } from '../services/OccSketchService';
+import { OccEdgeService, EdgeCurve } from '../services/OccEdgeService';
+import { toLocal2D, workplaneBasis } from '../services/OccSketchService';
+import type { Workplane } from '../store/cadStore';
 import { createSketchEntityNode } from '../utils/sketchEntity';
 import { getPlacedShape } from '../utils/placedShape';
 
@@ -24,6 +25,103 @@ const EDGE_HOVER = 0xffe000;
 const CLICK_SLOP_PX = 5;
 
 const NON_SOLID = new Set(['sketch', 'sketch_wire', 'datum_plane', 'datum_axis', 'datum_point']);
+
+/** Are the 2D points (within tolerance) collinear → representable as a single line?
+ *  A straight projected edge becomes a real LINE the solver can freeze/dimension;
+ *  a curved one stays a polyline (visual reference only). */
+function collinear2D(pts: [number, number][]): boolean {
+  if (pts.length <= 2) return true;
+  const [ax, ay] = pts[0];
+  const [bx, by] = pts[pts.length - 1];
+  const dx = bx - ax, dy = by - ay;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-9) return false;
+  const ux = dx / len, uy = dy / len;
+  let maxPerp = 0;
+  for (const [px, py] of pts) {
+    const perp = Math.abs((px - ax) * uy - (py - ay) * ux);
+    if (perp > maxPerp) maxPerp = perp;
+  }
+  return maxPerp <= Math.max(1e-3, len * 0.01);   // within ~1% of the chord
+}
+
+/** Is the edge's circle plane parallel (or anti-parallel) to the sketch plane?
+ *  Only then does an orthographic projection stay a true circle/arc of the same
+ *  radius — a tilted circle projects to an ellipse (→ polyline fallback). */
+function circleParallel(curveNormal: [number, number, number], wp: Workplane): boolean {
+  const a = new THREE.Vector3(...curveNormal).normalize();
+  const b = new THREE.Vector3(...wp.normal).normalize();
+  return Math.abs(a.dot(b)) > 0.999;
+}
+
+/** Angle of (p − c) in the sketch's (u,v) basis — matches sampleEntity's cos→u,sin→v. */
+const angleOf = (p: [number, number], c: [number, number]) => Math.atan2(p[1] - c[1], p[0] - c[0]);
+
+/** Order an arc's end angle so a linear a1→a2 sweep passes through the sampled
+ *  midpoint angle (handles both CW and CCW edges regardless of plane orientation). */
+function arcEndAngle(a1: number, aMid: number, a2: number): number {
+  const TAU = Math.PI * 2;
+  const norm = (x: number) => { let y = x; while (y < a1) y += TAU; while (y >= a1 + TAU) y -= TAU; return y; };
+  const aMidN = norm(aMid), a2N = norm(a2);
+  return aMidN <= a2N ? a2N : a2N - TAU;   // CCW if mid precedes end, else sweep the other way
+}
+
+/** Orthographic image of a circle onto the sketch plane. A circle parallel to the
+ *  plane stays a circle (handled elsewhere); a TILTED one images to an ellipse.
+ *  Returns its 2D {center, rx, ry, rot} via the conjugate-semi-diameter form, or
+ *  null when it degenerates (edge-on → a line segment). */
+function projectedEllipse(
+  curve: Extract<EdgeCurve, { type: 'circle' }>, wp: Workplane,
+): { c: [number, number]; rx: number; ry: number; rot: number } | null {
+  const n = new THREE.Vector3(...curve.normal).normalize();
+  const { uAxis, vAxis } = workplaneBasis(wp);
+  // Any orthonormal basis (e1,e2) of the circle's plane parameterises the same circle.
+  const helper = Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const e1 = new THREE.Vector3().crossVectors(helper, n).normalize();
+  const e2 = new THREE.Vector3().crossVectors(n, e1).normalize();
+  const r = curve.radius;
+  // 2D images of the two semi-diameters r·e1, r·e2 (columns of the 2×2 map M).
+  const a = r * e1.dot(uAxis), c = r * e1.dot(vAxis);
+  const b = r * e2.dot(uAxis), d = r * e2.dot(vAxis);
+  // Ellipse axes/orientation = singular values + LEFT singular vectors of M, i.e.
+  // eigen-decomposition of M·Mᵀ (row-based) — the orientation in OUTPUT (u,v) space.
+  // (Mᵀ·M would give the same radii but the angle in parameter space — wrong axis.)
+  const A = a * a + b * b, B = c * c + d * d, C = a * c + b * d;
+  const disc = Math.hypot(A - B, 2 * C);              // √((A−B)² + 4C²)
+  const rx = Math.sqrt(Math.max((A + B + disc) / 2, 0));
+  const ry = Math.sqrt(Math.max((A + B - disc) / 2, 0));
+  if (ry < 1e-3) return null;                         // edge-on → not an ellipse
+  const rot = 0.5 * Math.atan2(2 * C, A - B);         // major-axis angle in the (u,v) plane
+  const cc = toLocal2D(new THREE.Vector3(...curve.center), wp);
+  return { c: [cc.u, cc.v], rx, ry, rot };
+}
+
+/** Turn a picked edge into the best 2D sketch geometry for a REFERENCE projection:
+ *  a clean circle/arc when the edge is circular and coplanar-parallel; an ellipse
+ *  when a full circle is tilted; a line when collinear; otherwise a sampled polyline.
+ *  The polyline carries the sampled points (correct dashed visual) plus an analytic
+ *  `ellipse` descriptor so buildEntityWire rebuilds it as one clean gp_Elips edge. */
+function referenceGeom(curve: EdgeCurve | undefined, pts2d: [number, number][], wp: Workplane): any {
+  if (curve?.type === 'circle') {
+    if (circleParallel(curve.normal, wp)) {
+      const c2 = toLocal2D(new THREE.Vector3(...curve.center), wp);
+      const cc: [number, number] = [c2.u, c2.v];
+      if (curve.closed) return { kind: 'circle', c: cc, r: curve.radius };
+      const a1   = angleOf(pts2d[0], cc);
+      const aMid = angleOf(pts2d[Math.floor(pts2d.length / 2)], cc);
+      const a2   = arcEndAngle(a1, aMid, angleOf(pts2d[pts2d.length - 1], cc));
+      return { kind: 'arc', c: cc, r: curve.radius, a1, a2 };
+    }
+    // Tilted full circle → ellipse. (A tilted ARC stays polyline — arc-of-ellipse
+    // parameter mapping is out of scope.)
+    if (curve.closed) {
+      const ell = projectedEllipse(curve, wp);
+      if (ell) return { kind: 'polyline', pts: pts2d, ellipse: ell };
+    }
+  }
+  if (collinear2D(pts2d)) return { kind: 'line', a: pts2d[0], b: pts2d[pts2d.length - 1] };
+  return { kind: 'polyline', pts: pts2d };
+}
 
 export function useCADSketchProjectPick(
   containerRef: React.RefObject<HTMLDivElement | null>,
@@ -62,7 +160,7 @@ export function useCADSketchProjectPick(
             new THREE.LineBasicMaterial({ color: EDGE_IDLE, depthTest: false, transparent: true, opacity: 0.9 }),
           );
           line.renderOrder = 999;
-          line.userData = { points: e.points };
+          line.userData = { points: e.points, curve: e.curve };
           scene.add(line);
           linesRef.current.push(line);
           for (const p of e.points) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], p[k]); hi[k] = Math.max(hi[k], p[k]); }
@@ -100,14 +198,29 @@ export function useCADSketchProjectPick(
       return hits.length ? (hits[0].object as THREE.Line) : null;
     };
 
-    const project = (points: [number, number, number][]) => {
-      const session = useCADStore.getState().sketchSession;
+    const project = (ud: { points: [number, number, number][]; curve?: EdgeCurve }) => {
+      const st = useCADStore.getState();
+      const session = st.sketchSession;
       if (!session) return;
       const wp = session.plane;
-      const pts = points.map((p) => { const l = toLocal2D(new THREE.Vector3(p[0], p[1], p[2]), wp); return [l.u, l.v]; });
+      const pts = ud.points.map((p) => { const l = toLocal2D(new THREE.Vector3(p[0], p[1], p[2]), wp); return [l.u, l.v] as [number, number]; });
       if (pts.length < 2) return;
-      createSketchEntityNode({ kind: 'polyline', pts }, wp, session.id);
-      useCADStore.getState().log('Edge projected onto the sketch.', 'success');
+
+      if (st.projectAsConstruction) {
+        // Reference / construction projection (the professional default): a circular
+        // edge coplanar-parallel to the sketch becomes a real CIRCLE/ARC, a straight
+        // edge a LINE — both solver-freezable + dimensionable; anything else (tilted
+        // circle, spline) stays a polyline visual reference. Either way it's excluded
+        // from profile/region detection so it never becomes part of an extrude/loft.
+        const geom = referenceGeom(ud.curve, pts, wp);
+        const label = geom.kind === 'polyline' ? (geom.ellipse ? 'ellipse' : 'curve') : geom.kind;
+        createSketchEntityNode(geom, wp, session.id, { construction: true });
+        st.log(`Edge projected as reference ${label}.`, 'success');
+      } else {
+        // Plain projection: a normal profile polyline (participates in regions/extrude).
+        createSketchEntityNode({ kind: 'polyline', pts }, wp, session.id);
+        st.log('Edge projected onto the sketch.', 'success');
+      }
     };
 
     const onMove = (e: MouseEvent) => {
@@ -124,7 +237,7 @@ export function useCADSketchProjectPick(
       const l = pick(e);
       if (!l) return;
       e.stopPropagation();
-      project(l.userData.points as [number, number, number][]);
+      project(l.userData as { points: [number, number, number][]; curve?: EdgeCurve });
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { clearHover(); useCADStore.getState().setInteractionMode('SELECT'); } };
 

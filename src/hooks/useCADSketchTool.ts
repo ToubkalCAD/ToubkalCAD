@@ -26,6 +26,17 @@ function mkLine(pts: THREE.Vector3[], color: number): THREE.Line {
   return new THREE.Line(geo, new THREE.LineBasicMaterial({ color, depthTest: false }));
 }
 
+const COLOR_CONSTRUCTION = 0x8a93a3;   // muted blue-grey — reads as "reference"
+
+/** Dashed, dimmed line for projected reference / construction geometry. */
+function mkConstructionLine(pts: THREE.Vector3[]): THREE.Line {
+  const geo  = new THREE.BufferGeometry().setFromPoints(pts);
+  const line = new THREE.Line(geo, new THREE.LineDashedMaterial(
+    { color: COLOR_CONSTRUCTION, dashSize: 1.2, gapSize: 0.7, depthTest: false, transparent: true, opacity: 0.9 }));
+  line.computeLineDistances();   // required for dashes to render
+  return line;
+}
+
 function sampleCircle3D(center: THREE.Vector3, rim: THREE.Vector3, wp: Workplane, segs = 72): THREE.Vector3[] {
   const r   = center.distanceTo(rim);
   const { uAxis, vAxis } = workplaneBasis(wp);
@@ -682,7 +693,8 @@ export function useCADSketchTool(
       const visible = old[0]?.visible ?? true;
       old.forEach((l) => { s.remove(l); l.geometry.dispose(); (l.material as THREE.Material).dispose(); });
       const v3 = pts.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
-      const line = mkLine(v3, COLOR_COMMIT);
+      const isConstr = !!useCADStore.getState().nodes[id]?.params?.construction;
+      const line = isConstr ? mkConstructionLine(v3) : mkLine(v3, COLOR_COMMIT);
       line.userData.cadNodeId = id;
       line.visible = visible;
       s.add(line);
@@ -692,11 +704,11 @@ export function useCADSketchTool(
     // the draw flow; this gives them a viewport line tracked in wireVisualsRef
     // (so visibility-sync and delete-cleanup subscriptions handle them too).
     const onAddVisual = (e: Event) => {
-      const { id, pts } = (e as CustomEvent).detail as { id: string; pts: number[][] };
+      const { id, pts, construction } = (e as CustomEvent).detail as { id: string; pts: number[][]; construction?: boolean };
       const s = sceneRef.current;
       if (!s || !pts?.length) return;
       const v3 = pts.map((p) => new THREE.Vector3(p[0], p[1], p[2]));
-      const line = mkLine(v3, COLOR_COMMIT);
+      const line = construction ? mkConstructionLine(v3) : mkLine(v3, COLOR_COMMIT);
       line.userData.cadNodeId = id;
       s.add(line);
       const existing = wireVisualsRef.current.get(id) ?? [];

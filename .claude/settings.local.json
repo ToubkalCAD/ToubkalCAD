@@ -71,7 +71,18 @@
       "Bash(curl -s -o /dev/null -w \"server: %{http_code}\\\\n\" http://localhost:8080)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8080/main.a6d4d671.css)",
       "Bash(curl -s -o /dev/null -w \"port: %{http_code}\\\\n\" http://localhost:8080/)",
-      "Bash(curl -s http://localhost:8080/main.js)"
+      "Bash(curl -s http://localhost:8080/main.js)",
+      "Read(//home/jamal/.claude/skills/**)",
+      "Bash(npx --no-install playwright --version)",
+      "Bash(timeout 60 bash -c 'until curl -sf http://localhost:8080 >/dev/null 2>&1; do sleep 1; done')",
+      "Bash(curl -sf http://localhost:8080)",
+      "Bash(npm -v)",
+      "Bash(/usr/bin/google-chrome --version)",
+      "Bash(git add *)",
+      "Bash(timeout 90 bash -c 'until curl -sf http://localhost:8080 >/dev/null; do sleep 1; done')",
+      "Bash(pkill -f 'rspack serve')",
+      "Bash(rm -f /tmp/crop.mjs)",
+      "Bash(timeout 120 bash -c 'until curl -sf http://localhost:8080 >/dev/null; do sleep 1; done')"
     ]
   }
 }

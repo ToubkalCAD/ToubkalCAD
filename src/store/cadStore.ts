@@ -330,8 +330,10 @@ interface CADState {
   guideSnap: GuidePoint | null;
   /** Node ids of completed guide wires (registered shapes live in the registry). */
   guideIds: string[];
-  /** The guide whose Bezier control points the Tweakpane sliders edit, or null. */
+  /** The guide whose Bezier control points the slider edits, or null. */
   selectedGuideId: string | null;
+  /** True while the floating Advanced-Loft dialog is open. */
+  advancedLoftOpen: boolean;
 
   measurements: CADMeasurement[];
 
@@ -344,6 +346,9 @@ interface CADState {
   snapStep:    number;
 
   sketchPolygonSides: number;
+  /** When true, the Project/Include tool adds projected edges as REFERENCE
+   *  (construction) geometry instead of normal profile polylines. */
+  projectAsConstruction: boolean;
 
   activeWorkplane:    Workplane;
   planeSelectorOpen:  boolean;
@@ -432,6 +437,11 @@ interface CADState {
   selectGuide:           (guideId: string | null) => void;
   /** Forget a completed guide (its node/shape removal is handled by removeNode). */
   removeGuide:           (guideId: string) => void;
+  /** Open the floating Advanced-Loft dialog and enter profile-pick mode. */
+  openAdvancedLoft:      () => void;
+  /** Close the dialog and reset the in-progress guide selection so it doesn't
+   *  leak into viewport interactions. */
+  closeAdvancedLoft:     () => void;
   setActiveWorkplane:    (wp: Workplane) => void;
   openPlaneSelector:     (pendingMode: InteractionMode) => void;
   closePlaneSelector:    () => void;
@@ -547,6 +557,7 @@ interface CADState {
 
   setSnapEnabled: (v: boolean)  => void;
   setSnapStep:    (v: number)   => void;
+  setProjectAsConstruction: (v: boolean) => void;
 
   undo: () => void;
   redo: () => void;
@@ -767,12 +778,14 @@ export const useCADStore = create<CADState>((set, get) => ({
   guideSnap:       null,
   guideIds:        [],
   selectedGuideId: null,
+  advancedLoftOpen: false,
   measurements:    [],
   logs:            [makeLog('ToubkalCAD ready — WASM kernel loaded.', 'success')],
   isProcessing:       false,
   processingLabel:    '',
   snapEnabled:        true,
   snapStep:           1.0,
+  projectAsConstruction: true,   // reference projection is the professional default
   sketchPolygonSides: 5,
   activeWorkplane:    DEFAULT_WORKPLANE,
   planeSelectorOpen:  false,
@@ -888,6 +901,30 @@ export const useCADStore = create<CADState>((set, get) => ({
     guideIds: s.guideIds.filter((id) => id !== guideId),
     selectedGuideId: s.selectedGuideId === guideId ? null : s.selectedGuideId,
   })),
+
+  openAdvancedLoft: () => set({
+    advancedLoftOpen: true,
+    // Same fresh-start reset as startGuideProfilePick — the dialog opens ready
+    // to pick the two profiles the guide(s) will bridge.
+    // Fresh session: also clear guideIds so "Guides drawn" starts at 0 and a
+    // prior run's rails can't bleed in. Committed guide wire NODES (and any loft
+    // built from them) persist in the tree independently of this session array.
+    interactionMode: 'GUIDE_PROFILE_PICK',
+    guideProfiles: [], guideDraft: null, guideSnap: null, guideIds: [], selectedGuideId: null,
+  }),
+
+  closeAdvancedLoft: () => set((s) => ({
+    advancedLoftOpen: false,
+    // Reset the in-progress selection so a half-finished guide pick/draw can't
+    // keep routing viewport clicks. guideIds is the session's rail array — the
+    // committed guide wire NODES stay in the tree; we just forget the session
+    // refs. Only drop out of a guide mode — don't stomp a mode the user may have
+    // switched to elsewhere.
+    guideProfiles: [], guideDraft: null, guideSnap: null, guideIds: [], selectedGuideId: null,
+    interactionMode: (s.interactionMode === 'GUIDE_PROFILE_PICK' || s.interactionMode === 'GUIDE_DRAW')
+      ? 'SELECT' : s.interactionMode,
+  })),
+  setProjectAsConstruction: (v) => set({ projectAsConstruction: v }),
   setSnapEnabled:        (v)    => set({ snapEnabled: v }),
   setSnapStep:           (v)    => set({ snapStep: v }),
   setSketchPolygonSides: (n)    => set({ sketchPolygonSides: n }),

@@ -447,27 +447,87 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     orbit.enableRotate = !inSketch;
   }, [interactionMode, sketchSession]);
 
-  // ─── Sketch isolation: show only the active sketch while editing ─────────────
-  // Entering/resuming a sketch hides every other body (solids, lofts, other
-  // sketches) so the 2D entities you're editing aren't occluded by the geometry
-  // built on top of them. Purely a Three.js mesh.visible toggle — it never touches
-  // store node.visible, so it's fully reversible and doesn't pollute persistence.
-  // Cleanup (on Quit Sketch or switching sketches) restores exactly what it hid.
+  // ─── Active Sketch Context: ghost the rest of the model while editing ────────
+  // Industry-standard focus state (Fusion / Onshape): the active sketch and its
+  // entities stay fully opaque and interactive; every OTHER body and sketch is
+  // GHOSTED — translucent, desaturated, and depth-write OFF so it can never
+  // occlude the sketch curves or grid — and made non-interactive (raycast
+  // disabled) so a stray click can't select background geometry. The support /
+  // host body stays visible (ghosted), preserving spatial orientation (2a).
+  // Referencing still works: Project/Include builds its own pickable edge lines
+  // (useCADSketchProjectPick), independent of these ghosted meshes' raycast state.
+  //
+  // Purely a Three.js material + raycast swap — it never touches store
+  // node.visible, so it's fully reversible and doesn't pollute persistence.
+  // Cleanup (on Quit Sketch or switching sketches) restores exactly what it changed.
   useEffect(() => {
     const scene = sceneRef.current;
     const sid = sketchSession?.id;
     if (!scene || !sid) return;
+
+    const GHOST_OPACITY_SOLID = 0.16;
+    const GHOST_OPACITY_LINE  = 0.30;
+
+    // Clone a material into a ghosted variant: translucent, no depth write, and
+    // desaturated/lifted toward a neutral mid-tone so its colour reads as "context".
+    const ghostOne = (m: THREE.Material): THREE.Material => {
+      const g = m.clone();
+      g.transparent = true;
+      g.depthWrite  = false;
+      const isLine = m.type.includes('Line');
+      g.opacity = isLine ? GHOST_OPACITY_LINE : GHOST_OPACITY_SOLID;
+      const col = (g as THREE.MeshStandardMaterial).color as THREE.Color | undefined;
+      if (col) {
+        const hsl = { h: 0, s: 0, l: 0 };
+        col.getHSL(hsl);
+        col.setHSL(hsl.h, hsl.s * 0.2, Math.min(0.72, hsl.l * 0.5 + 0.42));
+      }
+      const std = g as THREE.MeshStandardMaterial;
+      if ('metalness' in std) std.metalness = 0;
+      if ('roughness' in std) std.roughness = 1;
+      return g;
+    };
+    const ghostMat = (m: THREE.Material | THREE.Material[]) =>
+      Array.isArray(m) ? m.map(ghostOne) : ghostOne(m);
+
+    const NOOP: THREE.Object3D['raycast'] = () => {};
+    const restores: Array<() => void> = [];
+
+    const ghost = (root: THREE.Object3D) => {
+      root.traverse((o) => {
+        const holder = o as THREE.Mesh;   // Mesh / Line / Points all carry .material
+        if (holder.material) {
+          const orig  = holder.material;
+          const ghosted = ghostMat(orig);
+          holder.material = ghosted;
+          restores.push(() => {
+            holder.material = orig;
+            (Array.isArray(ghosted) ? ghosted : [ghosted]).forEach((x) => x.dispose());
+          });
+        }
+        if (holder.geometry) {             // make this renderable non-interactive
+          const origRaycast = o.raycast;
+          o.raycast = NOOP;
+          restores.push(() => { o.raycast = origRaycast; });
+        }
+      });
+    };
+
     const nodes = useCADStore.getState().nodes;
-    const hidden: THREE.Object3D[] = [];
     scene.children.forEach((o) => {
       const nid = o.userData?.cadNodeId as string | undefined;
-      if (!nid || nid === sid) return;            // unmanaged helpers + the sketch itself
+      if (!nid || nid === sid) return;            // unmanaged helpers + the sketch container
       const node = nodes[nid];
       if (!node) return;
-      if (node.parentId === sid) return;          // this sketch's own entity → keep visible
-      if (o.visible) { o.visible = false; hidden.push(o); }
+      if (node.parentId === sid) return;          // this sketch's own entity → keep opaque
+      ghost(o);
     });
-    return () => { hidden.forEach((o) => { o.visible = true; }); };
+
+    window.cadRequestRender?.();
+    return () => {
+      restores.forEach((r) => r());
+      window.cadRequestRender?.();
+    };
   }, [sketchSession?.id]);
 
   // ─── Camera: animate when a session is resumed from the tree panel ───────────

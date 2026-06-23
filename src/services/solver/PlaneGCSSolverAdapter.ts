@@ -40,6 +40,7 @@ import type {
   SketchPoint,
   SketchCircle,
   SketchArc,
+  SketchEllipse,
 } from '@salusoft89/planegcs';
 
 // Per-entity record kept during one solve — maps an entity to its PlaneGCS
@@ -47,7 +48,8 @@ import type {
 type Rec =
   | { kind: 'line';   a: string; b: string }
   | { kind: 'circle'; c: string }
-  | { kind: 'arc';    c: string; start: string; end: string };
+  | { kind: 'arc';    c: string; start: string; end: string }
+  | { kind: 'ellipse'; c: string; focus1: string };
 
 const CURSOR_ID = '__cursor__';
 const PIN_ID = '__drag_pin__';
@@ -139,6 +141,33 @@ function build(prims: (SketchPrimitive | SketchParam)[], g: EntityGeom, fixed: b
     prims.push({ id: g.id, type: 'circle', c_id: c, radius: g.r });
     return { kind: 'circle', c };
   }
+  if (g.kind === 'ellipse') {
+    // PlaneGCS ellipse = centre + focus1 point + radmin (minor radius). Major radius
+    // and orientation are encoded by focus1's offset: focus1 = c + e·(cosθ,sinθ),
+    // where e = √(rx²−ry²) is the linear eccentricity (rx = major, ry = minor).
+    const c = `${g.id}:c`, f1 = `${g.id}:f1`;
+    const major = Math.max(g.rx, g.ry), minor = Math.min(g.rx, g.ry);
+    const e = Math.sqrt(Math.max(major * major - minor * minor, 0));
+    pushPoint(c, seed('c', g.c));
+    pushPoint(f1, [g.c[0] + e * Math.cos(g.rot), g.c[1] + e * Math.sin(g.rot)]);
+    prims.push({ id: g.id, type: 'ellipse', c_id: c, focus1_id: f1, radmin: minor });
+    // RIGIDITY: a placement constraint should TRANSLATE the ellipse, not reshape it.
+    // With focus1 a free point, the solver would otherwise sacrifice the major
+    // radius/orientation to satisfy a centre constraint. So for a non-fixed ellipse
+    // we lock the centre→focus1 vector: |c→f1| = e (length) and c→f1 parallel to a
+    // fixed reference at the seed angle (orientation). radmin stays put on its own.
+    // (A FIXED ellipse already has both points pinned — no links needed.)
+    if (!fixed && e > 1e-6) {
+      const xa = `${g.id}:xa`, xb = `${g.id}:xb`;
+      prims.push({ id: xa, type: 'point', x: 0, y: 0, fixed: true });
+      prims.push({ id: xb, type: 'point', x: Math.cos(g.rot), y: Math.sin(g.rot), fixed: true });
+      prims.push({ id: `${g.id}:xl`, type: 'line', p1_id: xa, p2_id: xb });
+      prims.push({ id: `${g.id}:cfl`, type: 'line', p1_id: c, p2_id: f1 });
+      prims.push({ id: `${g.id}:par`, type: 'parallel', l1_id: `${g.id}:cfl`, l2_id: `${g.id}:xl` });
+      prims.push({ id: `${g.id}:dst`, type: 'p2p_distance', p1_id: c, p2_id: f1, distance: e });
+    }
+    return { kind: 'ellipse', c, focus1: f1 };
+  }
   // arc: centre + start/end points derived from the sweep angles a1/a2.
   const c = `${g.id}:c`, start = `${g.id}:as`, end = `${g.id}:ae`;
   pushPoint(c, seed('c', g.c));
@@ -159,6 +188,7 @@ function resolvePoint(recs: Map<string, Rec>, ref: SketchRef): string | null {
   if (!r) return null;
   if (r.kind === 'line') return ref.pt === 'b' ? r.b : r.a;   // 'a' default
   if (r.kind === 'circle') return r.c;                        // centre
+  if (r.kind === 'ellipse') return r.c;                       // centre
   if (ref.pt === 'a') return r.start;
   if (ref.pt === 'b') return r.end;
   return r.c;                                                 // centre ('c' / entity)
@@ -307,6 +337,16 @@ function readBack(
       out[g.id] = c && arc
         ? { id: g.id, kind: 'arc', c, r: Math.max(1e-4, arc.radius), a1: arc.start_angle, a2: arc.end_angle }
         : g;
+    } else if (g.kind === 'ellipse' && r.kind === 'ellipse') {
+      // Recover (rx, ry, rot) from the solved centre, focus1, and radmin: rot is
+      // focus1's bearing from the centre, e = |focus1−c|, rx = √(radmin²+e²).
+      const c = pt(r.c), f1 = pt(r.focus1);
+      const ep = solved.get(g.id);
+      const radmin = ep && ep.type === 'ellipse' ? (ep as SketchEllipse).radmin : g.ry;
+      if (c && f1) {
+        const e = Math.hypot(f1[0] - c[0], f1[1] - c[1]);
+        out[g.id] = { id: g.id, kind: 'ellipse', c, rx: Math.sqrt(radmin * radmin + e * e), ry: Math.max(1e-4, radmin), rot: Math.atan2(f1[1] - c[1], f1[0] - c[0]) };
+      } else out[g.id] = g;
     } else {
       out[g.id] = g;
     }

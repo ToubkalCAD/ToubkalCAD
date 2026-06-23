@@ -31,7 +31,7 @@ import { useCADStore } from '../store/cadStore';
 import type { SketchConstraint, SketchRef } from '../store/cadStore';
 import type { EntityGeom } from './SketchConstraintSolver';
 import { getSolver } from './solver';
-import { collectSolverGeoms, collectSketchConstraints, rebuildSketchEntity, geomKey } from './SketchSolveBridge';
+import { collectSolverGeoms, collectSketchConstraints, constructionFixedConstraints, rebuildSketchEntity, geomKey } from './SketchSolveBridge';
 import { datumGeoms, datumFixedConstraints, isDatumId } from './SketchDatums';
 import { propagateFromStore } from './RecomputeEngine.live';
 
@@ -128,7 +128,7 @@ export class SketchDragController implements SketchDragEngine {
     // a constrained one is corrected back by its hard constraints during solve.
     if (this.mode === 'body') translateGeom(real, this.pinned.id, delta);
 
-    const cons: SketchConstraint[] = [...collectSketchConstraints(this.sid), ...datumFixedConstraints()];
+    const cons: SketchConstraint[] = [...collectSketchConstraints(this.sid), ...datumFixedConstraints(), ...constructionFixedConstraints(this.sid)];
     const res = getSolver().solve([...real, ...datumGeoms()], cons, { ref: this.pinned, target });
 
     this.applyResult(res.geoms, beforeKey);
@@ -158,7 +158,7 @@ export class SketchDragController implements SketchDragEngine {
       : arc.a1 + posmod(raw - arc.a1);       // a2 ∈ [a1, a1 + 2π)
     if (this.arcEnd === 'a') arc.a1 = theta; else arc.a2 = theta;
 
-    const cons: SketchConstraint[] = [...collectSketchConstraints(sid), ...datumFixedConstraints()];
+    const cons: SketchConstraint[] = [...collectSketchConstraints(sid), ...datumFixedConstraints(), ...constructionFixedConstraints(sid)];
     // The on-circle point at the new angle is the pin target: a no-op in the
     // legacy solver (arc endpoints aren't variables — the a1/a2 written above
     // drive the span) but it holds the angle in solvers whose arc endpoints are
@@ -199,6 +199,7 @@ function pointPos(g: EntityGeom | undefined, pt?: 'a' | 'b' | 'c'): Vec2 | null 
   if (!g) return null;
   if (g.kind === 'line') return pt === 'b' ? [...g.b] : [...g.a];
   if (g.kind === 'circle') return [...g.c];
+  if (g.kind === 'ellipse') return [...g.c];   // only its centre is a referenceable point
   // arc: derive endpoints from centre + sweep; centre for 'c'.
   if (pt === 'a') return [g.c[0] + g.r * Math.cos(g.a1), g.c[1] + g.r * Math.sin(g.a1)];
   if (pt === 'b') return [g.c[0] + g.r * Math.cos(g.a2), g.c[1] + g.r * Math.sin(g.a2)];

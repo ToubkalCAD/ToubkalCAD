@@ -37,7 +37,7 @@ export function buildSketchProfileWire(oc: any, sketchId: string): any | null {
   const wp = sketch.params?.workplane as Workplane | undefined;
   if (!wp) return null;
   const childIds = Object.values(st.nodes)
-    .filter((n) => n.parentId === sketchId && n.type === 'sketch_wire' && n.params?.sketchGeom)
+    .filter((n) => n.parentId === sketchId && n.type === 'sketch_wire' && n.params?.sketchGeom && !n.params?.construction)
     .map((n) => n.id);
   if (!childIds.length) return null;
   const ents = childIds
@@ -148,7 +148,7 @@ export function sketchRegionCount(sketchId: string): number {
   const sketch = st.nodes[sketchId];
   if (!sketch || sketch.type !== 'sketch') return 0;
   const childIds = Object.values(st.nodes)
-    .filter((n) => n.parentId === sketchId && n.type === 'sketch_wire' && n.params?.sketchGeom)
+    .filter((n) => n.parentId === sketchId && n.type === 'sketch_wire' && n.params?.sketchGeom && !n.params?.construction)
     .map((n) => n.id);
   const ents = childIds
     .map((id) => toRegionEntity(id, st.nodes[id]?.params?.sketchGeom))
@@ -173,6 +173,10 @@ export function resolveProfileWire(sketchId: string, childIds: string[]): string
   if (!oc) return null;
   const st = useCADStore.getState();
   const reg = CADGeometryRegistry.getInstance();
+
+  // Reference / construction edges are never part of the profile (defensive — most
+  // callers already filter, but a stray construction id mustn't reach region detection).
+  childIds = childIds.filter((id) => !st.nodes[id]?.params?.construction);
 
   // Already a single closed wire (circle/rect/closed loop) → use it directly.
   if (childIds.length === 1) {
@@ -213,6 +217,9 @@ export function resolveAllProfileWires(sketchId: string, childIds: string[]): st
   if (!oc) return [];
   const st = useCADStore.getState();
   const reg = CADGeometryRegistry.getInstance();
+
+  // Reference / construction edges are never part of the profile (defensive).
+  childIds = childIds.filter((id) => !st.nodes[id]?.params?.construction);
 
   // Each child that is ITSELF a closed wire (circle / rect / closed loop) is its
   // own profile — return them all. This is the multi-profile (Multi-Pad) case:

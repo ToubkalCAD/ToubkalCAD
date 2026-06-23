@@ -13,7 +13,7 @@
 // tabs) and R4 (Quick Access Toolbar + Customize dialog).
 // ============================================================
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS, InteractionMode, STANDARD_WORKPLANES, DATUM_TYPES } from '../store/cadStore';
 import { Icon, IconName }            from './Icon';
 import { showParamModal }           from './ParameterModal';
@@ -53,61 +53,134 @@ interface Command {
   accent?:  string;
   tooltip?: string;
 }
-interface RibbonGroup { label: string; ids: string[]; }
-interface RibbonTab   { id: string; label: string; groups: RibbonGroup[]; }
 
-// Declarative layout — each tab references command ids defined in the registry.
+// A ribbon item is either a single command id (→ icon button), a '|' separator,
+// or a dropdown / split-button cluster grouping several command ids under one
+// button. Folding the long primitive / datum / curve lists into clusters keeps
+// every tab a single, non-scrolling row.
+interface MenuDef { kind: 'menu'; id: string; label: string; icon?: IconName; ids: string[]; }
+type RibbonItem = string | MenuDef;
+interface RibbonTab { id: string; label: string; items: RibbonItem[]; }
+
+const isMenu = (i: RibbonItem): i is MenuDef => typeof i !== 'string';
+
+// Declarative, compact layout — each tab references command ids defined in the
+// registry, with '|' separators and split-button clusters for related tools.
 const RIBBON_TABS: RibbonTab[] = [
-  { id: 'sketch', label: 'Sketch', groups: [
-    { label: 'Basic',       ids: ['line', 'circle', 'rect', 'arc'] },
-    { label: 'Curves',      ids: ['arc3p', 'ellipse', 'bezier', 'spline'] },
-    { label: 'Advanced',    ids: ['roundrect', 'polygon'] },
-    { label: 'Modify',      ids: ['trim', 'extend', 'split', 'powertrim', 'region'] },
-    { label: 'Datum',       ids: ['sketch-face', 'sketch-datum'] },
-    { label: 'Reference',   ids: ['sketch-project', 'sketch-intersect'] },
-    { label: 'Constrain',   ids: ['constraints'] },
+  { id: 'sketch', label: 'Sketch', items: [
+    'line', 'circle', 'rect',
+    { kind:'menu', id:'m-arc',    label:'Arcs',         icon:'arc',     ids:['arc','arc3p'] },
+    { kind:'menu', id:'m-curves', label:'Curves',       icon:'spline',  ids:['ellipse','bezier','spline'] },
+    { kind:'menu', id:'m-shapes', label:'Shapes',       icon:'polygon', ids:['roundrect','polygon'] },
+    '|',
+    { kind:'menu', id:'m-sedit',  label:'Edit',         icon:'trim',    ids:['trim','extend','split','powertrim'] },
+    'region',
+    '|',
+    { kind:'menu', id:'m-splane', label:'Sketch Plane', icon:'plane',   ids:['sketch-face','sketch-datum'] },
+    { kind:'menu', id:'m-sref',   label:'Reference',    icon:'plane',   ids:['sketch-project-ref','sketch-project','sketch-intersect'] },
+    'constraints',
   ] },
-  { id: 'model', label: 'Model', groups: [
-    { label: 'Structure',   ids: ['component', 'assembly'] },
-    { label: 'Primitives',  ids: ['box', 'cylinder', 'sphere', 'torus', 'cone'] },
-    { label: 'From Sketch', ids: ['extrude', 'revolve', 'loft', 'advLoft', 'sweep'] },
-    { label: 'Transform',   ids: ['mirror', 'array-lin', 'array-circ'] },
-    { label: 'Datum',       ids: ['datum-origin', 'datum-offset', 'datum-3point', 'datum-midplane', 'datum-angle', 'datum-axis', 'datum-point', 'datum-tangent', 'datum-curvenormal', 'datum-2edge'] },
-    { label: 'Assembly',    ids: ['mate', 'align', 'concentric'] },
+  { id: 'model', label: 'Model', items: [
+    { kind:'menu', id:'m-struct', label:'Structure',  icon:'assembly',   ids:['component','assembly'] },
+    '|',
+    { kind:'menu', id:'m-prim',   label:'Primitives', icon:'box',        ids:['box','cylinder','sphere','torus','cone'] },
+    '|',
+    'extrude', 'revolve',
+    { kind:'menu', id:'m-loft',   label:'Loft',       icon:'loft',       ids:['loft','advLoft'] },
+    'sweep',
+    '|',
+    { kind:'menu', id:'m-xform',  label:'Transform',  icon:'mirror',     ids:['mirror','array-lin','array-circ'] },
+    '|',
+    { kind:'menu', id:'m-datum',  label:'Datum',      icon:'datumPlane', ids:['datum-origin','datum-offset','datum-3point','datum-midplane','datum-angle','datum-axis','datum-point','datum-tangent','datum-curvenormal','datum-2edge'] },
+    { kind:'menu', id:'m-asm',    label:'Assembly',   icon:'mate',       ids:['mate','align','concentric'] },
   ] },
-  { id: 'modify', label: 'Modify', groups: [
-    { label: 'Edges',       ids: ['fillet', 'chamfer'] },
-    { label: 'Boolean',     ids: ['union', 'subtract', 'intersect'] },
+  { id: 'modify', label: 'Modify', items: [
+    'fillet', 'chamfer',
+    '|',
+    { kind:'menu', id:'m-bool', label:'Boolean', icon:'union', ids:['union','subtract','intersect'] },
   ] },
-  { id: 'tools', label: 'Tools', groups: [
-    { label: 'Interact',    ids: ['select', 'measure'] },
-    { label: 'View',        ids: ['fit-all'] },
-    { label: 'File',        ids: ['import', 'export'] },
+  { id: 'tools', label: 'Tools', items: [
+    'select', 'measure', 'fit-all',
+    '|',
+    { kind:'menu', id:'m-file', label:'File', icon:'import', ids:['import','export'] },
   ] },
 ];
+
+// Flat lookup of every dropdown cluster, so the open dropdown panel can resolve
+// its command ids regardless of which tab declared it.
+const MENU_BY_ID: Record<string, MenuDef> = {};
+for (const t of RIBBON_TABS) for (const it of t.items) if (isMenu(it)) MENU_BY_ID[it.id] = it;
 
 // ─── Button + chrome sub-components ───────────────────────────────────────────
 
 const Sep = () => <div className="cad-sep" />;
-const Grp: React.FC<{ label: string }> = ({ label }) => <span className="cad-grp">{label}</span>;
 
 const tint       = (a: string) => (a.startsWith('#') ? a + '22' : 'var(--accent-soft)');
 const tintBorder = (a: string) => (a.startsWith('#') ? a + '88' : 'var(--accent-line)');
 
-const CmdBtn: React.FC<{ cmd: Command }> = ({ cmd }) => {
+const Caret = () => (
+  <svg className="cad-split__chev" width="9" height="9" viewBox="0 0 10 10" aria-hidden="true">
+    <path d="M2 3.5 L5 6.5 L8 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+// Icon-only command button. The label rides along as a CSS hover tooltip
+// (data-tip) instead of taking horizontal space.
+const IconBtn: React.FC<{ cmd: Command }> = ({ cmd }) => {
   const accent = cmd.accent ?? 'var(--accent)';
   return (
     <button
-      className="cad-btn"
+      className="cad-iconbtn"
       data-active={cmd.active ? 'true' : 'false'}
+      data-tip={cmd.tooltip ?? cmd.label}
       onClick={cmd.run}
       disabled={cmd.enabled === false}
-      title={cmd.tooltip ?? cmd.label}
       style={cmd.active ? { background: tint(accent), color: accent, borderColor: tintBorder(accent) } : undefined}
     >
-      <Icon name={cmd.icon} size={15} color={cmd.active ? accent : undefined} />
-      <span>{cmd.label}</span>
+      <Icon name={cmd.icon} size={20} color={cmd.active ? accent : undefined} />
     </button>
+  );
+};
+
+// Split / dropdown button: the icon half runs the active-or-last-used command,
+// the caret half opens the cluster menu. Reflects active state from its children.
+const SplitBtn: React.FC<{
+  menu:        MenuDef;
+  commands:    Record<string, Command>;
+  open:        boolean;
+  lastUsedId?: string;
+  onToggle:    (menuId: string, rect: DOMRect) => void;
+}> = ({ menu, commands, open, lastUsedId, onToggle }) => {
+  const wrapRef  = useRef<HTMLDivElement>(null);
+  const activeId = menu.ids.find((id) => commands[id]?.active);
+  const repId    = activeId ?? lastUsedId ?? menu.ids[0];
+  const rep      = commands[repId];
+  const accent   = rep?.accent ?? 'var(--accent)';
+  const isActive = !!activeId;
+  const allOff   = menu.ids.every((id) => commands[id]?.enabled === false);
+
+  const toggle = () => { if (wrapRef.current) onToggle(menu.id, wrapRef.current.getBoundingClientRect()); };
+
+  return (
+    <div
+      ref={wrapRef}
+      className="cad-split"
+      data-active={isActive ? 'true' : 'false'}
+      data-open={open ? 'true' : 'false'}
+      style={isActive ? { color: accent, background: tint(accent), borderColor: tintBorder(accent) } : undefined}
+    >
+      <button
+        className="cad-split__main"
+        data-tip={rep?.tooltip ?? rep?.label ?? menu.label}
+        disabled={allOff}
+        onClick={() => { if (rep && rep.enabled !== false) rep.run(); else toggle(); }}
+      >
+        <Icon name={rep?.icon ?? menu.icon ?? 'box'} size={20} color={isActive ? accent : undefined} />
+      </button>
+      <button className="cad-split__caret" data-tip={menu.label} disabled={allOff} onClick={toggle}>
+        <Caret />
+      </button>
+    </div>
   );
 };
 
@@ -120,6 +193,7 @@ export const Ribbon: React.FC = () => {
   const past            = useCADStore((s) => s.past);
   const future          = useCADStore((s) => s.future);
   const polygonSides    = useCADStore((s) => s.sketchPolygonSides);
+  const projectAsConstr = useCADStore((s) => s.projectAsConstruction);
   const activeWorkplane = useCADStore((s) => s.activeWorkplane);
   const openPlaneSel    = useCADStore((s) => s.openPlaneSelector);
   const setMode         = useCADStore((s) => s.setInteractionMode);
@@ -130,6 +204,41 @@ export const Ribbon: React.FC = () => {
   const quitSketch      = useCADStore((s) => s.quitSketchSession);
 
   const [activeTab, setActiveTab] = useState<string>('sketch');
+
+  // Dropdown-cluster state: which split-button menu is open, where to anchor its
+  // floating panel, and the last command picked from each menu (so the split
+  // button's icon-half re-runs that tool, Fusion/Onshape-style).
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [menuAt,   setMenuAt]   = useState<{ x: number; y: number } | null>(null);
+  const [lastUsed, setLastUsed] = useState<Record<string, string>>({});
+
+  const closeMenu = () => setOpenMenu(null);
+  const toggleMenu = (menuId: string, rect: DOMRect) => {
+    if (openMenu === menuId) { closeMenu(); return; }
+    setMenuAt({ x: rect.left, y: rect.bottom + 5 });
+    setOpenMenu(menuId);
+  };
+
+  // Dismiss the open dropdown on outside-click, Esc, scroll, or resize.
+  useEffect(() => {
+    if (!openMenu) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement;
+      if (t.closest('.cad-menu') || t.closest('.cad-split')) return;
+      closeMenu();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeMenu(); };
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('resize', closeMenu);
+    window.addEventListener('scroll', closeMenu, true);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', closeMenu);
+      window.removeEventListener('scroll', closeMenu, true);
+    };
+  }, [openMenu]);
 
   const reg = CADGeometryRegistry.getInstance();
 
@@ -170,10 +279,13 @@ export const Ribbon: React.FC = () => {
   // D2 — pick a planar face or datum plane in the viewport, then offset it by a
   // distance into a new datum plane (the pick + prompt live in useCADDatumOffsetPick).
   // D11 / D12 — Project & Intersect onto the ACTIVE sketch (logic in their hooks).
-  const sketchProject = () => {
+  const sketchProject = (asConstruction: boolean) => {
     if (!useCADStore.getState().sketchSession) { log('Start or open a sketch first.', 'warn'); return; }
     if (!hasAnySolid) { log('No solids to project from.', 'warn'); return; }
-    log('Click edges to project onto the sketch (Esc to finish).', 'info');
+    useCADStore.getState().setProjectAsConstruction(asConstruction);
+    log(asConstruction
+      ? 'Click edges to project as reference geometry (Esc to finish).'
+      : 'Click edges to project as profile polylines (Esc to finish).', 'info');
     setMode('PROJECT_PICK');
   };
   const sketchIntersect = () => {
@@ -405,7 +517,7 @@ export const Ribbon: React.FC = () => {
     withOC(() => {
       const st = useCADStore.getState();
       const ents = Object.values(st.nodes).filter(
-        (n) => n.type === 'sketch_wire' && n.parentId === sketchId && n.params?.sketchGeom,
+        (n) => n.type === 'sketch_wire' && n.parentId === sketchId && n.params?.sketchGeom && !n.params?.construction,
       );
       if (!ents.length) { log('This sketch has no editable curves.', 'warn'); return; }
       const wp = ents[0].params!.workplane;
@@ -621,51 +733,65 @@ export const Ribbon: React.FC = () => {
   // if one is being drawn, then runs MakePipeShell (with a plain-loft fallback)
   // through the same create() pipeline as every other op.
   useEffect(() => {
-    const onGen = () => withOC(async () => {
-      const st = useCADStore.getState();
-      const [aId, bId] = st.guideProfiles;
-      if (!aId || !bId) { log('Pick 2 profiles before generating a guided loft.', 'warn'); return; }
-      const ra = profileShapeFor(window.oc, aId);
-      const rb = profileShapeFor(window.oc, bId);
-      const wireA = ra.shape;
-      const wireB = rb.shape;
-      if (!wireA || !wireB) {
-        if (ra.temp && ra.shape) try { ra.shape.delete(); } catch { /*noop*/ }
-        if (rb.temp && rb.shape) try { rb.shape.delete(); } catch { /*noop*/ }
-        log('Could not resolve both profile wires.', 'error');
-        return;
-      }
-      setProc(true, 'Building guided loft…');
-      try {
-        // Commit the live draft into a registered guide wire if it isn't yet.
-        // The Bezier POLES are stored on the node — the loft re-centres them so
-        // the result actually follows the guide (see OccGuidedLoftService).
-        let guideIds = st.guideIds;
-        if (st.guideDraft && st.guideDraft.lockedCount === 2) {
-          const gWire = OccGuideCurveService.buildGuideWire(window.oc, st.guideDraft.points, wireA, wireB);
-          const gid = crypto.randomUUID();
-          create(gid, 'Guide', 'sketch_wire', gWire, { guide: true, poles: st.guideDraft.points });
-          st.commitGuide(gid);
-          guideIds = [...guideIds, gid];
-        }
-        const sNow = useCADStore.getState();
-        const guidePolesArr = guideIds
-          .map((id) => sNow.nodes[id]?.params?.poles)
-          .filter((p: any) => Array.isArray(p) && p.length >= 2)
-          .slice(0, 2);
-        if (!guidePolesArr.length) { log('Draw at least one guide curve first.', 'warn'); return; }
+    const onGen = (e: Event) => {
+      // Snapshot the inputs from the event detail SYNCHRONOUSLY — the dialog
+      // closes and resets the guide state immediately after dispatching, so by
+      // the time withOC's microtask runs the store is already cleared. The detail
+      // arrays/objects are the pre-reset references (Zustand replaces, never
+      // mutates), so this snapshot stays valid. Fall back to live store state for
+      // any programmatic caller that dispatches without a detail.
+      const detail   = (e as CustomEvent).detail ?? {};
+      const st0      = useCADStore.getState();
+      const profiles: string[]      = detail.profiles ?? st0.guideProfiles;
+      const draft                   = detail.draft    ?? st0.guideDraft;
+      const committedIds: string[]  = detail.guideIds ?? st0.guideIds;
 
-        const { shape, guided, reason } = OccGuidedLoftService.guidedLoftWithFallback(
-          window.oc, wireA, wireB, guidePolesArr, true);
-        create(crypto.randomUUID(), guided ? `Guided Loft` : `Loft (guide rejected)`, 'loft', shape,
-          { opType: 'loft', targetWireIds: [aId, bId], guideIds });
-        if (!guided) log(`Guide rejected (${reason ?? 'unknown'}) — fell back to a plain loft.`, 'warn');
-      } finally {
-        if (ra.temp && ra.shape) try { ra.shape.delete(); } catch { /*noop*/ }
-        if (rb.temp && rb.shape) try { rb.shape.delete(); } catch { /*noop*/ }
-        setProc(false);
-      }
-    });
+      withOC(async () => {
+        const [aId, bId] = profiles;
+        if (!aId || !bId) { log('Pick 2 profiles before generating a guided loft.', 'warn'); return; }
+        const ra = profileShapeFor(window.oc, aId);
+        const rb = profileShapeFor(window.oc, bId);
+        const wireA = ra.shape;
+        const wireB = rb.shape;
+        if (!wireA || !wireB) {
+          if (ra.temp && ra.shape) try { ra.shape.delete(); } catch { /*noop*/ }
+          if (rb.temp && rb.shape) try { rb.shape.delete(); } catch { /*noop*/ }
+          log('Could not resolve both profile wires.', 'error');
+          return;
+        }
+        setProc(true, 'Building guided loft…');
+        try {
+          // Register the in-progress draft as a guide wire node if it isn't yet.
+          // The Bezier POLES are stored on the node — the loft re-centres them so
+          // the result actually follows the guide (see OccGuidedLoftService).
+          // No commitGuide(): the dialog already reset the session guide state on
+          // close; we only need the guide NODE's poles, tracked via guideIds.
+          let guideIds = committedIds;
+          if (draft && draft.lockedCount === 2) {
+            const gWire = OccGuideCurveService.buildGuideWire(window.oc, draft.points, wireA, wireB);
+            const gid = crypto.randomUUID();
+            create(gid, 'Guide', 'sketch_wire', gWire, { guide: true, poles: draft.points });
+            guideIds = [...guideIds, gid];
+          }
+          const sNow = useCADStore.getState();
+          const guidePolesArr = guideIds
+            .map((id) => sNow.nodes[id]?.params?.poles)
+            .filter((p: any) => Array.isArray(p) && p.length >= 2)
+            .slice(0, 2);
+          if (!guidePolesArr.length) { log('Draw at least one guide curve first.', 'warn'); return; }
+
+          const { shape, guided, reason } = OccGuidedLoftService.guidedLoftWithFallback(
+            window.oc, wireA, wireB, guidePolesArr, true);
+          create(crypto.randomUUID(), guided ? `Guided Loft` : `Loft (guide rejected)`, 'loft', shape,
+            { opType: 'loft', targetWireIds: [aId, bId], guideIds });
+          if (!guided) log(`Guide rejected (${reason ?? 'unknown'}) — fell back to a plain loft.`, 'warn');
+        } finally {
+          if (ra.temp && ra.shape) try { ra.shape.delete(); } catch { /*noop*/ }
+          if (rb.temp && rb.shape) try { rb.shape.delete(); } catch { /*noop*/ }
+          setProc(false);
+        }
+      });
+    };
     // "Add Another Guide": commit the live draft into a registered, VISIBLE guide
     // wire (max 2 rails) and immediately re-enter draw mode for the next one.
     const onCommitContinue = () => withOC(async () => {
@@ -962,7 +1088,10 @@ export const Ribbon: React.FC = () => {
     region:    { id:'region', icon:'region', label:'Region', run:closeRegions, enabled:canConstrain, accent:'#33aa77' },
     'sketch-face':{id:'sketch-face',icon:'plane',label:'On Face', run:sketchOnFace, active: mode==='FACE_SKETCH', enabled:hasAnySolid && !sketchSession, accent:SK },
     'sketch-datum':{id:'sketch-datum',icon:'plane',label:'On Datum', run:sketchOnDatum, active: mode==='DATUM_SKETCH', enabled:!sketchSession, accent:SK },
-    'sketch-project':{id:'sketch-project',icon:'plane',label:'Project', run:sketchProject, active: mode==='PROJECT_PICK', enabled:!!sketchSession && hasAnySolid, accent:SK },
+    'sketch-project-ref':{id:'sketch-project-ref',icon:'plane',label:'Project as Ref', run:() => sketchProject(true), active: mode==='PROJECT_PICK' && projectAsConstr, enabled:!!sketchSession && hasAnySolid, accent:SK,
+      tooltip:'Project edges as REFERENCE/construction geometry — frozen, dimensionable, excluded from the profile (the professional default)' },
+    'sketch-project':{id:'sketch-project',icon:'plane',label:'Project (Profile)', run:() => sketchProject(false), active: mode==='PROJECT_PICK' && !projectAsConstr, enabled:!!sketchSession && hasAnySolid, accent:SK,
+      tooltip:'Project edges as normal profile polylines (participate in regions/extrude)' },
     'sketch-intersect':{id:'sketch-intersect',icon:'plane',label:'Intersect', run:sketchIntersect, active: mode==='INTERSECT_PICK', enabled:!!sketchSession && hasAnySolid, accent:SK },
     'datum-origin':{id:'datum-origin',icon:'datumPlane',label:'Origin Planes', run:datumOrigin, accent:'#f0a30a' },
     'datum-offset':{id:'datum-offset',icon:'datumPlane',label:'Offset Plane', run:datumOffset, active: mode==='DATUM_OFFSET_PICK', accent:'#f0a30a' },
@@ -989,8 +1118,8 @@ export const Ribbon: React.FC = () => {
     extrude:   { id:'extrude',   icon:'extrude',   label:'Extrude',  run:extrude, enabled:hasSketch,         accent:'#9944cc' },
     revolve:   { id:'revolve',   icon:'revolve',   label:'Revolve',  run:revolve, enabled:hasSketch,         accent:'#cc4488' },
     loft:      { id:'loft',      icon:'loft',      label:'Loft',     run:loft,    enabled:loftProfileCount>=2, accent:'#cc8844' },
-    advLoft:   { id:'advLoft',   icon:'loft',      label:'Adv. Loft', run:() => useCADStore.getState().startGuideProfilePick(), accent:'#cc8844',
-                 tooltip:'Guided loft — pick 2 profiles, draw 3D guide curves, then Generate (see the Advanced Loft panel)' },
+    advLoft:   { id:'advLoft',   icon:'loft',      label:'Adv. Loft', run:() => useCADStore.getState().openAdvancedLoft(), accent:'#cc8844',
+                 tooltip:'Guided loft — pick 2 profiles, draw 3D guide curves, then Generate (opens the Advanced Loft dialog)' },
     sweep:     { id:'sweep',     icon:'sweep',     label:'Sweep',    run:sweep,   enabled:sketchCount>=2,    accent:'#44bbcc' },
     // transform
     mirror:        { id:'mirror',        icon:'mirror',    label:'Mirror',     run:mirror,        enabled:hasSolid||hasSketch, accent:'#4488cc' },
@@ -1026,7 +1155,7 @@ export const Ribbon: React.FC = () => {
               key={t.id}
               className="ribbon-tab"
               data-active={t.id === activeTab ? 'true' : 'false'}
-              onClick={() => setActiveTab(t.id)}
+              onClick={() => { setActiveTab(t.id); closeMenu(); }}
             >
               {t.label}
             </button>
@@ -1085,19 +1214,49 @@ export const Ribbon: React.FC = () => {
         </div>
       </div>
 
-      {/* Command row for the active tab */}
+      {/* Command row for the active tab — icon-first, single non-scrolling row */}
       <div className="cad-chrome ribbon-row">
-        {tab.groups.map((g, gi) => (
-          <React.Fragment key={g.label}>
-            {gi > 0 && <Sep />}
-            <Grp label={g.label} />
-            {g.ids.map((id) => {
-              const cmd = commands[id];
-              return cmd ? <CmdBtn key={id} cmd={cmd} /> : null;
-            })}
-          </React.Fragment>
-        ))}
+        {tab.items.map((it, i) =>
+          it === '|' ? (
+            <Sep key={`sep-${i}`} />
+          ) : isMenu(it) ? (
+            <SplitBtn
+              key={it.id}
+              menu={it}
+              commands={commands}
+              open={openMenu === it.id}
+              lastUsedId={lastUsed[it.id]}
+              onToggle={toggleMenu}
+            />
+          ) : commands[it] ? (
+            <IconBtn key={it} cmd={commands[it]} />
+          ) : null,
+        )}
       </div>
+
+      {/* Floating dropdown panel for the open cluster */}
+      {openMenu && menuAt && MENU_BY_ID[openMenu] && (
+        <div className="cad-menu" style={{ left: menuAt.x, top: menuAt.y }}>
+          {MENU_BY_ID[openMenu].ids.map((id) => {
+            const c = commands[id];
+            if (!c) return null;
+            const accent = c.accent ?? 'var(--accent)';
+            return (
+              <button
+                key={id}
+                className="cad-menu__item"
+                data-active={c.active ? 'true' : 'false'}
+                disabled={c.enabled === false}
+                onClick={() => { setLastUsed((p) => ({ ...p, [openMenu]: id })); closeMenu(); c.run(); }}
+                style={c.active ? { color: accent } : undefined}
+              >
+                <Icon name={c.icon} size={18} color={c.active ? accent : undefined} />
+                <span>{c.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

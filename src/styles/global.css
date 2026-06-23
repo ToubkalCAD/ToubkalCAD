@@ -223,22 +223,91 @@ button, input, select, textarea { font-family: inherit; }
 }
 .ribbon-row {
   display: flex; align-items: center;
-  height: 46px; padding: 0 10px; gap: 3px;
+  height: 48px; padding: 0 10px; gap: 4px;
   border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  overflow-x: auto; overflow-y: hidden;
-}
-
-/* Group label pill */
-.cad-grp {
-  font-size: 8.5px; font-weight: 700; color: var(--text-muted);
-  text-transform: uppercase; letter-spacing: 0.8px;
-  user-select: none; flex-shrink: 0; padding: 0 2px;
+  flex-shrink: 0; flex-wrap: nowrap;
+  overflow: visible;               /* let hover tooltips & dropdowns escape the row */
 }
 .cad-sep {
-  width: 1px; height: 20px; flex-shrink: 0;
+  width: 1px; height: 22px; flex-shrink: 0;
   background: var(--border); margin: 0 4px;
 }
+
+/* ─── Icon-first command button ──────────────────────────── */
+.cad-iconbtn {
+  position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; padding: 0;
+  background: transparent; color: var(--text-dim);
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  cursor: pointer; flex-shrink: 0;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.cad-iconbtn:hover:not(:disabled)  { background: var(--surface-3); color: var(--text-primary); }
+.cad-iconbtn:active:not(:disabled) { transform: translateY(0.5px); }
+.cad-iconbtn:disabled              { opacity: 0.4; cursor: not-allowed; }
+.cad-iconbtn[data-active="true"]   {
+  background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line);
+}
+
+/* ─── Split / dropdown button ────────────────────────────── */
+.cad-split {
+  position: relative;
+  display: inline-flex; align-items: stretch;
+  height: 34px; flex-shrink: 0;
+  color: var(--text-dim);
+  border: 1px solid transparent; border-radius: var(--radius-sm);
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.cad-split:hover                 { background: var(--surface-3); color: var(--text-primary); }
+.cad-split[data-open="true"]     { background: var(--surface-3); color: var(--text-primary); border-color: var(--border); }
+.cad-split__main, .cad-split__caret {
+  position: relative;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: none; color: inherit;
+  cursor: pointer; padding: 0;
+}
+.cad-split__main  { width: 34px; border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+.cad-split__caret { width: 15px; border-left: 1px solid var(--border-soft); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+.cad-split__main:hover:not(:disabled),
+.cad-split__caret:hover:not(:disabled) { background: var(--surface-4); }
+.cad-split__main:disabled, .cad-split__caret:disabled { opacity: 0.4; cursor: not-allowed; }
+.cad-split__chev               { transition: transform var(--t-fast); }
+.cad-split[data-open="true"] .cad-split__chev { transform: rotate(180deg); }
+
+/* ─── CSS hover tooltip (labels live in data-tip) ────────── */
+[data-tip]:hover:not(:disabled)::after {
+  content: attr(data-tip);
+  position: absolute; top: calc(100% + 7px); left: 50%; transform: translateX(-50%);
+  background: var(--surface-4); color: var(--text-primary);
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.2px;
+  padding: 3px 7px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); box-shadow: var(--shadow-sm);
+  white-space: nowrap; pointer-events: none; z-index: 6000;
+  animation: fadeIn 0.1s ease-out;
+}
+
+/* ─── Dropdown panel ─────────────────────────────────────── */
+.cad-menu {
+  position: fixed; z-index: 6000;
+  min-width: 168px; padding: 5px;
+  background: var(--surface-1); border: 1px solid var(--border);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-md);
+  display: flex; flex-direction: column; gap: 1px;
+  animation: popIn 0.12s var(--ease);
+}
+.cad-menu__item {
+  display: flex; align-items: center; gap: 9px;
+  height: 30px; padding: 0 9px;
+  background: transparent; color: var(--text-dim);
+  border: none; border-radius: var(--radius-sm);
+  cursor: pointer; text-align: left; white-space: nowrap;
+  font-size: 11.5px; font-weight: 500;
+}
+.cad-menu__item span                   { flex: 1; }
+.cad-menu__item:hover:not(:disabled)   { background: var(--surface-3); color: var(--text-primary); }
+.cad-menu__item:disabled               { opacity: 0.4; cursor: not-allowed; }
+.cad-menu__item[data-active="true"]    { background: var(--accent-soft); }
 
 /* ─── Modal ──────────────────────────────────────────────── */
 .cad-modal-overlay {

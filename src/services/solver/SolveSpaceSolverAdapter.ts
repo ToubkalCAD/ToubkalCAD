@@ -46,6 +46,9 @@ export class SolveSpaceSolverAdapter implements ISketchSolver {
     const mod = this.mod;
     const sys = new mod.SketchSystem();
     try {
+      // libslvs has no ellipse here — pass ellipses through unchanged (FIXED refs).
+      const passthrough = geoms.filter((g) => g.kind === 'ellipse');
+      geoms = geoms.filter((g) => g.kind !== 'ellipse');
       const geomById = new Map(geoms.map((g) => [g.id, g]));
       // Entities whose params must be FIXED (group 1): every operand of a FIXED
       // constraint (datum axes arrive this way via datumFixedConstraints()).
@@ -74,8 +77,10 @@ export class SolveSpaceSolverAdapter implements ISketchSolver {
       }
 
       const out = sys.solve(SLVS_GROUP_ACTIVE);
+      const solvedGeoms = readBack(sys, geoms, recs);
+      for (const e of passthrough) solvedGeoms[e.id] = e;   // ellipses unchanged
       return {
-        geoms:      readBack(sys, geoms, recs),
+        geoms:      solvedGeoms,
         converged:  out.result === mod.SLVS_RESULT_OKAY,
         residual:   out.result === mod.SLVS_RESULT_OKAY ? 0 : 1,
         iterations: 0,
@@ -103,6 +108,8 @@ function build(sys: SketchSystem, g: EntityGeom, fixed: boolean, drag?: DragPin)
     const circ = sys.addCircle(c.h, g.r, fixed);
     return { kind: 'circle', h: circ.h, c, radiusParam: circ.p0 };
   }
+  // Ellipses are filtered out by solve() before build() — unreachable here.
+  if (g.kind === 'ellipse') throw new Error('ellipse not modelled by SolveSpace adapter');
   // arc: centre + start/end derived from the static sweep angles a1/a2.
   const c = sys.addPoint2d(...seed('c', g.c), fixed);
   const start = sys.addPoint2d(g.c[0] + g.r * Math.cos(g.a1), g.c[1] + g.r * Math.sin(g.a1), fixed);

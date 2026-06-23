@@ -31,6 +31,13 @@ export function collectSolverGeoms(sketchId: string): EntityGeom[] {
     if (g.kind === 'line')   out.push({ id, kind: 'line',   a: [g.a[0], g.a[1]], b: [g.b[0], g.b[1]] });
     if (g.kind === 'circle') out.push({ id, kind: 'circle', c: [g.c[0], g.c[1]], r: g.r });
     if (g.kind === 'arc')    out.push({ id, kind: 'arc',    c: [g.c[0], g.c[1]], r: g.r, a1: g.a1, a2: g.a2 });
+    // An ellipse — tool-drawn or a tilted circle's projection — is stored as a
+    // sampled polyline + analytic descriptor; feed the analytic form so the solver
+    // models it. A construction ellipse is FIXED (constructionFixedConstraints); a
+    // tool-drawn one is fed as a RIGID body (PlaneGCSSolverAdapter locks its
+    // centre→focus1 vector) so placement constraints translate it without reshaping.
+    if (g.kind === 'polyline' && g.ellipse && Array.isArray(g.ellipse.c))
+      out.push({ id, kind: 'ellipse', c: [g.ellipse.c[0], g.ellipse.c[1]], rx: g.ellipse.rx, ry: g.ellipse.ry, rot: g.ellipse.rot ?? 0 });
   }
   return out;
 }
@@ -50,13 +57,36 @@ export function collectSketchConstraints(sketchId: string): SketchConstraint[] {
     });
 }
 
+/**
+ * FIXED constraints pinning every construction (reference) entity in the sketch,
+ * so the solver treats projected references as immovable snap / dimension targets
+ * (3e). Only solver-representable kinds (line / circle / arc) are emitted —
+ * construction polylines are visual-only and aren't fed to the solver. Append
+ * alongside datumFixedConstraints() at every solve site.
+ */
+export function constructionFixedConstraints(sketchId: string): SketchConstraint[] {
+  const st = useCADStore.getState();
+  const out: SketchConstraint[] = [];
+  for (const id of st.nodes[sketchId]?.children ?? []) {
+    const n = st.nodes[id];
+    const g = n?.params?.sketchGeom;
+    if (!n?.params?.construction || !g) continue;
+    const solvable = g.kind === 'line' || g.kind === 'circle' || g.kind === 'arc'
+      || (g.kind === 'polyline' && g.ellipse);   // an ellipse reference is solver-fed too
+    if (solvable)
+      out.push({ id: `__fix_constr_${id}__`, type: 'FIXED', refs: [{ kind: 'entity', id }] });
+  }
+  return out;
+}
+
 /** A change key for a solved geom. Arcs include a1/a2 because dragging an arc
  *  ENDPOINT changes only its sweep angles (centre/radius held by constraints) —
  *  omitting them would make an angle-only drag look "unchanged" and skip rebuild. */
 export const geomKey = (g: EntityGeom): string =>
-  g.kind === 'line'  ? `${g.a[0]},${g.a[1]},${g.b[0]},${g.b[1]}`
-  : g.kind === 'arc' ? `${g.c[0]},${g.c[1]},${g.r},${g.a1},${g.a2}`
-  :                    `${g.c[0]},${g.c[1]},${g.r}`;
+  g.kind === 'line'    ? `${g.a[0]},${g.a[1]},${g.b[0]},${g.b[1]}`
+  : g.kind === 'arc'   ? `${g.c[0]},${g.c[1]},${g.r},${g.a1},${g.a2}`
+  : g.kind === 'ellipse' ? `${g.c[0]},${g.c[1]},${g.rx},${g.ry},${g.rot}`
+  :                      `${g.c[0]},${g.c[1]},${g.r}`;
 
 function sampleCircle(center: THREE.Vector3, r: number, wp: Workplane, segs = 72): number[][] {
   const { uAxis, vAxis } = workplaneBasis(wp);
@@ -86,6 +116,30 @@ export function rebuildSketchEntity(id: string, g: EntityGeom): void {
   const wp = st.nodes[id]?.params?.workplane as Workplane | undefined;
   if (!wp || !window.oc) return;
   const oc = window.oc;
+
+  // Ellipse is stored as a sampled polyline + analytic descriptor (not a raw
+  // EntityGeom kind), so it rebuilds + persists differently from line/circle/arc.
+  if (g.kind === 'ellipse') {
+    const pts2d: number[][] = [];
+    const ptsW:  number[][] = [];
+    const cosR = Math.cos(g.rot), sinR = Math.sin(g.rot);
+    const S = 72;
+    for (let i = 0; i <= S; i++) {
+      const t = (2 * Math.PI * i) / S;
+      // c + rx·cosθ·majorDir + ry·sinθ·minorDir, in workplane-local (u,v).
+      const u = g.c[0] + g.rx * Math.cos(t) * cosR - g.ry * Math.sin(t) * sinR;
+      const v = g.c[1] + g.rx * Math.cos(t) * sinR + g.ry * Math.sin(t) * cosR;
+      pts2d.push([u, v]);
+      const p = fromLocal2D(u, v, wp); ptsW.push([p.x, p.y, p.z]);
+    }
+    const wire = OccSketchService.createRotatedEllipseWire(oc, fromLocal2D(g.c[0], g.c[1], wp), g.rx, g.ry, g.rot, wp);
+    reg.registerShape(id, wire);
+    const keepConstruction = st.nodes[id]?.params?.construction ? { construction: true } : {};
+    st.setNodeParams(id, { sketchGeom: { kind: 'polyline', pts: pts2d, ellipse: { c: g.c, rx: g.rx, ry: g.ry, rot: g.rot } }, ...keepConstruction });
+    window.dispatchEvent(new CustomEvent('cad-sketch-replace-visual', { detail: { id, pts: ptsW } }));
+    return;
+  }
+
   let wire: any; let pts: number[][];
   if (g.kind === 'line') {
     const a3 = fromLocal2D(g.a[0], g.a[1], wp);

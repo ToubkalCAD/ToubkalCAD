@@ -28,19 +28,31 @@ function sampleEntity(geom: any, wp: Workplane): number[][] {
 }
 
 /** Create a new sketch_wire node for `geom` under `parentId`. Returns its id (or null on failure). */
-export function createSketchEntityNode(geom: any, wp: Workplane, parentId: string | null): string | null {
+/**
+ * `opts.construction` marks the entity as a REFERENCE/construction curve: it's
+ * persisted with `params.construction = true`, rendered dashed + dimmed, kept out
+ * of profile/region detection (so it never becomes part of an extrude/loft), and
+ * — for solver-representable kinds (line/circle/arc) — frozen in PlaneGCS so you
+ * can snap/dimension relative to it (see SketchSolveBridge.constructionFixedConstraints).
+ */
+export function createSketchEntityNode(
+  geom: any, wp: Workplane, parentId: string | null,
+  opts?: { construction?: boolean },
+): string | null {
   const oc = window.oc;
   if (!oc || !geom) return null;
+  const construction = !!opts?.construction;
   const wire = OccSketchService.buildEntityWire(oc, geom, wp);
   const id = crypto.randomUUID();
   CADGeometryRegistry.getInstance().registerShape(id, wire);
+  const baseName = geom.ellipse ? 'Ellipse' : (NAME[geom.kind] ?? 'Curve');
   useCADStore.getState().addNode({
-    id, name: NAME[geom.kind] ?? 'Curve', type: 'sketch_wire',
+    id, name: `${construction ? 'Ref ' : ''}${baseName}`, type: 'sketch_wire',
     visible: true, locked: false, parentId, notes: '',
     transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
-    material:  { color: 0x003388, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
-    params: { workplane: wp, sketchGeom: geom },
+    material:  { color: construction ? 0x8a93a3 : 0x003388, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
+    params: { workplane: wp, sketchGeom: geom, ...(construction ? { construction: true } : {}) },
   });
-  window.dispatchEvent(new CustomEvent('cad-sketch-add-visual', { detail: { id, pts: sampleEntity(geom, wp) } }));
+  window.dispatchEvent(new CustomEvent('cad-sketch-add-visual', { detail: { id, pts: sampleEntity(geom, wp), construction } }));
   return id;
 }

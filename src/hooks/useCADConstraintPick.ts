@@ -118,6 +118,10 @@ export function useCADConstraintPick(
         out.push({ ref: { kind: 'point', id, pt: 'c' }, world: fromLocal2D(g.c[0], g.c[1], wp) });
         out.push({ ref: { kind: 'point', id, pt: 'a' }, world: fromLocal2D(g.c[0] + g.r * Math.cos(g.a1), g.c[1] + g.r * Math.sin(g.a1), wp) });
         out.push({ ref: { kind: 'point', id, pt: 'b' }, world: fromLocal2D(g.c[0] + g.r * Math.cos(g.a2), g.c[1] + g.r * Math.sin(g.a2), wp) });
+      } else if (g.kind === 'polyline' && g.ellipse && Array.isArray(g.ellipse.c)) {
+        // An ellipse exposes its CENTRE — the referenceable point for Coincident /
+        // Distance / Concentric (placement constraints translate it rigidly).
+        out.push({ ref: { kind: 'point', id, pt: 'c' }, world: fromLocal2D(g.ellipse.c[0], g.ellipse.c[1], wp) });
       }
     }
     return out;
@@ -144,6 +148,8 @@ export function useCADConstraintPick(
         out.push({ ref: { kind: 'point', id, pt: 'c' }, world: fromLocal2D(g.c[0], g.c[1], wp) });
         out.push({ ref: { kind: 'point', id, pt: 'a' }, world: fromLocal2D(g.c[0] + g.r * Math.cos(g.a1), g.c[1] + g.r * Math.sin(g.a1), wp) });
         out.push({ ref: { kind: 'point', id, pt: 'b' }, world: fromLocal2D(g.c[0] + g.r * Math.cos(g.a2), g.c[1] + g.r * Math.sin(g.a2), wp) });
+      } else if (g.kind === 'polyline' && g.ellipse && Array.isArray(g.ellipse.c)) {
+        out.push({ ref: { kind: 'point', id, pt: 'c' }, world: fromLocal2D(g.ellipse.c[0], g.ellipse.c[1], wp) }); // drag the centre → rigid translate
       }
     }
     return out;

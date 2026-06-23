@@ -36,7 +36,11 @@ export type EntityGeom =
   // [cx,cy,r] are solver variables; the two endpoints are derived from them, so
   // an arc behaves like a circle for centre/radius constraints (Concentric,
   // Equal, Tangent, Radius) while still exposing pickable endpoints.
-  | { id: string; kind: 'arc';    c: [number, number]; r: number; a1: number; a2: number };
+  | { id: string; kind: 'arc';    c: [number, number]; r: number; a1: number; a2: number }
+  // Ellipse: centre + major/minor radii + major-axis rotation (rad). Solver-fed by
+  // PlaneGCS (centre + focus1 + radmin); the legacy/SolveSpace fallbacks pass it
+  // through unchanged. Typically a FIXED reference (a tilted circle's projection).
+  | { id: string; kind: 'ellipse'; c: [number, number]; rx: number; ry: number; rot: number };
 
 export interface SolveResult {
   geoms:      Record<string, EntityGeom>;
@@ -81,7 +85,11 @@ const REL_TOL   = 1e-3;
 
 interface VarBlock { kind: 'line' | 'circle' | 'arc'; base: number; a1?: number; a2?: number }
 
-function buildLayout(geoms: EntityGeom[]) {
+// This legacy solver models line/circle/arc only; ellipses are filtered out by the
+// caller and passed through unchanged, so its internals work on the narrowed type.
+type SolvableGeom = Exclude<EntityGeom, { kind: 'ellipse' }>;
+
+function buildLayout(geoms: SolvableGeom[]) {
   const blocks = new Map<string, VarBlock>();
   const x: number[] = [];
   for (const g of geoms) {
@@ -350,10 +358,15 @@ const norm2 = (v: number[]) => Math.sqrt(v.reduce((s, e) => s + e * e, 0));
 // ─── Public solve ─────────────────────────────────────────────────────────────
 
 export function solveConstraints(geomsIn: EntityGeom[], constraints: SketchConstraint[], dragPin?: DragPin): SolveResult {
-  const geoms: EntityGeom[] = geomsIn.map((g) =>
-    g.kind === 'line'  ? { id: g.id, kind: 'line', a: [...g.a], b: [...g.b] }
-    : g.kind === 'arc' ? { id: g.id, kind: 'arc', c: [...g.c], r: g.r, a1: g.a1, a2: g.a2 }
-    :                    { id: g.id, kind: 'circle', c: [...g.c], r: g.r });
+  // Ellipses aren't modelled by this legacy solver — pass them through unchanged
+  // (they're FIXED references anyway). Only PlaneGCS solves them as real primitives.
+  const passthrough = geomsIn.filter((g) => g.kind === 'ellipse');
+  const geoms: SolvableGeom[] = geomsIn
+    .filter((g): g is SolvableGeom => g.kind !== 'ellipse')
+    .map((g) =>
+      g.kind === 'line'  ? { id: g.id, kind: 'line', a: [...g.a], b: [...g.b] }
+      : g.kind === 'arc' ? { id: g.id, kind: 'arc', c: [...g.c], r: g.r, a1: g.a1, a2: g.a2 }
+      :                    { id: g.id, kind: 'circle', c: [...g.c], r: g.r });
 
   const { blocks, x } = buildLayout(geoms);
   const x0 = [...x];
@@ -508,10 +521,12 @@ export function solveConstraints(geomsIn: EntityGeom[], constraints: SketchConst
     for (let i = 0; i < n; i++) x[i] = best[i];
   }
 
-  return { geoms: writeBack(geoms, blocks, x), converged: bestErr < convTol, residual: bestErr, iterations: iters };
+  const out = writeBack(geoms, blocks, x);
+  for (const e of passthrough) out[e.id] = e;   // ellipses returned unchanged
+  return { geoms: out, converged: bestErr < convTol, residual: bestErr, iterations: iters };
 }
 
-function writeBack(geoms: EntityGeom[], blocks: Map<string, VarBlock>, x: number[]): Record<string, EntityGeom> {
+function writeBack(geoms: SolvableGeom[], blocks: Map<string, VarBlock>, x: number[]): Record<string, EntityGeom> {
   const out: Record<string, EntityGeom> = {};
   for (const g of geoms) {
     const blk = blocks.get(g.id)!;
@@ -570,7 +585,7 @@ export function refOperand(ref: SketchRef, geoms: EntityGeom[]): Operand | null 
   if (ref.kind === 'point') return 'point';
   const g = geoms.find((e) => e.id === ref.id);
   if (!g) return null;
-  return g.kind === 'arc' ? 'circle' : g.kind;
+  return (g.kind === 'arc' || g.kind === 'ellipse') ? 'circle' : g.kind;
 }
 
 /** Does the current selection satisfy this constraint's operand signature? */
@@ -578,6 +593,13 @@ export function canApply(type: SketchConstraintType, refs: SketchRef[], geoms: E
   const meta = CONSTRAINT_META[type];
   const kinds = refs.map((r) => refOperand(r, geoms));
   if (kinds.some((k) => k === null)) return false;
+  // An ellipse reads as a 'circle' operand for placement (Concentric) + its centre
+  // for Coincident/Distance, and can be Fixed — but radius/equal/tangent are
+  // meaningless for it (no single radius), so gate those out.
+  if (type === 'RADIUS' || type === 'EQUAL' || type === 'TANGENT') {
+    const hasEllipse = refs.some((r) => r.kind === 'entity' && geoms.find((e) => e.id === r.id)?.kind === 'ellipse');
+    if (hasEllipse) return false;
+  }
   return meta.sigs.some((sig) => sig.length === kinds.length && sig.every((s, i) => s === kinds[i]));
 }
 

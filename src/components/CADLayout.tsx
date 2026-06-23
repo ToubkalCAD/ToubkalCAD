@@ -154,6 +154,8 @@ export const CADLayout: React.FC = () => {
   // ── Op3D panel state — driven by Zustand so show3DOpPanel() always works ────
   const op3DReq    = useCADStore((s) => s.op3DPanelReq);
   const closeOp3D  = useCADStore((s) => s.closeOp3DPanel);
+  // ── Advanced (guided) Loft floating dialog — open flag lives in the store ───
+  const advLoftOpen = useCADStore((s) => s.advancedLoftOpen);
 
   useNumpadCamera();
 
@@ -221,9 +223,8 @@ export const CADLayout: React.FC = () => {
       position: { referencePanel: 'viewport', direction: 'below' }, initialHeight: 130 });
     event.api.addPanel({ id: 'projects',   component: 'projectsView',  title: 'Projects',
       position: { referencePanel: 'console',  direction: 'right' },  initialWidth: 260 });
-    // Advanced (guided) Loft authoring — tabbed alongside Properties on the right.
-    event.api.addPanel({ id: 'advLoft',     component: 'advancedLoftView', title: 'Advanced Loft',
-      position: { referencePanel: 'properties', direction: 'within' } });
+    // Advanced (guided) Loft authoring is now a floating dialog over the viewport
+    // (see AdvancedLoftPanel below), not a docked sidebar tab.
     event.api.onDidLayoutChange(() => resizeFnRef.current?.());
   }, []);
 
@@ -244,7 +245,6 @@ export const CADLayout: React.FC = () => {
     propertiesView: () => <ErrorBoundary label="Properties"><PropertiesPanel /></ErrorBoundary>,
     consoleView:    () => <ErrorBoundary label="Console"><CADConsolePanel /></ErrorBoundary>,
     projectsView:   () => <ErrorBoundary label="Projects"><CADProjectPanel /></ErrorBoundary>,
-    advancedLoftView: () => <ErrorBoundary label="Advanced Loft"><AdvancedLoftPanel /></ErrorBoundary>,
   };
 
   return (
@@ -316,6 +316,7 @@ export const CADLayout: React.FC = () => {
       <BlendActionPanel />
       <BooleanActionPanel />
       <ConstraintPanel />
+      {advLoftOpen && <AdvancedLoftPanel />}
     </div>
   );
 };

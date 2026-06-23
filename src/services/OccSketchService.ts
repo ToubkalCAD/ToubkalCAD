@@ -330,6 +330,29 @@ export class OccSketchService {
     return makeWire(oc, [edge]);
   }
 
+  // ── Rotated full ellipse ──────────────────────────────────────────────────
+  // Unlike createEllipseWire (major always along uAxis), this honours a major-axis
+  // rotation within the workplane — needed for a TILTED circle projected onto the
+  // sketch, which images to an arbitrarily-oriented ellipse. Builds one analytic
+  // gp_Elips edge (no faceting) so it stays a clean 1-edge reference curve.
+  static createRotatedEllipseWire(
+    oc: any, center: V3, rx: number, ry: number, rotRad: number, wp: Workplane,
+  ): any {
+    const { normal, uAxis, vAxis } = workplaneBasis(wp);
+    let major = rx, minor = ry, ang = rotRad;
+    if (major < minor) { const t = major; major = minor; minor = t; ang += Math.PI / 2; } // gp_Elips needs major≥minor
+    if (minor < 1e-6) throw new Error('Ellipse minor radius too small');
+    // Major-axis direction in 3D = rotate uAxis toward vAxis by `ang` within the plane.
+    const majorDir = uAxis.clone().multiplyScalar(Math.cos(ang)).addScaledVector(vAxis, Math.sin(ang));
+    const ax2   = ax2WithX(oc, center, normal, majorDir);
+    const elips = new oc.gp_Elips_2(ax2, major, minor);
+    ax2.delete();
+    const mk = new oc.BRepBuilderAPI_MakeEdge_12(elips);
+    if (!mk.IsDone()) { elips.delete(); mk.delete(); throw new Error('Rotated ellipse failed'); }
+    const edge = mk.Edge(); mk.delete(); elips.delete();
+    return makeWire(oc, [edge]);
+  }
+
   // ── Ellipse ARC edge (eccentric angles a1→a2) ─────────────────────────────
   // The sketch ellipse always has its major radius along uAxis (the draw tool +
   // fit guarantee rx≥ry), so gp_Elips(ax2WithX(uAxis), rx, ry) and the eccentric
@@ -570,6 +593,11 @@ export class OccSketchService {
         : fitAxisAlignedEllipse(geom.pts);
       if (ell && ell.rx > 1e-6 && ell.ry > 1e-6) {
         const c  = fromLocal2D(ell.c[0], ell.c[1], wp);
+        // A rotated ellipse (e.g. a tilted circle's projection) carries `rot` — build
+        // it with the rotated major axis; the axis-aligned tool/loft path has no rot.
+        if (typeof ell.rot === 'number' && Math.abs(ell.rot) > 1e-6) {
+          return OccSketchService.createRotatedEllipseWire(oc, c, ell.rx, ell.ry, ell.rot, wp);
+        }
         const ma = fromLocal2D(ell.c[0] + ell.rx, ell.c[1], wp);
         const mi = fromLocal2D(ell.c[0], ell.c[1] + ell.ry, wp);
         return OccSketchService.createEllipseWire(oc, c, ma, mi, wp);
