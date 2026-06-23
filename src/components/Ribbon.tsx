@@ -13,7 +13,7 @@
 // tabs) and R4 (Quick Access Toolbar + Customize dialog).
 // ============================================================
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS, InteractionMode, STANDARD_WORKPLANES, DATUM_TYPES } from '../store/cadStore';
 import { Icon, IconName }            from './Icon';
 import { showParamModal }           from './ParameterModal';
@@ -22,6 +22,8 @@ import { OccExchangeService }       from '../services/OccExchangeService';
 import { OccRevolutionService }     from '../services/OccRevolutionService';
 import { OccLoftService }           from '../services/OccLoftService';
 import { OccSweepService }          from '../services/OccSweepService';
+import { OccGuideCurveService }     from '../services/OccGuideCurveService';
+import { OccGuidedLoftService }     from '../services/OccGuidedLoftService';
 import { OccSketchService, fromLocal2D } from '../services/OccSketchService';
 import { findRegions, RegionEntity, toRegionEntity } from '../services/SketchRegions';
 import { setAlignOffset } from '../hooks/useCADAssemblyMate';
@@ -68,7 +70,7 @@ const RIBBON_TABS: RibbonTab[] = [
   { id: 'model', label: 'Model', groups: [
     { label: 'Structure',   ids: ['component', 'assembly'] },
     { label: 'Primitives',  ids: ['box', 'cylinder', 'sphere', 'torus', 'cone'] },
-    { label: 'From Sketch', ids: ['extrude', 'revolve', 'loft', 'sweep'] },
+    { label: 'From Sketch', ids: ['extrude', 'revolve', 'loft', 'advLoft', 'sweep'] },
     { label: 'Transform',   ids: ['mirror', 'array-lin', 'array-circ'] },
     { label: 'Datum',       ids: ['datum-origin', 'datum-offset', 'datum-3point', 'datum-midplane', 'datum-angle', 'datum-axis', 'datum-point', 'datum-tangent', 'datum-curvenormal', 'datum-2edge'] },
     { label: 'Assembly',    ids: ['mate', 'align', 'concentric'] },
@@ -613,6 +615,92 @@ export const Ribbon: React.FC = () => {
     });
   };
 
+  // ─── Advanced (guided) Loft ───────────────────────────────────────────────────
+  // Listens for 'cad-generate-guided-loft' (dispatched by AdvancedLoftPanel's
+  // "Generate Guided Loft" button). Builds + registers the in-progress guide wire
+  // if one is being drawn, then runs MakePipeShell (with a plain-loft fallback)
+  // through the same create() pipeline as every other op.
+  useEffect(() => {
+    const onGen = () => withOC(async () => {
+      const st = useCADStore.getState();
+      const [aId, bId] = st.guideProfiles;
+      if (!aId || !bId) { log('Pick 2 profiles before generating a guided loft.', 'warn'); return; }
+      const ra = profileShapeFor(window.oc, aId);
+      const rb = profileShapeFor(window.oc, bId);
+      const wireA = ra.shape;
+      const wireB = rb.shape;
+      if (!wireA || !wireB) {
+        if (ra.temp && ra.shape) try { ra.shape.delete(); } catch { /*noop*/ }
+        if (rb.temp && rb.shape) try { rb.shape.delete(); } catch { /*noop*/ }
+        log('Could not resolve both profile wires.', 'error');
+        return;
+      }
+      setProc(true, 'Building guided loft…');
+      try {
+        // Commit the live draft into a registered guide wire if it isn't yet.
+        // The Bezier POLES are stored on the node — the loft re-centres them so
+        // the result actually follows the guide (see OccGuidedLoftService).
+        let guideIds = st.guideIds;
+        if (st.guideDraft && st.guideDraft.lockedCount === 2) {
+          const gWire = OccGuideCurveService.buildGuideWire(window.oc, st.guideDraft.points, wireA, wireB);
+          const gid = crypto.randomUUID();
+          create(gid, 'Guide', 'sketch_wire', gWire, { guide: true, poles: st.guideDraft.points });
+          st.commitGuide(gid);
+          guideIds = [...guideIds, gid];
+        }
+        const sNow = useCADStore.getState();
+        const guidePolesArr = guideIds
+          .map((id) => sNow.nodes[id]?.params?.poles)
+          .filter((p: any) => Array.isArray(p) && p.length >= 2)
+          .slice(0, 2);
+        if (!guidePolesArr.length) { log('Draw at least one guide curve first.', 'warn'); return; }
+
+        const { shape, guided, reason } = OccGuidedLoftService.guidedLoftWithFallback(
+          window.oc, wireA, wireB, guidePolesArr, true);
+        create(crypto.randomUUID(), guided ? `Guided Loft` : `Loft (guide rejected)`, 'loft', shape,
+          { opType: 'loft', targetWireIds: [aId, bId], guideIds });
+        if (!guided) log(`Guide rejected (${reason ?? 'unknown'}) — fell back to a plain loft.`, 'warn');
+      } finally {
+        if (ra.temp && ra.shape) try { ra.shape.delete(); } catch { /*noop*/ }
+        if (rb.temp && rb.shape) try { rb.shape.delete(); } catch { /*noop*/ }
+        setProc(false);
+      }
+    });
+    // "Add Another Guide": commit the live draft into a registered, VISIBLE guide
+    // wire (max 2 rails) and immediately re-enter draw mode for the next one.
+    const onCommitContinue = () => withOC(async () => {
+      const st = useCADStore.getState();
+      const [aId, bId] = st.guideProfiles;
+      const draft = st.guideDraft;
+      if (!aId || !bId || !draft || draft.lockedCount !== 2) return;
+      if (st.guideIds.length >= 2) { log('MakePipeShell supports at most 2 guide rails.', 'warn'); return; }
+      const ra = profileShapeFor(window.oc, aId);
+      const rb = profileShapeFor(window.oc, bId);
+      try {
+        if (!ra.shape || !rb.shape) { log('Could not resolve both profile wires.', 'error'); return; }
+        const gWire = OccGuideCurveService.buildGuideWire(window.oc, draft.points, ra.shape, rb.shape);
+        const gid = crypto.randomUUID();
+        create(gid, `Guide ${st.guideIds.length + 1}`, 'sketch_wire', gWire, { guide: true, poles: draft.points });
+        st.commitGuide(gid);        // registers gid in guideIds, clears draft, mode→SELECT
+        // Render the committed guide as a persistent polyline so it stays visible.
+        const pts = OccGuideCurveService.sampleBezier(draft.points, 48).map((p) => [p.x, p.y, p.z]);
+        window.dispatchEvent(new CustomEvent('cad-sketch-add-visual', { detail: { id: gid, pts } }));
+        st.startGuideDraw();        // fresh draft → draw the next rail
+        log(`Guide committed (${st.guideIds.length}/2). Draw the next, or Generate.`, 'success');
+      } finally {
+        if (ra.temp && ra.shape) try { ra.shape.delete(); } catch { /*noop*/ }
+        if (rb.temp && rb.shape) try { rb.shape.delete(); } catch { /*noop*/ }
+      }
+    });
+
+    window.addEventListener('cad-generate-guided-loft', onGen);
+    window.addEventListener('cad-commit-guide-continue', onCommitContinue);
+    return () => {
+      window.removeEventListener('cad-generate-guided-loft', onGen);
+      window.removeEventListener('cad-commit-guide-continue', onCommitContinue);
+    };
+  }, []);
+
   // ─── Sweep ──────────────────────────────────────────────────────────────────
   const sweep = () => {
     const sketchIds = selIds.filter((id) => nodes[id]?.type === 'sketch_wire');
@@ -901,6 +989,8 @@ export const Ribbon: React.FC = () => {
     extrude:   { id:'extrude',   icon:'extrude',   label:'Extrude',  run:extrude, enabled:hasSketch,         accent:'#9944cc' },
     revolve:   { id:'revolve',   icon:'revolve',   label:'Revolve',  run:revolve, enabled:hasSketch,         accent:'#cc4488' },
     loft:      { id:'loft',      icon:'loft',      label:'Loft',     run:loft,    enabled:loftProfileCount>=2, accent:'#cc8844' },
+    advLoft:   { id:'advLoft',   icon:'loft',      label:'Adv. Loft', run:() => useCADStore.getState().startGuideProfilePick(), accent:'#cc8844',
+                 tooltip:'Guided loft — pick 2 profiles, draw 3D guide curves, then Generate (see the Advanced Loft panel)' },
     sweep:     { id:'sweep',     icon:'sweep',     label:'Sweep',    run:sweep,   enabled:sketchCount>=2,    accent:'#44bbcc' },
     // transform
     mirror:        { id:'mirror',        icon:'mirror',    label:'Mirror',     run:mirror,        enabled:hasSolid||hasSketch, accent:'#4488cc' },

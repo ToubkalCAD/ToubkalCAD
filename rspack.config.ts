@@ -25,16 +25,28 @@ import { fileURLToPath } from 'url';
 // (Required now that package.json declares "type": "module".)
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Are we running the dev server (`rspack serve`) vs a production `rspack build`?
+// In dev we must NOT content-hash the bundle/chunk/css filenames: every recompile
+// changes the hash, so HMR hot-update manifests and dynamically-imported chunks
+// (e.g. the lazy `import('./store/cadStore')` in src/index.tsx) end up pointing at
+// hashes that no longer exist → "Loading css hot update chunk failed" / ChunkLoadError,
+// which leaves the app frozen at "Initializing geometry registry…". Stable names in
+// dev keep HMR consistent; content hashing is only useful for prod HTTP caching.
+const isDev = process.argv.includes('serve');
+
 export default defineConfig({
   entry: {
     main: './src/index.tsx',
   },
 
   output: {
-    path:       path.resolve(__dirname, 'dist'),
-    filename:   '[name].[contenthash:8].js',
-    publicPath: 'auto',  // ← critique pour les URLs WASM dynamiques
-    clean:      true,
+    path:             path.resolve(__dirname, 'dist'),
+    filename:         isDev ? '[name].js' : '[name].[contenthash:8].js',
+    chunkFilename:    isDev ? '[name].js' : '[name].[contenthash:8].js',
+    cssFilename:      isDev ? '[name].css' : '[name].[contenthash:8].css',
+    cssChunkFilename: isDev ? '[name].css' : '[name].[contenthash:8].css',
+    publicPath:       'auto',  // ← critique pour les URLs WASM dynamiques
+    clean:            true,
   },
 
   resolve: {
@@ -150,6 +162,9 @@ export default defineConfig({
     new CopyRspackPlugin({
       patterns: [
         { from: 'src/services/solver/wasm/libslvs.mjs', to: 'libslvs.mjs', noErrorOnMissing: true },
+        // Static favicon — HtmlRspackPlugin only consumes public/index.html as a
+        // template, so other public/ assets must be copied explicitly to reach dist/.
+        { from: 'public/favicon.svg', to: 'favicon.svg', noErrorOnMissing: true },
       ],
     }),
   ],

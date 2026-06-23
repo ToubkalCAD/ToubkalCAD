@@ -24,6 +24,7 @@ import { useCADBooleanPick }   from '../hooks/useCADBooleanPick';
 import { useCADConstraintPick } from '../hooks/useCADConstraintPick';
 import { useCADSketchFacePick } from '../hooks/useCADSketchFacePick';
 import { useCADSketchEdit }     from '../hooks/useCADSketchEdit';
+import { useCADGuideDraw }      from '../hooks/useCADGuideDraw';
 import { useCADAssemblyMate }   from '../hooks/useCADAssemblyMate';
 import { useCADAssemblyConcentric } from '../hooks/useCADAssemblyConcentric';
 import { useCADSketchTransformPick } from '../hooks/useCADSketchTransformPick';
@@ -304,6 +305,102 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   // ─── Project (D11) / Intersect (D12) onto the active sketch ───────────────────
   useCADSketchProjectPick(containerRef, sceneRef, cameraRef);
   useCADSketchIntersectPick(containerRef, sceneRef, cameraRef);
+
+  // ─── Advanced Loft: guide-curve drawing (GUIDE_PROFILE_PICK / GUIDE_DRAW) ─────
+  useCADGuideDraw(containerRef, sceneRef, cameraRef);
+
+  // Guide-tool overlay: red snap indicator + dashed Bezier preview, driven by the
+  // 'cad-guide-snap' / 'cad-guide-preview' events the hook dispatches. The scene
+  // is resolved lazily (sceneRef is populated by the main setup effect) and the
+  // overlay group is created on first use, so this effect is order-independent.
+  useEffect(() => {
+    let group:     THREE.Group | null = null;
+    let indicator: THREE.Mesh  | null = null;
+    let preview:   THREE.Line  | null = null;
+    let markers:   THREE.Mesh[] = [];   // interior control-pole handles
+
+    const scene = (): THREE.Scene | null => sceneRef.current ?? (window.cadScene as THREE.Scene | null);
+    const kick  = () => window.cadRequestRender?.();
+    const clearMarkers = () => {
+      const g = group;
+      markers.forEach((m) => { if (g) g.remove(m); m.geometry.dispose(); (m.material as THREE.Material).dispose(); });
+      markers = [];
+    };
+
+    const ensureGroup = (): THREE.Group | null => {
+      const s = scene();
+      if (!s) return null;
+      if (!group) {
+        group = new THREE.Group();
+        group.name = 'guide-overlay';
+        indicator = new THREE.Mesh(
+          new THREE.SphereGeometry(0.6, 16, 12),
+          new THREE.MeshBasicMaterial({ color: 0xff3344, depthTest: false }),
+        );
+        indicator.renderOrder = 999;
+        indicator.visible = false;
+        group.add(indicator);
+        s.add(group);
+      }
+      return group;
+    };
+
+    const onSnap = (e: Event) => {
+      const d = (e as CustomEvent).detail as { point: { x: number; y: number; z: number } } | null;
+      const g = ensureGroup();
+      if (!g || !indicator) return;
+      if (!d) { indicator.visible = false; }
+      else { indicator.position.set(d.point.x, d.point.y, d.point.z); indicator.visible = true; }
+      kick();
+    };
+
+    const onPreview = (e: Event) => {
+      const d = (e as CustomEvent).detail as {
+        points:   { x: number; y: number; z: number }[];
+        controls?: { x: number; y: number; z: number }[];
+      } | null;
+      const g = ensureGroup();
+      if (!g) return;
+      if (preview) { g.remove(preview); preview.geometry.dispose(); (preview.material as THREE.Material).dispose(); preview = null; }
+      clearMarkers();
+      if (d?.points?.length) {
+        const geo = new THREE.BufferGeometry().setFromPoints(
+          d.points.map((p) => new THREE.Vector3(p.x, p.y, p.z)));
+        preview = new THREE.Line(geo, new THREE.LineDashedMaterial(
+          { color: 0xffaa00, dashSize: 1.5, gapSize: 1, depthTest: false }));
+        preview.computeLineDistances();
+        preview.renderOrder = 998;
+        g.add(preview);
+        // Interior control poles (skip the two locked endpoints) as cyan handles
+        // so the user sees what the X/Y/Z sliders are moving.
+        const ctrl = d.controls ?? [];
+        for (let i = 1; i < ctrl.length - 1; i++) {
+          const m = new THREE.Mesh(
+            new THREE.SphereGeometry(0.8, 12, 10),
+            new THREE.MeshBasicMaterial({ color: 0x33ddff, depthTest: false }),
+          );
+          m.position.set(ctrl[i].x, ctrl[i].y, ctrl[i].z);
+          m.renderOrder = 999;
+          g.add(m);
+          markers.push(m);
+        }
+      }
+      kick();
+    };
+
+    window.addEventListener('cad-guide-snap', onSnap);
+    window.addEventListener('cad-guide-preview', onPreview);
+    return () => {
+      window.removeEventListener('cad-guide-snap', onSnap);
+      window.removeEventListener('cad-guide-preview', onPreview);
+      const s = scene();
+      clearMarkers();
+      if (group && s) s.remove(group);
+      if (preview) { preview.geometry.dispose(); (preview.material as THREE.Material).dispose(); }
+      if (indicator) { indicator.geometry.dispose(); (indicator.material as THREE.Material).dispose(); }
+      group = indicator = preview = null;
+    };
+  }, []);
 
   // ─── Camera: animate to view normal to workplane when sketch starts ──────────
   useEffect(() => {

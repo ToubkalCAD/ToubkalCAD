@@ -28,6 +28,7 @@ import { BooleanActionPanel }  from './BooleanActionPanel';
 import { ConstraintPanel }     from './ConstraintPanel';
 import { CADConsolePanel }      from './panels/CADConsolePanel';
 import { CADProjectPanel }      from './panels/CADProjectPanel';
+import { AdvancedLoftPanel }    from './panels/AdvancedLoftPanel';
 import { Icon }                 from './Icon';
 import { CADViewPreset } from '../services/CADCameraService';
 import { useCADStore } from '../store/cadStore';
@@ -220,6 +221,9 @@ export const CADLayout: React.FC = () => {
       position: { referencePanel: 'viewport', direction: 'below' }, initialHeight: 130 });
     event.api.addPanel({ id: 'projects',   component: 'projectsView',  title: 'Projects',
       position: { referencePanel: 'console',  direction: 'right' },  initialWidth: 260 });
+    // Advanced (guided) Loft authoring — tabbed alongside Properties on the right.
+    event.api.addPanel({ id: 'advLoft',     component: 'advancedLoftView', title: 'Advanced Loft',
+      position: { referencePanel: 'properties', direction: 'within' } });
     event.api.onDidLayoutChange(() => resizeFnRef.current?.());
   }, []);
 
@@ -240,6 +244,7 @@ export const CADLayout: React.FC = () => {
     propertiesView: () => <ErrorBoundary label="Properties"><PropertiesPanel /></ErrorBoundary>,
     consoleView:    () => <ErrorBoundary label="Console"><CADConsolePanel /></ErrorBoundary>,
     projectsView:   () => <ErrorBoundary label="Projects"><CADProjectPanel /></ErrorBoundary>,
+    advancedLoftView: () => <ErrorBoundary label="Advanced Loft"><AdvancedLoftPanel /></ErrorBoundary>,
   };
 
   return (

@@ -156,9 +156,27 @@ export type InteractionMode =
   | 'DATUM_CURVE_NORMAL_PICK' // pick an edge → plane perpendicular to it at a position (D6)
   | 'DATUM_2EDGE_PICK'    // pick 2 coplanar edges → plane through them (D6)
   | 'PROJECT_PICK'   // pick edges of bodies → project them onto the active sketch (D11)
-  | 'INTERSECT_PICK'; // pick a body → section it with the active sketch plane into curves (D12)
+  | 'INTERSECT_PICK' // pick a body → section it with the active sketch plane into curves (D12)
+  | 'GUIDE_PROFILE_PICK' // Advanced Loft: pick the 2 profile wires the guide(s) bridge
+  | 'GUIDE_DRAW';        // Advanced Loft: snap+click 2 endpoints, then sculpt the 3D guide
 
 export type BooleanOp = 'CUT' | 'FUSE' | 'COMMON';
+
+// ─── Advanced Loft guide-curve authoring ──────────────────────────────────────
+export interface GuidePoint { x: number; y: number; z: number }
+
+/**
+ * A guide curve mid-authoring. `points` are the Bezier control poles in world
+ * space: points[0]/points[last] are the snapped endpoints (locked to a profile),
+ * the interior poles are the handles the Tweakpane X/Y/Z sliders sculpt.
+ */
+export interface GuideDraft {
+  points:      GuidePoint[];      // 2 → straight, 3 → quadratic, 4 → cubic
+  startWireId: string | null;     // profile wire the first endpoint is locked to
+  endWireId:   string | null;     // profile wire the last  endpoint is locked to
+  /** How many endpoints have been clicked/locked so far (0,1,2). */
+  lockedCount: number;
+}
 
 // ─── Parametric 2D constraints (Phase 8) ──────────────────────────────────────
 
@@ -303,6 +321,18 @@ interface CADState {
   interactionMode: InteractionMode;
   gizmoMode:       GizmoMode;
 
+  // ─── Advanced Loft: guide-curve authoring ───────────────────────────────
+  /** Profile wire node ids the guide(s) bridge (exactly 2 when ready). */
+  guideProfiles: string[];
+  /** Guide currently being drawn/sculpted; null when none in progress. */
+  guideDraft: GuideDraft | null;
+  /** Live snap target under the cursor in GUIDE_DRAW mode (world coords) or null. */
+  guideSnap: GuidePoint | null;
+  /** Node ids of completed guide wires (registered shapes live in the registry). */
+  guideIds: string[];
+  /** The guide whose Bezier control points the Tweakpane sliders edit, or null. */
+  selectedGuideId: string | null;
+
   measurements: CADMeasurement[];
 
   logs: LogEntry[];
@@ -350,7 +380,7 @@ interface CADState {
    *  resets the viewport. */
   newProject:         () => void;
   /** Serialize the current scene to a downloadable `.tkcad` file. */
-  saveProject:        (name?: string) => void;
+  saveProject:        (name?: string) => Promise<void>;
   /** Validate + load a `.tkcad` JSON string: wipe the viewport, replace the
    *  scene, then rebuild geometry from the parametric tree. */
   loadProject:        (jsonString: string) => void;
@@ -380,6 +410,28 @@ interface CADState {
   setInteractionMode:    (mode: InteractionMode) => void;
   setGizmoMode:          (mode: GizmoMode) => void;
   setSketchPolygonSides: (n: number) => void;
+
+  // ─── Advanced Loft guide-curve actions ──────────────────────────────────
+  /** Enter profile-pick mode and reset any prior guide selection. */
+  startGuideProfilePick: () => void;
+  /** Toggle a profile wire into/out of the (max 2) guide-profile selection. */
+  toggleGuideProfile:    (wireId: string) => void;
+  /** Enter draw mode (requires 2 profiles picked). */
+  startGuideDraw:        () => void;
+  /** Live snap target under the cursor (or null) while drawing. */
+  setGuideSnap:          (p: GuidePoint | null) => void;
+  /** Lock the next endpoint at `p` onto `wireId`; on the 2nd lock, seed handles. */
+  lockGuideEndpoint:     (p: GuidePoint, wireId: string | null) => void;
+  /** Move an interior Bezier control pole (index 1..len-2) — the slider hook. */
+  setGuideControlPoint:  (index: number, p: GuidePoint) => void;
+  /** Register a finished guide wire node id and clear the draft. */
+  commitGuide:           (guideId: string) => void;
+  /** Abort the in-progress draft (Esc). */
+  cancelGuideDraw:       () => void;
+  /** Select a completed guide for control-point editing (or null). */
+  selectGuide:           (guideId: string | null) => void;
+  /** Forget a completed guide (its node/shape removal is handled by removeNode). */
+  removeGuide:           (guideId: string) => void;
   setActiveWorkplane:    (wp: Workplane) => void;
   openPlaneSelector:     (pendingMode: InteractionMode) => void;
   closePlaneSelector:    () => void;
@@ -710,6 +762,11 @@ export const useCADStore = create<CADState>((set, get) => ({
   future:          [],
   interactionMode: 'SELECT',
   gizmoMode:       'translate',
+  guideProfiles:   [],
+  guideDraft:      null,
+  guideSnap:       null,
+  guideIds:        [],
+  selectedGuideId: null,
   measurements:    [],
   logs:            [makeLog('ToubkalCAD ready — WASM kernel loaded.', 'success')],
   isProcessing:       false,
@@ -754,6 +811,83 @@ export const useCADStore = create<CADState>((set, get) => ({
   setSelectedIds:        (ids)  => set({ selectedIds: ids }),
   setInteractionMode:    (mode) => set({ interactionMode: mode }),
   setGizmoMode:          (mode) => set({ gizmoMode: mode }),
+
+  // ─── Advanced Loft guide-curve actions ──────────────────────────────────
+  startGuideProfilePick: () => set({
+    interactionMode: 'GUIDE_PROFILE_PICK',
+    guideProfiles: [], guideDraft: null, guideSnap: null, selectedGuideId: null,
+  }),
+
+  toggleGuideProfile: (wireId) => set((s) => {
+    const has = s.guideProfiles.includes(wireId);
+    if (has) return { guideProfiles: s.guideProfiles.filter((id) => id !== wireId) };
+    // Keep at most 2 (FIFO): the guide bridges exactly two profiles.
+    const next = [...s.guideProfiles, wireId].slice(-2);
+    return { guideProfiles: next };
+  }),
+
+  startGuideDraw: () => set((s) => {
+    if (s.guideProfiles.length < 2) {
+      return { logs: [...s.logs, makeLog('Pick 2 profiles before drawing a guide.', 'warn')] };
+    }
+    return {
+      interactionMode: 'GUIDE_DRAW',
+      guideDraft: { points: [], startWireId: null, endWireId: null, lockedCount: 0 },
+      guideSnap: null,
+    };
+  }),
+
+  setGuideSnap: (p) => set({ guideSnap: p }),
+
+  lockGuideEndpoint: (p, wireId) => set((s) => {
+    const draft = s.guideDraft ?? { points: [], startWireId: null, endWireId: null, lockedCount: 0 };
+    if (draft.lockedCount === 0) {
+      return { guideDraft: { points: [p], startWireId: wireId, endWireId: null, lockedCount: 1 } };
+    }
+    if (draft.lockedCount === 1) {
+      // Second endpoint locked → seed a cubic with 2 interior handles at 1/3, 2/3
+      // along the chord so the user immediately has sliders to sculpt.
+      const a = draft.points[0];
+      const b = p;
+      const lerp = (t: number): GuidePoint => ({
+        x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t,
+      });
+      return {
+        guideDraft: {
+          points: [a, lerp(1 / 3), lerp(2 / 3), b],
+          startWireId: draft.startWireId, endWireId: wireId, lockedCount: 2,
+        },
+      };
+    }
+    return {};   // already complete; ignore further clicks
+  }),
+
+  setGuideControlPoint: (index, p) => set((s) => {
+    if (!s.guideDraft) return {};
+    const pts = s.guideDraft.points.slice();
+    // Endpoints stay locked to their profiles — only interior poles move.
+    if (index <= 0 || index >= pts.length - 1) return {};
+    pts[index] = p;
+    return { guideDraft: { ...s.guideDraft, points: pts } };
+  }),
+
+  commitGuide: (guideId) => set((s) => ({
+    guideIds: [...s.guideIds, guideId],
+    selectedGuideId: guideId,
+    guideDraft: null, guideSnap: null,
+    interactionMode: 'SELECT',
+  })),
+
+  cancelGuideDraw: () => set({
+    guideDraft: null, guideSnap: null, interactionMode: 'SELECT',
+  }),
+
+  selectGuide: (guideId) => set({ selectedGuideId: guideId }),
+
+  removeGuide: (guideId) => set((s) => ({
+    guideIds: s.guideIds.filter((id) => id !== guideId),
+    selectedGuideId: s.selectedGuideId === guideId ? null : s.selectedGuideId,
+  })),
   setSnapEnabled:        (v)    => set({ snapEnabled: v }),
   setSnapStep:           (v)    => set({ snapStep: v }),
   setSketchPolygonSides: (n)    => set({ sketchPolygonSides: n }),
@@ -1051,11 +1185,17 @@ export const useCADStore = create<CADState>((set, get) => ({
     get().log('New project.', 'info');
   },
 
-  saveProject: (name) => {
+  saveProject: async (name) => {
     const { nodes, rootIds } = get();
     const doc = ProjectFileService.build(nodes, rootIds, name);
-    ProjectFileService.download(doc);
-    get().log(`Project saved as "${doc.name}.tkcad".`, 'success');
+    const result = await ProjectFileService.save(doc);
+    if (result === 'cancelled') {
+      get().log('Save cancelled.', 'info');
+    } else if (result === 'downloaded') {
+      get().log(`Project downloaded as "${doc.name}.tkcad".`, 'success');
+    } else {
+      get().log(`Project saved as "${doc.name}.tkcad".`, 'success');
+    }
   },
 
   loadProject: (jsonString) => {

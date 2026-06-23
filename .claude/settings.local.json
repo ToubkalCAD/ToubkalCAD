@@ -68,7 +68,10 @@
       "Bash(echo \"TEST EXIT: $?\")",
       "Skill(run)",
       "Bash(rm -f /tmp/undo.mjs /tmp/reorder.mjs /tmp/shot-*.png /tmp/toubkal-dev.log)",
-      "Bash(curl -s -o /dev/null -w \"server: %{http_code}\\\\n\" http://localhost:8080)"
+      "Bash(curl -s -o /dev/null -w \"server: %{http_code}\\\\n\" http://localhost:8080)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8080/main.a6d4d671.css)",
+      "Bash(curl -s -o /dev/null -w \"port: %{http_code}\\\\n\" http://localhost:8080/)",
+      "Bash(curl -s http://localhost:8080/main.js)"
     ]
   }
 }

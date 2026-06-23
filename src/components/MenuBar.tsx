@@ -132,7 +132,7 @@ export const MenuBar: React.FC = () => {
       confirmLabel: 'Save',
     });
     if (name === null) return;                   // cancelled
-    useCADStore.getState().saveProject(name);
+    await useCADStore.getState().saveProject(name);
   }, []);
 
   const exportSTEP = useCallback(() => {

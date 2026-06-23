@@ -54,9 +54,14 @@ export const PropertiesTransformTab: React.FC = () => {
       }));
     };
 
-    fPos.addBinding(pos, 'x', { label: 'X', step: 0.1 }).on('change', applyAll);
-    fPos.addBinding(pos, 'y', { label: 'Y', step: 0.1 }).on('change', applyAll);
-    fPos.addBinding(pos, 'z', { label: 'Z', step: 0.1 }).on('change', applyAll);
+    // Give X/Y/Z a min/max so Tweakpane renders real sliders (track + handle),
+    // matching the Rotation sliders below. Range is centered on each axis's
+    // current value with generous ±travel so the handle sits mid-track wherever
+    // the object is; exact larger moves can still be made by dragging the gizmo.
+    const posRange = (v: number) => ({ min: v - 500, max: v + 500, step: 0.1 });
+    fPos.addBinding(pos, 'x', { label: 'X', ...posRange(pos.x) }).on('change', applyAll);
+    fPos.addBinding(pos, 'y', { label: 'Y', ...posRange(pos.y) }).on('change', applyAll);
+    fPos.addBinding(pos, 'z', { label: 'Z', ...posRange(pos.z) }).on('change', applyAll);
 
     // Rotation
     const rot = {

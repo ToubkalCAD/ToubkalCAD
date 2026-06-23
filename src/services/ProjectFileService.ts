@@ -41,14 +41,60 @@ export class ProjectFileService {
     };
   }
 
-  /** Trigger a browser download of `doc` as `<name>.tkcad`. */
-  static download(doc: TkcadDocument): void {
+  /** A safe `<name>.tkcad` filename derived from the document name. */
+  private static fileName(doc: TkcadDocument): string {
     const safe = doc.name.replace(/[^\w.-]+/g, '_') || 'project';
+    return `${safe}.tkcad`;
+  }
+
+  /**
+   * Save `doc` to disk. Prefers the File System Access API
+   * (`window.showSaveFilePicker`) so the user gets a real "Save As" dialog and
+   * can overwrite a chosen file in place; falls back to a classic browser
+   * download (→ the browser's default download folder) when the API is
+   * unavailable or the write fails for a non-cancel reason.
+   *
+   * Resolves with how it went:
+   *   - 'saved'      → written via the picker to a user-chosen location
+   *   - 'downloaded' → written via the download fallback
+   *   - 'cancelled'  → user dismissed the save dialog (nothing written)
+   */
+  static async save(doc: TkcadDocument): Promise<'saved' | 'downloaded' | 'cancelled'> {
+    const json   = JSON.stringify(doc, null, 2);
+    const picker = (window as any).showSaveFilePicker;
+
+    if (typeof picker === 'function') {
+      try {
+        const handle = await picker.call(window, {
+          suggestedName: ProjectFileService.fileName(doc),
+          types: [{
+            description: 'ToubkalCAD Project',
+            accept: { 'application/json': ['.tkcad'] },
+          }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(json);
+        await writable.close();
+        return 'saved';
+      } catch (err: any) {
+        // The user dismissing the dialog throws AbortError — don't fall back,
+        // that would surprise them with an unwanted download. Any other error
+        // (permission denied, opaque origin, etc.) → fall through to download.
+        if (err && err.name === 'AbortError') return 'cancelled';
+      }
+    }
+
+    ProjectFileService.download(doc);
+    return 'downloaded';
+  }
+
+  /** Trigger a browser download of `doc` as `<name>.tkcad` (fallback path). */
+  static download(doc: TkcadDocument): void {
     const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url;
-    a.download = `${safe}.tkcad`;
+    a.download = ProjectFileService.fileName(doc);
     a.click();
     URL.revokeObjectURL(url);
   }
