@@ -139,6 +139,8 @@ export type InteractionMode =
   | 'EDIT_EXTEND'    // S1 — extend a sketch line to the nearest boundary
   | 'EDIT_SPLIT'     // S1 — break a sketch line at its intersections
   | 'EDIT_POWER_TRIM' // power-trim — drag a stroke; every crossed curve is trimmed at the crossing
+  | 'EDIT_FILLET'    // S1 — round a sketch corner (pick the vertex where two lines meet)
+  | 'EDIT_CHAMFER'   // S1 — bevel a sketch corner (equal-distance, pick the vertex)
   | 'ASSEMBLY_MATE'   // pick a reference face then a face on another solid → mate them (one-shot)
   | 'ASSEMBLY_ALIGN'  // like mate but faces parallel (same direction) with an offset
   | 'ASSEMBLY_CONCENTRIC' // pick two cylindrical faces → align their axes (peg-in-hole)
@@ -394,6 +396,18 @@ interface CADState {
   /** Add several nodes (e.g. a decomposed rectangle's edges) + optional auto-
    *  constraints on a sketch container, as ONE undo step. */
   addSketchEntities:  (nodeList: Omit<CADNode, 'children'>[], sketchId: string | null, autoConstraints?: SketchConstraint[], label?: string) => void;
+  /** Commit a sketch corner fillet/chamfer as ONE undoable action: in-place geom
+   *  edits (shortened lines), added nodes (the arc/bevel connector), removed nodes
+   *  (an exploded polyline) and the sketch's full new constraint list — all in a
+   *  single history entry. The caller updates the OCC registry + wire visuals
+   *  imperatively; undo/redo rebuild them from restored sketchGeom. */
+  applySketchCornerEdit: (opts: {
+    description: string; sketchId: string;
+    geomUpdates?: { id: string; sketchGeom: any }[];
+    addNodes?: Omit<CADNode, 'children'>[];
+    removeIds?: string[];
+    constraints: SketchConstraint[];
+  }) => void;
   /** Create a reference (datum) plane node from a workplane. Returns its id. */
   createDatumPlane:   (wp: Workplane, method?: string, refs?: any[]) => string;
   /** Create a reference (datum) axis node from an origin + unit direction (D7). */
@@ -1307,6 +1321,41 @@ export const useCADStore = create<CADState>((set, get) => ({
     const action = makeAction('ADD', `Add "${name}"`, Object.values(nodes), Object.values(updated), rootIds, updatedRootIds);
     set({ nodes: updated, rootIds: updatedRootIds, past: pushPast(get().past, action), future: [] });
     get().log(`Created: ${name} (${nodeList.length} edges)`, 'success');
+  },
+
+  applySketchCornerEdit: ({ description, sketchId, geomUpdates = [], addNodes = [], removeIds = [], constraints }) => {
+    const { nodes, rootIds } = get();
+    const before = Object.values(nodes);
+    const updated: Record<string, CADNode> = { ...nodes };
+
+    // In-place geometry edits (shortened lines keep their id → their other
+    // constraints survive; the diff still captures the geom change for undo).
+    for (const u of geomUpdates) {
+      if (updated[u.id]) updated[u.id] = { ...updated[u.id], params: { ...updated[u.id].params, sketchGeom: u.sketchGeom } };
+    }
+    // Remove nodes (e.g. the exploded polyline) and detach from their parent.
+    for (const rid of removeIds) {
+      const n = updated[rid];
+      if (!n) continue;
+      if (n.parentId && updated[n.parentId]) {
+        updated[n.parentId] = { ...updated[n.parentId], children: updated[n.parentId].children.filter((c) => c !== rid) };
+      }
+      delete updated[rid];
+    }
+    // Add new nodes under their (sketch) parent.
+    for (const nd of addNodes) updated[nd.id] = { ...nd, children: [], material: normalizeMaterial(nd.material) };
+    for (const nd of addNodes) {
+      if (nd.parentId && updated[nd.parentId]) {
+        updated[nd.parentId] = { ...updated[nd.parentId], children: [...updated[nd.parentId].children, nd.id] };
+      }
+    }
+    // Replace the sketch's constraint list wholesale.
+    if (updated[sketchId]) {
+      updated[sketchId] = { ...updated[sketchId], params: { ...updated[sketchId].params, constraints } };
+    }
+
+    const action = makeAction('ADD', description, before, Object.values(updated), rootIds, rootIds);
+    set({ nodes: updated, past: pushPast(get().past, action), future: [] });
   },
 
   createDatumPlane: (wp, method = 'custom', refs = []) => {

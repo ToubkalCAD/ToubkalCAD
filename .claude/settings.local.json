@@ -82,7 +82,12 @@
       "Bash(timeout 90 bash -c 'until curl -sf http://localhost:8080 >/dev/null; do sleep 1; done')",
       "Bash(pkill -f 'rspack serve')",
       "Bash(rm -f /tmp/crop.mjs)",
-      "Bash(timeout 120 bash -c 'until curl -sf http://localhost:8080 >/dev/null; do sleep 1; done')"
+      "Bash(timeout 120 bash -c 'until curl -sf http://localhost:8080 >/dev/null; do sleep 1; done')",
+      "Bash(awk '/class BRepFilletAPI_MakeFillet2d/,/^  };/' node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(grep -nA4 \"class TopTools_ListOfShape \" node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(awk '/^export declare class TopoDS_Shape /{f=1} f{print NR\": \"$0} /^}/{if\\(f\\)exit}' node_modules/opencascade.js/dist/opencascade.full.d.ts)",
+      "Bash(pkill -9 -f 'npm run dev')",
+      "Bash(pkill -9 -f rspack)"
     ]
   }
 }

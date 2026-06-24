@@ -17,6 +17,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS, InteractionMode, STANDARD_WORKPLANES, DATUM_TYPES } from '../store/cadStore';
 import { Icon, IconName }            from './Icon';
 import { showParamModal }           from './ParameterModal';
+import { setSketchCornerValue }     from '../hooks/useCADSketchCorner';
 import { OccPrimitivesService }     from '../services/OccPrimitivesService';
 import { OccExchangeService }       from '../services/OccExchangeService';
 import { OccRevolutionService }     from '../services/OccRevolutionService';
@@ -73,7 +74,7 @@ const RIBBON_TABS: RibbonTab[] = [
     { kind:'menu', id:'m-curves', label:'Curves',       icon:'spline',  ids:['ellipse','bezier','spline'] },
     { kind:'menu', id:'m-shapes', label:'Shapes',       icon:'polygon', ids:['roundrect','polygon'] },
     '|',
-    { kind:'menu', id:'m-sedit',  label:'Edit',         icon:'trim',    ids:['trim','extend','split','powertrim'] },
+    { kind:'menu', id:'m-sedit',  label:'Edit',         icon:'trim',    ids:['trim','extend','split','powertrim','sfillet','schamfer'] },
     'region',
     '|',
     { kind:'menu', id:'m-splane', label:'Sketch Plane', icon:'plane',   ids:['sketch-face','sketch-datum'] },
@@ -508,6 +509,28 @@ export const Ribbon: React.FC = () => {
     if (!id) { log('Open or select a sketch to trim/extend/split its lines.', 'warn'); return; }
     st.resumeSketchSession(id);
     setMode(m);
+  };
+
+  // ─── Sketch corner fillet / chamfer (S1) ─────────────────────────────────────
+  // Prompts for the radius/distance, stores it for the corner tool, then enters
+  // the pick mode (resuming the sketch session if one is merely selected).
+  const startCorner = async (op: 'fillet' | 'chamfer') => {
+    const st = useCADStore.getState();
+    let sketchId = st.sketchSession?.id ?? null;
+    if (!sketchId) {
+      const id = constrainTargetId();
+      if (!id) { log(`Open or select a sketch to ${op} its corners.`, 'warn'); return; }
+      st.resumeSketchSession(id);
+      sketchId = id;
+    }
+    const v = await showParamModal(
+      op === 'fillet' ? 'Sketch Fillet' : 'Sketch Chamfer',
+      [{ key: 'value', label: op === 'fillet' ? 'Radius' : 'Distance', default: 2, min: 0.001, step: 0.5, unit: 'mm' }],
+      'Apply',
+    );
+    if (!v) return;                       // cancelled
+    setSketchCornerValue(v.value);
+    setMode(op === 'fillet' ? 'EDIT_FILLET' : 'EDIT_CHAMFER');
   };
 
   // ─── Auto-region close — detect closed loops → extrudable profile(s) ──────────
@@ -1085,6 +1108,8 @@ export const Ribbon: React.FC = () => {
     extend:    { id:'extend', icon:'extend', label:'Extend', run:() => startEdit('EDIT_EXTEND'), active: mode==='EDIT_EXTEND', enabled:canConstrain, accent:'#cc6633' },
     split:     { id:'split',  icon:'split',  label:'Split',  run:() => startEdit('EDIT_SPLIT'),  active: mode==='EDIT_SPLIT',  enabled:canConstrain, accent:'#cc6633' },
     powertrim: { id:'powertrim', icon:'powertrim', label:'Power Trim', run:() => startEdit('EDIT_POWER_TRIM'), active: mode==='EDIT_POWER_TRIM', enabled:canConstrain, accent:'#cc6633' },
+    sfillet:   { id:'sfillet',  icon:'fillet',  label:'Fillet',  run:() => { void startCorner('fillet'); },  active: mode==='EDIT_FILLET',  enabled:canConstrain, accent:'#cc6633' },
+    schamfer:  { id:'schamfer', icon:'chamfer', label:'Chamfer', run:() => { void startCorner('chamfer'); }, active: mode==='EDIT_CHAMFER', enabled:canConstrain, accent:'#cc6633' },
     region:    { id:'region', icon:'region', label:'Region', run:closeRegions, enabled:canConstrain, accent:'#33aa77' },
     'sketch-face':{id:'sketch-face',icon:'plane',label:'On Face', run:sketchOnFace, active: mode==='FACE_SKETCH', enabled:hasAnySolid && !sketchSession, accent:SK },
     'sketch-datum':{id:'sketch-datum',icon:'plane',label:'On Datum', run:sketchOnDatum, active: mode==='DATUM_SKETCH', enabled:!sketchSession, accent:SK },

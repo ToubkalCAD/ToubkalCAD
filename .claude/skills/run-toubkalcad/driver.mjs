@@ -82,6 +82,30 @@ async function run(line) {
       await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
       await page.waitForTimeout(500);
       console.log('hover', arg); break; }
+    case 'move': {                                   // move <x> <y>  — real pointer move to page coords
+      const [x, y] = arg.split(/\s+/).map(Number);
+      await page.mouse.move(x, y, { steps: 5 });
+      await page.waitForTimeout(150);
+      console.log('move', x, y); break; }
+    case 'press':                                    // press <key>  — keyboard press (e.g. Escape)
+      await page.keyboard.press(arg); await page.waitForTimeout(150); console.log('press', arg); break;
+    case 'down':
+      await page.mouse.down(); await page.waitForTimeout(60); console.log('down'); break;
+    case 'up':
+      await page.mouse.up(); await page.waitForTimeout(60); console.log('up'); break;
+    case 'mclick': {                                 // mclick <x> <y>  — move + click at page coords
+      const [x, y] = arg.split(/\s+/).map(Number);
+      await page.mouse.move(x, y, { steps: 5 });
+      await page.waitForTimeout(80);
+      await page.mouse.down(); await page.waitForTimeout(60); await page.mouse.up();
+      await page.waitForTimeout(250);
+      console.log('mclick', x, y); break; }
+    case 'fill': {                                   // fill <selector> <value>  — type into an input (value = last token, React-safe)
+      const fsp = arg.lastIndexOf(' ');
+      const sel = arg.slice(0, fsp), val = arg.slice(fsp + 1);
+      await page.fill(sel, val);
+      await page.waitForTimeout(120);
+      console.log('fill', sel, val); break; }
     case 'shot': {
       const [name, h] = arg.split(/\s+/);
       const opts = { path: `${OUT}/${name}.png`, timeout: SHOT_MS, animations: 'disabled' };

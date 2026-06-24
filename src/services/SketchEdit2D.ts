@@ -500,3 +500,97 @@ export function extendArc(arc: Arc2D, cutters: Entity2D[], end: 'a' | 'b'): Arc2
     return { c: arc.c, r: arc.r, a1: ahead[0], a2: arc.a2 };
   }
 }
+
+// ─── Corner fillet / chamfer (two straight segments sharing a vertex) ──────────
+
+const VERT_EPS = 1e-6;   // two endpoints closer than this share a corner
+
+/** Unit vector p→q, or null if degenerate. */
+const unit = (p: Pt, q: Pt): Pt | null => {
+  const d = sub(q, p);
+  const L = Math.hypot(d[0], d[1]);
+  return L < EPS ? null : [d[0] / L, d[1] / L];
+};
+
+/**
+ * Resolve the corner two line segments form: the shared vertex V, each
+ * segment's far endpoint, the unit directions V→far, and the lengths.
+ * Returns null if the segments don't share an endpoint (within VERT_EPS).
+ */
+function resolveCorner(l1: Line2D, l2: Line2D):
+  | { V: Pt; far1: Pt; far2: Pt; d1: Pt; d2: Pt; len1: number; len2: number; theta: number }
+  | null {
+  const near = (p: Pt, q: Pt) => Math.hypot(p[0] - q[0], p[1] - q[1]) <= VERT_EPS;
+  let V: Pt | null = null, far1: Pt | null = null, far2: Pt | null = null;
+  if      (near(l1.a, l2.a)) { V = l1.a; far1 = l1.b; far2 = l2.b; }
+  else if (near(l1.a, l2.b)) { V = l1.a; far1 = l1.b; far2 = l2.a; }
+  else if (near(l1.b, l2.a)) { V = l1.b; far1 = l1.a; far2 = l2.b; }
+  else if (near(l1.b, l2.b)) { V = l1.b; far1 = l1.a; far2 = l2.a; }
+  if (!V || !far1 || !far2) return null;
+
+  const d1 = unit(V, far1), d2 = unit(V, far2);
+  if (!d1 || !d2) return null;
+  const len1 = Math.hypot(far1[0] - V[0], far1[1] - V[1]);
+  const len2 = Math.hypot(far2[0] - V[0], far2[1] - V[1]);
+  const theta = Math.acos(Math.max(-1, Math.min(1, dot(d1, d2))));   // included angle ∈ (0,π)
+  return { V, far1, far2, d1, d2, len1, len2, theta };
+}
+
+/**
+ * Round the corner two segments form with an arc of the given radius. Returns
+ * the two shortened segments plus the tangent fillet arc, or null when the
+ * radius can't fit (segments too short, or collinear/degenerate corner).
+ */
+export function filletCorner(l1: Line2D, l2: Line2D, radius: number):
+  | { lines: [Line2D, Line2D]; arc: Arc2D } | null {
+  if (radius <= EPS) return null;
+  const c = resolveCorner(l1, l2);
+  if (!c) return null;
+  const { V, far1, far2, d1, d2, len1, len2, theta } = c;
+  if (theta < 1e-3 || theta > Math.PI - 1e-3) return null;   // collinear → no corner
+
+  const half = theta / 2;
+  const setback    = radius / Math.tan(half);   // V→tangent-point distance along each edge
+  const centreDist = radius / Math.sin(half);   // V→arc-centre distance along the bisector
+  if (setback > len1 - EPS || setback > len2 - EPS) return null;   // radius too large
+
+  const T1: Pt = add(V, scale(d1, setback));
+  const T2: Pt = add(V, scale(d2, setback));
+  const bis = unit([0, 0], add(d1, d2));        // interior bisector direction
+  if (!bis) return null;
+  const C: Pt = add(V, scale(bis, centreDist));
+
+  // Emit the arc CCW with a2 > a1 and span < π (the fillet is always the minor
+  // arc: included angle = π−θ). createArcEdge re-derives a CCW arc from the
+  // endpoints, so the start (point @ a1) must be whichever tangent point makes
+  // the CCW sweep the short way — else OCC would draw the major arc.
+  const angT1 = angleOf(C, T1), angT2 = angleOf(C, T2);
+  const ccw = ((angT2 - angT1) % TWO_PI + TWO_PI) % TWO_PI;   // CCW span T1→T2
+  const arc: Arc2D = ccw <= Math.PI
+    ? { c: C, r: radius, a1: angT1, a2: angT1 + ccw }                 // start = T1
+    : { c: C, r: radius, a1: angT2, a2: angT2 + (TWO_PI - ccw) };     // start = T2
+
+  return { lines: [{ a: far1, b: T1 }, { a: T2, b: far2 }], arc };
+}
+
+/**
+ * Equal-distance bevel of the corner two segments form. Returns the two
+ * shortened segments plus the connecting chamfer line, or null when the
+ * distance can't fit (segments too short, or collinear/degenerate corner).
+ */
+export function chamferCorner(l1: Line2D, l2: Line2D, dist: number):
+  | { lines: [Line2D, Line2D]; chamfer: Line2D } | null {
+  if (dist <= EPS) return null;
+  const c = resolveCorner(l1, l2);
+  if (!c) return null;
+  const { V, far1, far2, d1, d2, len1, len2, theta } = c;
+  if (theta < 1e-3 || theta > Math.PI - 1e-3) return null;
+  if (dist > len1 - EPS || dist > len2 - EPS) return null;   // distance too large
+
+  const T1: Pt = add(V, scale(d1, dist));
+  const T2: Pt = add(V, scale(d2, dist));
+  return {
+    lines:   [{ a: far1, b: T1 }, { a: T2, b: far2 }],
+    chamfer: { a: T1, b: T2 },
+  };
+}

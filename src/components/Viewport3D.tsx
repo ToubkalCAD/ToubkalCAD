@@ -24,6 +24,7 @@ import { useCADBooleanPick }   from '../hooks/useCADBooleanPick';
 import { useCADConstraintPick } from '../hooks/useCADConstraintPick';
 import { useCADSketchFacePick } from '../hooks/useCADSketchFacePick';
 import { useCADSketchEdit }     from '../hooks/useCADSketchEdit';
+import { useCADSketchCorner }   from '../hooks/useCADSketchCorner';
 import { useCADGuideDraw }      from '../hooks/useCADGuideDraw';
 import { useCADAssemblyMate }   from '../hooks/useCADAssemblyMate';
 import { useCADAssemblyConcentric } from '../hooks/useCADAssemblyConcentric';
@@ -265,6 +266,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── Sketch-edit hook (EDIT_TRIM/EXTEND/SPLIT — 2D line editing, S1) ──────────
   useCADSketchEdit(containerRef, sceneRef, cameraRef);
+
+  // ─── Sketch-corner hook (EDIT_FILLET/EDIT_CHAMFER — round/bevel a corner) ─────
+  useCADSketchCorner(containerRef, sceneRef, cameraRef);
 
   // ─── Assembly hooks (ASSEMBLY_MATE/ALIGN — faces; ASSEMBLY_CONCENTRIC — axes) ──
   useCADAssemblyMate(containerRef, sceneRef, cameraRef);
