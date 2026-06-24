@@ -16,15 +16,14 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useCADStore } from '../store/cadStore';
 import type { SketchConstraint, SketchConstraintType, SketchRef } from '../store/cadStore';
-import { propagateFromStore }  from '../services/RecomputeEngine.live';
 import {
   canApply, constraintBlocked, computeDoF,
   CONSTRAINT_META, GEOMETRIC_TYPES, DIMENSIONAL_TYPES,
 } from '../services/SketchConstraintSolver';
 import type { EntityGeom } from '../services/SketchConstraintSolver';
-import { getSolver } from '../services/solver';
-import { datumGeoms, datumFixedConstraints, datumLabel, isDatumId } from '../services/SketchDatums';
-import { collectSolverGeoms, constructionFixedConstraints, rebuildSketchEntity, geomKey } from '../services/SketchSolveBridge';
+import { datumGeoms, datumLabel, isDatumId } from '../services/SketchDatums';
+import { collectSolverGeoms } from '../services/SketchSolveBridge';
+import { applySketchConstraints } from '../services/SketchSolve';
 import { useDragPanel } from '../hooks/useDragPanel';
 
 const ACCENT = '#1d9e74';
@@ -118,8 +117,6 @@ function distanceSeed(refs: SketchRef[], geoms: EntityGeom[]): number {
   return (p1 && p2) ? Math.hypot(p1[0] - p2[0], p1[1] - p2[1]) : 10;
 }
 
-const rebuildEntity = rebuildSketchEntity;
-
 /** Stable signature of a constraint set (by id) — for external-change detection. */
 const conSig = (cs: SketchConstraint[]): string => cs.map((c) => c.id).sort().join(',');
 
@@ -141,6 +138,9 @@ export const ConstraintPanel: React.FC = () => {
   const status        = useCADStore((s) => s.constraintStatus);
   const closePanel    = useCADStore((s) => s.closeConstraintPanel);
   const clearSel      = useCADStore((s) => s.clearConstraintSel);
+  const hoveredCon    = useCADStore((s) => s.hoveredConstraintId);
+  const setHoveredCon = useCADStore((s) => s.setHoveredConstraint);
+  const rowRefs       = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const sketchId = constraintReq?.sketchId ?? null;
   const sketch   = sketchId ? nodes[sketchId] : null;
@@ -185,33 +185,15 @@ export const ConstraintPanel: React.FC = () => {
   };
 
   // ─── Solve + rebuild ─────────────────────────────────────────────────────────
+  // Delegates to the shared applySketchConstraints (the one solve/rebuild/propagate
+  // path also used by the Smart Dimension tool + the inline label editor). We only
+  // add the panel-specific bookkeeping: mark this as our own store write (so the
+  // external-removal resync ignores it) and surface the result message.
   const solveAndApply = useCallback((next: SketchConstraint[]) => {
     if (!sketchId) return;
-    const before = collectGeoms(sketchId);
-    if (!before.length) { setMsg('No constrainable Line/Circle entities yet.'); return; }
-    const beforeKey = new Map(before.map((g) => [g.id, geomKey(g)]));
-    try {
-      // Inject the fixed Origin/axis datums so constraints can pin to them; they
-      // carry equal vars + FIXED so they add no DoF and are never rebuilt.
-      const res = getSolver().solve([...before, ...datumGeoms()], [...next, ...datumFixedConstraints(), ...constructionFixedConstraints(sketchId)]);
-      let rebuilt = 0;
-      const changed: string[] = [];
-      for (const g of Object.values(res.geoms)) {
-        if (isDatumId(g.id)) continue;
-        if (beforeKey.get(g.id) !== geomKey(g)) { rebuildEntity(g.id, g); changed.push(g.id); rebuilt++; }
-      }
-      appliedSigRef.current = conSig(next);   // mark as our own write (see resync effect)
-      useCADStore.getState().setNodeParams(sketchId, { constraints: next });
-      // Propagate the moved sketch geometry to every dependent op (the region
-      // wire, the extrude/revolve/… built on it, and anything stacked above).
-      if (changed.length) propagateFromStore(changed);
-      publishStatus(next, res.residual, res.converged);
-      setMsg(res.converged
-        ? `Solved · ${rebuilt} updated`
-        : `⚠ Could not satisfy all — residual ${res.residual.toFixed(3)}`);
-    } catch (e: any) {
-      setMsg(`Solve failed: ${e?.message ?? e}`);
-    }
+    appliedSigRef.current = conSig(next);   // mark as our own write (see resync effect) BEFORE the store write
+    const res = applySketchConstraints(sketchId, next);
+    setMsg(res.message);
   }, [sketchId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // External-removal resync: when a sketch entity is deleted, the store strips
@@ -310,6 +292,11 @@ export const ConstraintPanel: React.FC = () => {
   }, [constraintReq]);
 
   doCloseRef.current = () => { clearSel(); closePanel(); };
+
+  // Cross-highlight: when a canvas annotation is hovered, scroll its row into view.
+  useEffect(() => {
+    if (hoveredCon) rowRefs.current.get(hoveredCon)?.scrollIntoView({ block: 'nearest' });
+  }, [hoveredCon]);
 
   if (!constraintReq || !sketch) return null;
 
@@ -429,10 +416,16 @@ export const ConstraintPanel: React.FC = () => {
           <div style={{ maxHeight: 150, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
             {constraints.map((c) => {
               const meta = CONSTRAINT_META[c.type];
+              const lit = hoveredCon === c.id;
               return (
-                <div key={c.id} style={{
-                  display: 'flex', alignItems: 'center', gap: 6, background: 'var(--surface-3)',
-                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', padding: '3px 7px',
+                <div key={c.id}
+                  ref={(n) => { if (n) rowRefs.current.set(c.id, n); else rowRefs.current.delete(c.id); }}
+                  onMouseEnter={() => setHoveredCon(c.id)}
+                  onMouseLeave={() => setHoveredCon(null)}
+                  style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  background: lit ? 'rgba(255,208,0,0.16)' : 'var(--surface-3)',
+                  border: `1px solid ${lit ? '#ffd000' : 'var(--border)'}`, borderRadius: 'var(--radius-sm)', padding: '3px 7px',
                 }}>
                   <span style={{ fontSize: 12, width: 16, textAlign: 'center', color: ACCENT }}>{meta.glyph}</span>
                   <span style={{ fontSize: 10, color: 'var(--text-primary)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

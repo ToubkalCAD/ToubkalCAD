@@ -134,6 +134,7 @@ export type InteractionMode =
   | 'BLEND_EDGE'
   | 'BOOLEAN_PICK'
   | 'CONSTRAIN'
+  | 'DIMENSION'     // Smart Dimension — click entities to add a driving dimension + its annotation
   | 'FACE_SKETCH'    // picking a planar face to start a sketch on it (S2)
   | 'EDIT_TRIM'      // S1 — trim a sketch line at its intersections
   | 'EDIT_EXTEND'    // S1 — extend a sketch line to the nearest boundary
@@ -188,7 +189,10 @@ export type SketchConstraintType =
   | 'COLLINEAR'  | 'TANGENT'  | 'CONCENTRIC' | 'EQUAL'
   | 'COINCIDENT' | 'SYMMETRY' | 'FIXED'
   // Dimensional (driving)
-  | 'LENGTH' | 'RADIUS' | 'DISTANCE' | 'ANGLE';
+  | 'LENGTH' | 'RADIUS' | 'DISTANCE' | 'ANGLE'
+  // Directional point↔point distance: ΔX (horizontal) / ΔY (vertical), in sketch-
+  // plane local coords. Created by Smart Dimension based on cursor direction.
+  | 'DISTANCE_X' | 'DISTANCE_Y';
 
 /** A constraint operand: a whole entity (line/circle) or one of its points. */
 export interface SketchRef {
@@ -210,6 +214,39 @@ export interface SketchConstraint {
 
 export const sketchRefEq = (a: SketchRef, b: SketchRef) =>
   a.kind === b.kind && a.id === b.id && a.pt === b.pt;
+
+// ─── Dimension annotations (Phase 8 — visual driving-dimension overlay) ─────────
+//
+// A dimension annotation is the *visual* face of a dimensional SketchConstraint
+// (LENGTH / RADIUS / DISTANCE / ANGLE): extension lines, a dimension line with
+// arrowheads, and an editable value label, drawn on the sketch plane in 3D.
+//
+// IMPORTANT — single source of truth: the annotation does NOT own the numeric
+// value. The owning `SketchConstraint.value` is authoritative; the renderer reads
+// it live (post-solve) via the constraint id. The annotation persists only the
+// *presentation*: where the user dragged the dimension line (`offset`, in
+// workplane-local units, measured from the dimension's natural anchor) and a
+// per-dimension hide flag. This mirrors how `params.constraints` already work and
+// avoids the value-drift that a denormalised copy would invite.
+//
+// Annotations live on the sketch container node at `params.dimensions`.
+export type DimensionType = 'LENGTH' | 'RADIUS' | 'DISTANCE' | 'ANGLE' | 'DISTANCE_X' | 'DISTANCE_Y';
+
+export interface DimensionAnnotation {
+  id:           string;
+  /** The driving SketchConstraint this dimension visualises (value + refs live there). */
+  constraintId: string;
+  type:         DimensionType;
+  /** Mirror of the constraint operands — kept so the renderer can resolve geometry
+   *  without re-reading the constraint list (it still reads `value` from the constraint). */
+  refs:         SketchRef[];
+  /** Workplane-local placement of the dimension line/label, relative to the
+   *  dimension's natural anchor (segment midpoint / line foot / angle vertex /
+   *  circle centre). Lets the user drag the dimension clear of the geometry. */
+  offset:       { u: number; v: number };
+  /** Per-dimension hide, independent of the global `dimensionsVisible` toggle. */
+  hidden?:      boolean;
+}
 
 // ─── Live sketch dragging (soft-constraint) ────────────────────────────────────
 // The store owns only the drag STATE + the start/update/stop actions; the actual
@@ -549,6 +586,21 @@ interface CADState {
   /** Publish the latest solve status (drives DoF readout + colour-coding). */
   setConstraintStatus:  (s: CADState['constraintStatus']) => void;
 
+  // ── Dimension annotations (visual driving-dimensions) ─────────────────────────
+  /** Global show/hide for every dimension annotation (declutter toggle). */
+  dimensionsVisible: boolean;
+  /** Constraint id currently hovered (in the panel OR on the canvas) → cross-highlight. */
+  hoveredConstraintId: string | null;
+  setDimensionsVisible:   (v: boolean) => void;
+  toggleDimensionsVisible: () => void;
+  setHoveredConstraint:   (id: string | null) => void;
+  /** Add or replace a dimension annotation on a sketch (by id). */
+  upsertDimension:        (sketchId: string, dim: DimensionAnnotation) => void;
+  /** Drag-reposition a dimension's label/line (workplane-local offset). */
+  setDimensionOffset:     (sketchId: string, dimId: string, offset: { u: number; v: number }) => void;
+  /** Remove a dimension annotation (does NOT remove its driving constraint). */
+  removeDimension:        (sketchId: string, dimId: string) => void;
+
   /** Live sketch-drag state — non-null only while a point/entity is being dragged. */
   dragState: SketchDragState | null;
   /** Begin dragging `origin` (a point operand or entity body); `grabLocal` is the
@@ -821,6 +873,8 @@ export const useCADStore = create<CADState>((set, get) => ({
   constraintReq:       null,
   constraintSel:       [],
   constraintStatus:    null,
+  dimensionsVisible:   true,
+  hoveredConstraintId: null,
   dragState:           null,
   activeComponentId:   null,
 
@@ -1066,6 +1120,32 @@ export const useCADStore = create<CADState>((set, get) => ({
   })),
   clearConstraintSel: () => set({ constraintSel: [] }),
   setConstraintStatus: (st) => set({ constraintStatus: st }),
+
+  // ── Dimension annotations ─────────────────────────────────────────────────────
+  setDimensionsVisible:    (v) => set({ dimensionsVisible: v }),
+  toggleDimensionsVisible: () => set((s) => ({ dimensionsVisible: !s.dimensionsVisible })),
+  setHoveredConstraint:    (id) => set((s) => (s.hoveredConstraintId === id ? s : { hoveredConstraintId: id })),
+  upsertDimension: (sketchId, dim) => {
+    const node = get().nodes[sketchId];
+    if (!node) return;
+    const cur = (node.params?.dimensions as DimensionAnnotation[] | undefined) ?? [];
+    const next = cur.some((d) => d.id === dim.id)
+      ? cur.map((d) => (d.id === dim.id ? dim : d))
+      : [...cur, dim];
+    get().setNodeParams(sketchId, { dimensions: next });
+  },
+  setDimensionOffset: (sketchId, dimId, offset) => {
+    const node = get().nodes[sketchId];
+    if (!node) return;
+    const cur = (node.params?.dimensions as DimensionAnnotation[] | undefined) ?? [];
+    get().setNodeParams(sketchId, { dimensions: cur.map((d) => (d.id === dimId ? { ...d, offset } : d)) });
+  },
+  removeDimension: (sketchId, dimId) => {
+    const node = get().nodes[sketchId];
+    if (!node) return;
+    const cur = (node.params?.dimensions as DimensionAnnotation[] | undefined) ?? [];
+    get().setNodeParams(sketchId, { dimensions: cur.filter((d) => d.id !== dimId) });
+  },
 
   // ── Live sketch dragging (soft-constraint) ───────────────────────────────────
   startDragging: (origin, grabLocal) => {

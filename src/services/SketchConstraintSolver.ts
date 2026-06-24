@@ -276,6 +276,13 @@ function residuals(
         if (pl && L) R.push(Math.abs(perpDist(pl[0], pl[1], L)) - c.value);
         break;
       }
+      case 'DISTANCE_X':
+      case 'DISTANCE_Y': {
+        if (c.value == null) break;
+        const p1 = P(c.refs[0]), p2 = P(c.refs[1]);
+        if (p1 && p2) R.push(Math.abs(c.type === 'DISTANCE_X' ? p2[0] - p1[0] : p2[1] - p1[1]) - c.value);
+        break;
+      }
       case 'ANGLE': {
         const L1 = lineCoords(x, blocks, e0), L2 = lineCoords(x, blocks, e1);
         if (L1 && L2 && c.value != null) {
@@ -401,7 +408,7 @@ export function solveConstraints(geomsIn: EntityGeom[], constraints: SketchConst
   for (const g of geoms) if (g.kind === 'line') rigidLines.add(g.id);
   for (const c of constraints) {
     if (c.type === 'LENGTH' && c.refs[0]) rigidLines.delete(c.refs[0].id);
-    if (c.type === 'DISTANCE' && c.refs.length === 2
+    if ((c.type === 'DISTANCE' || c.type === 'DISTANCE_X' || c.type === 'DISTANCE_Y') && c.refs.length === 2
         && c.refs[0].kind === 'point' && c.refs[1].kind === 'point'
         && c.refs[0].id === c.refs[1].id) {
       rigidLines.delete(c.refs[0].id);
@@ -570,6 +577,10 @@ export const CONSTRAINT_META: Record<SketchConstraintType, ConstraintMeta> = {
   RADIUS:        { label: 'Radius',        glyph: 'R', group: 'dimensional', hasValue: true,  sigs: [['circle']], eqs: 1 },
   DISTANCE:      { label: 'Distance',      glyph: '↔', group: 'dimensional', hasValue: true,  sigs: [['point', 'point'], ['point', 'line'], ['line', 'point'], ['line', 'line']], eqs: 1 },
   ANGLE:         { label: 'Angle',         glyph: '∠', group: 'dimensional', hasValue: true,  sigs: [['line', 'line']], eqs: 1 },
+  // Directional point↔point distances (ΔX / ΔY). Tool-created (cursor direction),
+  // not offered as panel buttons, but they still carry a driving value + 1 equation.
+  DISTANCE_X:    { label: 'Horizontal Dist', glyph: '↔', group: 'dimensional', hasValue: true, sigs: [['point', 'point'], ['circle', 'circle'], ['point', 'circle'], ['circle', 'point']], eqs: 1 },
+  DISTANCE_Y:    { label: 'Vertical Dist',   glyph: '↕', group: 'dimensional', hasValue: true, sigs: [['point', 'point'], ['circle', 'circle'], ['point', 'circle'], ['circle', 'point']], eqs: 1 },
 };
 
 export const GEOMETRIC_TYPES: SketchConstraintType[] = [

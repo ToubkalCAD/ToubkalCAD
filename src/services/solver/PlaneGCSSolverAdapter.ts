@@ -280,6 +280,17 @@ function emitConstraint(prims: (SketchPrimitive | SketchParam)[], c: SketchConst
       if (a && b) push({ id, type: 'p2p_distance', p1_id: a, p2_id: b, distance: c.value });
       return;
     }
+    case 'DISTANCE_X':
+    case 'DISTANCE_Y': {
+      // Directional point↔point distance: drive (P2.coord − P1.coord) = value via a
+      // `difference` constraint on the points' x/y params. The factory orders the
+      // refs so P2's coord ≥ P1's coord, keeping `value` a positive magnitude.
+      if (c.value == null) return;
+      const a = point(r0), b = point(r1);
+      const prop = c.type === 'DISTANCE_X' ? 'x' : 'y';
+      if (a && b) push({ id, type: 'difference', param1: { o_id: a, prop }, param2: { o_id: b, prop }, difference: c.value });
+      return;
+    }
     case 'TANGENT': {
       const g0 = geomById.get(r0.id), g1 = geomById.get(r1.id);
       const k0 = g0?.kind, k1 = g1?.kind;

@@ -69,6 +69,7 @@ const isMenu = (i: RibbonItem): i is MenuDef => typeof i !== 'string';
 // registry, with '|' separators and split-button clusters for related tools.
 const RIBBON_TABS: RibbonTab[] = [
   { id: 'sketch', label: 'Sketch', items: [
+    'create-sketch', '|',
     'line', 'circle', 'rect',
     { kind:'menu', id:'m-arc',    label:'Arcs',         icon:'arc',     ids:['arc','arc3p'] },
     { kind:'menu', id:'m-curves', label:'Curves',       icon:'spline',  ids:['ellipse','bezier','spline'] },
@@ -79,7 +80,7 @@ const RIBBON_TABS: RibbonTab[] = [
     '|',
     { kind:'menu', id:'m-splane', label:'Sketch Plane', icon:'plane',   ids:['sketch-face','sketch-datum'] },
     { kind:'menu', id:'m-sref',   label:'Reference',    icon:'plane',   ids:['sketch-project-ref','sketch-project','sketch-intersect'] },
-    'constraints',
+    'constraints', 'dimension', 'dim-visibility',
   ] },
   { id: 'model', label: 'Model', items: [
     { kind:'menu', id:'m-struct', label:'Structure',  icon:'assembly',   ids:['component','assembly'] },
@@ -195,6 +196,7 @@ export const Ribbon: React.FC = () => {
   const future          = useCADStore((s) => s.future);
   const polygonSides    = useCADStore((s) => s.sketchPolygonSides);
   const projectAsConstr = useCADStore((s) => s.projectAsConstruction);
+  const dimensionsVisible = useCADStore((s) => s.dimensionsVisible);
   const activeWorkplane = useCADStore((s) => s.activeWorkplane);
   const openPlaneSel    = useCADStore((s) => s.openPlaneSelector);
   const setMode         = useCADStore((s) => s.setInteractionMode);
@@ -244,9 +246,26 @@ export const Ribbon: React.FC = () => {
   const reg = CADGeometryRegistry.getInstance();
 
   // If already in a session: switch tool directly. Otherwise open plane selector.
+  // Drawing tools no longer CREATE sketches (that's "Create Sketch" now). They only
+  // switch the active tool inside an existing sketch — resuming a merely-selected
+  // sketch if needed. The buttons are also disabled outside a sketch context, so the
+  // warn branch is just a safety net.
   const startSketch = (sketchMode: InteractionMode) => {
-    if (useCADStore.getState().sketchSession) setMode(sketchMode);
-    else openPlaneSel(sketchMode);
+    const st = useCADStore.getState();
+    if (st.sketchSession) { setMode(sketchMode); return; }
+    const id = constrainTargetId();
+    if (!id) { log('Click "Create Sketch" to start a sketch first.', 'warn'); return; }
+    st.resumeSketchSession(id);
+    setMode(sketchMode);
+  };
+
+  // Explicit "Create Sketch" entry: open the plane selector, then start a sketch
+  // session with no tool active (SELECT) — exactly the plane-pick flow a 2D shape
+  // used to trigger, minus the auto-selected drawing tool. The drawing tools light
+  // up once the session is active.
+  const createSketch = () => {
+    if (useCADStore.getState().sketchSession) { log('Finish or Quit the current sketch before starting a new one.', 'warn'); return; }
+    openPlaneSel('SELECT');
   };
 
   // S2 — enter face-pick mode; clicking a planar face starts a sketch on it.
@@ -509,6 +528,17 @@ export const Ribbon: React.FC = () => {
     if (!id) { log('Open or select a sketch to trim/extend/split its lines.', 'warn'); return; }
     st.resumeSketchSession(id);
     setMode(m);
+  };
+
+  // Smart Dimension tool — needs an active sketch session so its entities are
+  // pickable; resume one if a sketch is merely selected.
+  const startDimension = () => {
+    const st = useCADStore.getState();
+    if (st.sketchSession) { setMode('DIMENSION'); return; }
+    const id = constrainTargetId();
+    if (!id) { log('Open or select a sketch to add dimensions.', 'warn'); return; }
+    st.resumeSketchSession(id);
+    setMode('DIMENSION');
   };
 
   // ─── Sketch corner fillet / chamfer (S1) ─────────────────────────────────────
@@ -1093,17 +1123,24 @@ export const Ribbon: React.FC = () => {
   // ─── Command registry (R1) ──────────────────────────────────────────────────
   const commands: Record<string, Command> = {
     // sketch
-    line:      { id:'line',      icon:'line',      label:'Line',    run:() => startSketch('SKETCH_LINE'),      active: mode==='SKETCH_LINE',      accent:SK },
-    circle:    { id:'circle',    icon:'circle',    label:'Circle',  run:() => startSketch('SKETCH_CIRCLE'),    active: mode==='SKETCH_CIRCLE',    accent:SK },
-    rect:      { id:'rect',      icon:'rectangle', label:'Rect',    run:() => startSketch('SKETCH_RECTANGLE'), active: mode==='SKETCH_RECTANGLE', accent:SK },
-    arc:       { id:'arc',       icon:'arc',       label:'Arc',     run:() => startSketch('SKETCH_ARC'),       active: mode==='SKETCH_ARC',       accent:SK },
-    arc3p:     { id:'arc3p',     icon:'arc3p',     label:'Arc3P',   run:() => startSketch('SKETCH_ARC_3P'),    active: mode==='SKETCH_ARC_3P',    accent:SK },
-    ellipse:   { id:'ellipse',   icon:'ellipse',   label:'Ellipse', run:() => startSketch('SKETCH_ELLIPSE'),   active: mode==='SKETCH_ELLIPSE',   accent:SK },
-    bezier:    { id:'bezier',    icon:'bezier',    label:'Bezier',  run:() => startSketch('SKETCH_BEZIER'),    active: mode==='SKETCH_BEZIER',    accent:SK },
-    spline:    { id:'spline',    icon:'spline',    label:'Spline',  run:() => startSketch('SKETCH_SPLINE'),    active: mode==='SKETCH_SPLINE',    accent:SK },
-    roundrect: { id:'roundrect', icon:'roundrect', label:'RndRect', run:() => startSketch('SKETCH_ROUNDED_RECT'), active: mode==='SKETCH_ROUNDED_RECT', accent:SK },
-    polygon:   { id:'polygon',   icon:'polygon',   label:'Polygon', run:polygonRun, active: mode==='SKETCH_POLYGON', accent:SK },
+    'create-sketch': { id:'create-sketch', icon:'sketch', label:'Create Sketch', run:createSketch, enabled:!sketchSession, accent:SK,
+                       tooltip:'Create Sketch — pick a plane to start a new sketch (disabled while a sketch is active)' },
+    line:      { id:'line',      icon:'line',      label:'Line',    run:() => startSketch('SKETCH_LINE'),      active: mode==='SKETCH_LINE',      enabled:canConstrain, accent:SK },
+    circle:    { id:'circle',    icon:'circle',    label:'Circle',  run:() => startSketch('SKETCH_CIRCLE'),    active: mode==='SKETCH_CIRCLE',    enabled:canConstrain, accent:SK },
+    rect:      { id:'rect',      icon:'rectangle', label:'Rect',    run:() => startSketch('SKETCH_RECTANGLE'), active: mode==='SKETCH_RECTANGLE', enabled:canConstrain, accent:SK },
+    arc:       { id:'arc',       icon:'arc',       label:'Arc',     run:() => startSketch('SKETCH_ARC'),       active: mode==='SKETCH_ARC',       enabled:canConstrain, accent:SK },
+    arc3p:     { id:'arc3p',     icon:'arc3p',     label:'Arc3P',   run:() => startSketch('SKETCH_ARC_3P'),    active: mode==='SKETCH_ARC_3P',    enabled:canConstrain, accent:SK },
+    ellipse:   { id:'ellipse',   icon:'ellipse',   label:'Ellipse', run:() => startSketch('SKETCH_ELLIPSE'),   active: mode==='SKETCH_ELLIPSE',   enabled:canConstrain, accent:SK },
+    bezier:    { id:'bezier',    icon:'bezier',    label:'Bezier',  run:() => startSketch('SKETCH_BEZIER'),    active: mode==='SKETCH_BEZIER',    enabled:canConstrain, accent:SK },
+    spline:    { id:'spline',    icon:'spline',    label:'Spline',  run:() => startSketch('SKETCH_SPLINE'),    active: mode==='SKETCH_SPLINE',    enabled:canConstrain, accent:SK },
+    roundrect: { id:'roundrect', icon:'roundrect', label:'RndRect', run:() => startSketch('SKETCH_ROUNDED_RECT'), active: mode==='SKETCH_ROUNDED_RECT', enabled:canConstrain, accent:SK },
+    polygon:   { id:'polygon',   icon:'polygon',   label:'Polygon', run:polygonRun, active: mode==='SKETCH_POLYGON', enabled:canConstrain, accent:SK },
     constraints:{id:'constraints',icon:'constraint',label:'Constraints', run:openConstraints, enabled:canConstrain, accent:'#1d9e74' },
+    dimension:  {id:'dimension', icon:'measure', label:'Dimension', run:startDimension, enabled:canConstrain, active: mode==='DIMENSION', accent:'#1d9e74',
+                 tooltip:'Smart Dimension — click sketch entities to add a driving dimension (length, radius, distance, angle)' },
+    'dim-visibility': {id:'dim-visibility', icon:'grid', label: dimensionsVisible ? 'Hide Dims' : 'Show Dims',
+                 run:() => useCADStore.getState().toggleDimensionsVisible(), active: dimensionsVisible, accent:'#1d9e74',
+                 tooltip:'Show/Hide all dimension annotations (keeps the underlying constraints)' },
     trim:      { id:'trim',   icon:'trim',   label:'Trim',   run:() => startEdit('EDIT_TRIM'),   active: mode==='EDIT_TRIM',   enabled:canConstrain, accent:'#cc6633' },
     extend:    { id:'extend', icon:'extend', label:'Extend', run:() => startEdit('EDIT_EXTEND'), active: mode==='EDIT_EXTEND', enabled:canConstrain, accent:'#cc6633' },
     split:     { id:'split',  icon:'split',  label:'Split',  run:() => startEdit('EDIT_SPLIT'),  active: mode==='EDIT_SPLIT',  enabled:canConstrain, accent:'#cc6633' },

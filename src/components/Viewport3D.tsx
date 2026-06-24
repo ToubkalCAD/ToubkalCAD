@@ -13,6 +13,7 @@ import '../types/index';
 import React, { useEffect, useRef, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls }     from 'three/examples/jsm/controls/OrbitControls.js';
+import { CSS2DRenderer }     from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { useCADStore }         from '../store/cadStore';
 import { OccSelectionService } from '../services/OccSelectionService';
@@ -47,6 +48,8 @@ import type { CADCamera, CADViewPreset } from '../services/CADCameraService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
 import { SketchDimensionInput } from './SketchDimensionInput';
 import { SketchDimensions }    from './SketchDimensions';
+import { SketchDimensionLayer } from './SketchDimensionLayer';
+import { useCADSmartDimension } from '../hooks/useCADSmartDimension';
 import { CursorAnnotation }   from './CursorAnnotation';
 
 interface Viewport3DProps {
@@ -260,6 +263,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── Constraint-pick hook (handles CONSTRAIN mode entity selection) ──────────
   useCADConstraintPick(containerRef, sceneRef, cameraRef);
+
+  // Smart Dimension tool (DIMENSION mode) — click entities → driving dim + annotation
+  useCADSmartDimension(containerRef, sceneRef, cameraRef);
 
   // ─── Face-pick hook (handles FACE_SKETCH mode — sketch on a 3D face, S2) ──────
   useCADSketchFacePick(containerRef, sceneRef, cameraRef);
@@ -759,6 +765,14 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     renderer.toneMappingExposure = 1.1;
     container.appendChild(renderer.domElement);
 
+    // CSS2D overlay for dimension labels (crisp HTML text, editable, camera-facing).
+    // The overlay layer ignores pointer events; individual labels re-enable them.
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.setSize(container.clientWidth, container.clientHeight);
+    Object.assign(labelRenderer.domElement.style, { position: 'absolute', top: '0', left: '0', pointerEvents: 'none' } as CSSStyleDeclaration);
+    container.appendChild(labelRenderer.domElement);
+    window.cadLabelRenderer = labelRenderer;
+
     const orbit = new OrbitControls(camera, renderer.domElement);
     orbit.enableDamping = true;
     orbit.dampingFactor = 0.06;
@@ -1011,6 +1025,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       if (renderFrames > 0 || !orbit.enabled) {
         if (renderFrames > 0) renderFrames--;
         renderer.render(scene, camera);
+        labelRenderer.render(scene, camera);   // reproject dimension labels onto the canvas
       }
     };
     animate();
@@ -1026,6 +1041,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       orthoCam.left = -halfH * aspect;  orthoCam.right = halfH * aspect;
       orthoCam.updateProjectionMatrix();
       renderer.setSize(w, h);
+      labelRenderer.setSize(w, h);
       requestRender();
     };
 
@@ -1092,6 +1108,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       container.removeEventListener('mousemove', onMouseMove);
       if (renderer.domElement.parentElement === container)
         container.removeChild(renderer.domElement);
+      if (labelRenderer.domElement.parentElement === container)
+        container.removeChild(labelRenderer.domElement);
+      window.cadLabelRenderer = null;
       window.cadScene   = null;
       window.cadCamera  = null;
       window.cadControls = null;
@@ -1355,6 +1374,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
       {/* Phase 8 – parametric dimension & constraint annotations */}
       <SketchDimensions />
+
+      {/* Persistent driving-dimension annotations (Three.js + CSS2D) */}
+      <SketchDimensionLayer containerRef={containerRef} />
 
       {/* Session idle hint — shown between shapes when no tool selected */}
       {sessionIdleHint && (

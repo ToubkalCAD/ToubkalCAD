@@ -169,51 +169,20 @@ export const SketchDimensions: React.FC = () => {
   }
 
   // ── Constraint annotations ─────────────────────────────────────────────────
+  // Dimensional constraints (LENGTH/RADIUS/DISTANCE/ANGLE) are drawn by the
+  // Three.js + CSS2D SketchDimensionLayer (extension lines, arrows, editable,
+  // draggable value). This SVG overlay only renders the GEOMETRIC glyph badges
+  // (∥, ⟂, =, …) which have no driving value to place a dimension line for.
   const constraints = (sketch.params?.constraints as SketchConstraint[] | undefined) ?? [];
   constraints.forEach((c, ci) => {
+    if (c.type === 'LENGTH' || c.type === 'RADIUS' || c.type === 'DISTANCE' || c.type === 'ANGLE') return;
     const refs = refsOf(c);
     const meta = CONSTRAINT_META[c.type];
-    const first = refs[0] ? geomOf(refs[0].id) : null;
-
-    if (c.type === 'LENGTH' && first?.g.kind === 'line') {
-      const g = first.g, wp = first.wp;
-      const a = toScreen(fromLocal2D(g.a[0], g.a[1], wp), cam, w, h);
-      const b = toScreen(fromLocal2D(g.b[0], g.b[1], wp), cam, w, h);
-      if (!a.ok || !b.ok) return;
-      let nx = -(b.y - a.y), ny = b.x - a.x; const L = Math.hypot(nx, ny) || 1; nx = nx / L * 16; ny = ny / L * 16;
-      const a2 = { x: a.x + nx, y: a.y + ny }, b2 = { x: b.x + nx, y: b.y + ny };
-      lines.push(<g key={`L${ci}`} stroke={COLOR} strokeWidth={1.2}>
-        <line x1={a.x} y1={a.y} x2={a2.x} y2={a2.y} strokeDasharray="2 2" />
-        <line x1={b.x} y1={b.y} x2={b2.x} y2={b2.y} strokeDasharray="2 2" />
-        <line x1={a2.x} y1={a2.y} x2={b2.x} y2={b2.y} /></g>);
-      badge(`Ll${ci}`, { x: (a2.x + b2.x) / 2, y: (a2.y + b2.y) / 2, ok: true }, (c.value ?? 0).toFixed(1));
-    } else if (c.type === 'RADIUS' && (first?.g.kind === 'circle' || first?.g.kind === 'arc')) {
-      const g = first.g, wp = first.wp;
-      const ang = g.kind === 'arc' ? (g.a1 + g.a2) / 2 : 0;   // point the leader along the arc's mid-sweep
-      const ctr = toScreen(fromLocal2D(g.c[0], g.c[1], wp), cam, w, h);
-      const rim = toScreen(fromLocal2D(g.c[0] + g.r * Math.cos(ang), g.c[1] + g.r * Math.sin(ang), wp), cam, w, h);
-      if (!ctr.ok || !rim.ok) return;
-      lines.push(<line key={`R${ci}`} x1={ctr.x} y1={ctr.y} x2={rim.x} y2={rim.y} stroke={COLOR} strokeWidth={1.2} />);
-      badge(`Rl${ci}`, { x: (ctr.x + rim.x) / 2, y: (ctr.y + rim.y) / 2 - 8, ok: true }, `R${(c.value ?? 0).toFixed(1)}`);
-    } else if (c.type === 'DISTANCE') {
-      const p1 = refs[0] && pointWorld(refs[0]); const p2 = refs[1] && pointWorld(refs[1]);
-      if (!p1 || !p2) return;
-      const a = toScreen(p1, cam, w, h), b = toScreen(p2, cam, w, h);
-      if (!a.ok || !b.ok) return;
-      lines.push(<line key={`D${ci}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={COLOR} strokeWidth={1.2} strokeDasharray="5 3" />);
-      badge(`Dl${ci}`, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 8, ok: true }, `↔${(c.value ?? 0).toFixed(1)}`);
-    } else if (c.type === 'ANGLE') {
-      const p1 = refs[0] && pointWorld(refs[0]); const p2 = refs[1] && pointWorld(refs[1]);
-      if (!p1 || !p2) return;
-      const a = toScreen(p1, cam, w, h), b = toScreen(p2, cam, w, h);
-      badge(`A${ci}`, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, ok: a.ok && b.ok }, `∠${(c.value ?? 0).toFixed(1)}°`);
-    } else {
-      // Geometric glyph at each operand's representative point.
-      refs.forEach((r, k) => {
-        const wp = pointWorld(r); if (!wp) return;
-        badge(`g${ci}_${k}`, toScreen(wp, cam, w, h), meta.glyph);
-      });
-    }
+    // Geometric glyph at each operand's representative point.
+    refs.forEach((r, k) => {
+      const wp = pointWorld(r); if (!wp) return;
+      badge(`g${ci}_${k}`, toScreen(wp, cam, w, h), meta.glyph);
+    });
   });
 
   // ── DoF readout ────────────────────────────────────────────────────────────

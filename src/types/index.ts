@@ -16,6 +16,8 @@ declare global {
     cadControls: any | null;
     /** Request an on-demand viewport render (the loop renders only on change). */
     cadRequestRender?: () => void;
+    /** CSS2DRenderer overlay for dimension annotation labels. */
+    cadLabelRenderer?: any | null;
   }
 }
 
