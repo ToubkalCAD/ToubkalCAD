@@ -31,6 +31,7 @@ import { useCADAssemblyMate }   from '../hooks/useCADAssemblyMate';
 import { useCADAssemblyConcentric } from '../hooks/useCADAssemblyConcentric';
 import { useCADSketchTransformPick } from '../hooks/useCADSketchTransformPick';
 import { useCADExtrudeTargetPick } from '../hooks/useCADExtrudeTargetPick';
+import { useCADProfilePick } from '../hooks/useCADProfilePick';
 import { useCADDatumSketchPick } from '../hooks/useCADDatumSketchPick';
 import { useCADDatumOffsetPick } from '../hooks/useCADDatumOffsetPick';
 import { useCADDatum3PointPick } from '../hooks/useCADDatum3PointPick';
@@ -285,6 +286,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── Pad/Pocket boolean target picking (EXTRUDE_TARGET_PICK — E2) ──────────────
   useCADExtrudeTargetPick(containerRef, sceneRef, cameraRef);
+
+  // ─── Profile picking (PROFILE_PICK) — choose which sketch profiles to extrude ──
+  useCADProfilePick(containerRef, sceneRef, cameraRef);
 
   // ─── Sketch-on-datum-plane picking (DATUM_SKETCH — D9) ─────────────────────────
   useCADDatumSketchPick(containerRef, sceneRef, cameraRef);

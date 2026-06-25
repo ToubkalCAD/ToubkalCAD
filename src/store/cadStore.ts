@@ -148,6 +148,7 @@ export type InteractionMode =
   | 'MIRROR_AXIS_PICK'    // pick 2 points on the sketch plane → mirror line for a 2D sketch mirror
   | 'ARRAY_CENTER_PICK'   // pick 1 point on the sketch plane → centre for a 2D circular array
   | 'EXTRUDE_TARGET_PICK' // pick an existing solid as the Pad/Pocket boolean target (one-shot)
+  | 'PROFILE_PICK'        // Extrude panel: hover/click the sketch's nested profile faces to choose which to extrude
   | 'DATUM_SKETCH'        // pick a datum plane in the viewport → start a sketch on it (D9)
   | 'DATUM_OFFSET_PICK'   // pick a planar face / datum → offset it by a distance into a new datum plane (D2)
   | 'DATUM_3POINT_PICK'   // pick 3 vertices → plane through them (D4)
@@ -543,6 +544,21 @@ interface CADState {
    *  `point` is the world-space ray-hit on that solid (for Up-to-Face). */
   setOp3DTargetPick: (id: string | null, point?: [number, number, number] | null) => void;
 
+  /** Profile picker (Extrude): how many selectable profiles the sketch has, and
+   *  the indices currently selected (default = all). Shared by the panel
+   *  checkboxes and the viewport hover/click overlays. */
+  profilePickCount:    number;
+  profilePickSelected: number[];
+  /** Enter PROFILE_PICK mode with `count` profiles and an initial selection. */
+  startProfilePick: (count: number, selected: number[]) => void;
+  /** Toggle one profile in/out of the selection (keeps at least nothing — the
+   *  panel guards against an empty apply). */
+  toggleProfilePick: (index: number) => void;
+  /** Replace the whole selection (panel checkboxes / select-all). */
+  setProfilePickSelected: (selected: number[]) => void;
+  /** Leave PROFILE_PICK mode back to SELECT (keeps the selection). */
+  endProfilePick: () => void;
+
   /** Per-edge blend (fillet/chamfer) request — non-null while the panel is open. */
   blendReq: { targetId: string; op: 'fillet' | 'chamfer'; editNodeId?: string } | null;
   /** Stable 0-based indices of edges the user has picked for the blend. */
@@ -865,6 +881,8 @@ export const useCADStore = create<CADState>((set, get) => ({
   op3DPanelReq:       null,
   op3DTargetPick:     null,
   op3DTargetPickPoint: null,
+  profilePickCount:    0,
+  profilePickSelected: [],
   blendReq:            null,
   selectedEdgeIndices: [],
   booleanReq:          null,
@@ -1061,6 +1079,15 @@ export const useCADStore = create<CADState>((set, get) => ({
 
   startOp3DTargetPick: () => set({ interactionMode: 'EXTRUDE_TARGET_PICK', op3DTargetPick: null, op3DTargetPickPoint: null }),
   setOp3DTargetPick:   (id, point = null) => set({ op3DTargetPick: id, op3DTargetPickPoint: point, interactionMode: 'SELECT' }),
+
+  startProfilePick: (count, selected) => set({ interactionMode: 'PROFILE_PICK', profilePickCount: count, profilePickSelected: [...selected] }),
+  toggleProfilePick: (index) => set((s) => ({
+    profilePickSelected: s.profilePickSelected.includes(index)
+      ? s.profilePickSelected.filter((i) => i !== index)
+      : [...s.profilePickSelected, index].sort((a, b) => a - b),
+  })),
+  setProfilePickSelected: (selected) => set({ profilePickSelected: [...selected].sort((a, b) => a - b) }),
+  endProfilePick: () => set((s) => (s.interactionMode === 'PROFILE_PICK' ? { interactionMode: 'SELECT' } : {})),
 
   openBlendPanel: (targetId, op, editNodeId, preEdges) => set({
     blendReq: { targetId, op, editNodeId },

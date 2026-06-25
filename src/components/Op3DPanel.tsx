@@ -17,6 +17,7 @@ import { CADGeometryRegistry }  from '../services/CADGeometryRegistry';
 import { OccConverter }         from '../services/OccConverter';
 import { getPlacedShape }       from '../utils/placedShape';
 import { profileShapeFor, canResolveProfile, healOpProfileTargets } from '../utils/sketchProfile';
+import { computeExtrudeProfiles, setProfileFaces, clearProfileFaces, ExtrudeProfile } from '../utils/extrudeProfiles';
 import { captureFaceAtPoint }   from '../services/StableRef';
 import { propagateFromStore }   from '../services/RecomputeEngine.live';
 import { OccExtrusionService, ExtrudeEnd } from '../services/OccExtrusionService';
@@ -56,7 +57,14 @@ export function show3DOpPanel(
   // ids first, so a loft/extrude created with (now-stale) entity-wire ids — e.g.
   // a rectangle that was replaced — rebinds to its sketch instead of failing with
   // "not in WASM registry". Both the live preview and Apply then see valid targets.
-  const ids = (editNodeId && ['extrude', 'revolve', 'loft', 'sweep'].includes(op))
+  //
+  // EXCEPT a profile-picked extrude: its targetWireIds are a deliberate SUBSET of
+  // materialised region wires (which already re-derive via their region param).
+  // Healing would rebind a lone selected region to its sketch and lose the picked
+  // selection — so skip it and keep the region-wire targets intact.
+  const node = editNodeId ? useCADStore.getState().nodes[editNodeId] : undefined;
+  const isProfilePicked = !!((node?.params?.profileCandidateIds as string[] | undefined)?.length);
+  const ids = (editNodeId && !isProfilePicked && ['extrude', 'revolve', 'loft', 'sweep'].includes(op))
     ? healOpProfileTargets(editNodeId)
     : targetIds;
   useCADStore.getState().openOp3DPanel(op, ids.length ? ids : targetIds, editNodeId, ephemeral);
@@ -191,21 +199,21 @@ function computeShape(
         // where the user sees the solid, not at its origin pose.
         const tgt = targetSolidId ? getPlacedShape(targetSolidId) : null;
         if (!tgt) throw new Error('Up-to-Face needs a target solid — pick one.');
-        solid = OccExtrusionService.extrudeUpToFace(oc, wires[0], upToOpts, tgt, targetFacePoint);
+        solid = OccExtrusionService.extrudeUpToFace(oc, wires, upToOpts, tgt, targetFacePoint);
       } else if (endMode === 6) {
         // Up-to-Plane: trim the profile at a picked datum plane (D-track reference).
         const datum = targetDatumId ? useCADStore.getState().nodes[targetDatumId] : null;
         const wp = datum?.params?.workplane as Workplane | undefined;
         if (!wp) throw new Error('Up-to-Plane needs a datum plane — pick one.');
-        solid = OccExtrusionService.extrudeUpToPlane(oc, wires[0], upToOpts, wp.origin, wp.normal);
+        solid = OccExtrusionService.extrudeUpToPlane(oc, wires, upToOpts, wp.origin, wp.normal);
       } else if (endMode === 4 || endMode === 5) {
         // Up-to-Next / Up-to-Last: trim against every other body in the scene.
         const editId = useCADStore.getState().op3DPanelReq?.editNodeId;
         const bodies = allSolidShapes([...ids, ...(editId ? [editId] : [])]);
         if (!bodies.length) throw new Error('Up-to-Next/Last needs another solid in the model.');
         solid = endMode === 4
-          ? OccExtrusionService.extrudeUpToNext(oc, wires[0], upToOpts, bodies)
-          : OccExtrusionService.extrudeUpToLast(oc, wires[0], upToOpts, bodies);
+          ? OccExtrusionService.extrudeUpToNext(oc, wires, upToOpts, bodies)
+          : OccExtrusionService.extrudeUpToLast(oc, wires, upToOpts, bodies);
       } else {
         // E7: extrude every region (one wire → solid, many → compound).
         solid = OccExtrusionService.extrudeProfiles(oc, wires, {
@@ -342,6 +350,46 @@ const TargetPickRow: React.FC<{
   </div>
 );
 
+// Profile picker row (Fusion-style "Profile" zone). Lets the user choose which
+// of the sketch's nested profiles to extrude — via the viewport (hover-highlight
+// + click) or the inline per-profile chips. Selection lives in the store.
+const ProfileRow: React.FC<{
+  count:    number;
+  selected: number[];
+  picking:  boolean;
+  onPick:   () => void;
+  onToggle: (i: number) => void;
+  onAll:    () => void;
+}> = ({ count, selected, picking, onPick, onToggle, onAll }) => {
+  const sel = new Set(selected);
+  const chip = (on: boolean): React.CSSProperties => ({
+    padding:'1px 8px', fontSize:11, cursor:'pointer', lineHeight:1.6,
+    border:`1px solid ${on ? 'var(--accent)' : 'var(--border)'}`, borderRadius:'var(--radius-sm)',
+    background: on ? 'var(--accent)' : 'var(--surface-3)', color: on ? '#fff' : 'var(--text-primary)',
+  });
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+      <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+        <span style={{ fontSize:10, color:'var(--text-dim)', textTransform:'uppercase', letterSpacing:'0.4px', minWidth:55 }}>Profile</span>
+        <button onClick={onPick} style={{
+          padding:'2px 10px', fontSize:11, cursor:'pointer', whiteSpace:'nowrap',
+          border:`1px solid ${picking ? 'var(--accent)' : 'var(--border)'}`, borderRadius:'var(--radius-sm)',
+          background: picking ? 'var(--accent)' : 'var(--surface-3)', color: picking ? '#fff' : 'var(--text-primary)',
+        }}>{picking ? 'Click in view…' : 'Select in view'}</button>
+        <span style={{ fontSize:10, color:'var(--text-muted)', fontFamily:'monospace' }}>{selected.length}/{count}</span>
+      </div>
+      {count >= 2 && (
+        <div style={{ display:'flex', flexWrap:'wrap', gap:4, paddingLeft:63 }}>
+          {Array.from({ length:count }, (_, i) => (
+            <button key={i} onClick={() => onToggle(i)} style={chip(sel.has(i))}>P{i+1}</button>
+          ))}
+          <button onClick={onAll} title="Select all profiles" style={chip(false)}>All</button>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Main panel (controlled) ─────────────────────────────────────────────────
 
 export interface Op3DPanelProps {
@@ -397,6 +445,74 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
   const interactionMode = useCADStore((s) => s.interactionMode);
   const pickedTarget    = useCADStore((s) => s.op3DTargetPick);
   const isPicking       = interactionMode === 'EXTRUDE_TARGET_PICK';
+
+  // ── Profile picker (extrude) ─────────────────────────────────────────────────
+  // The sketch's nested profiles (outer-with-holes), partitioning req.targetIds.
+  // The face GEOMETRIES go to the viewport hook via the bus; the SELECTION lives
+  // in the store so the panel chips + the viewport overlays stay in sync.
+  const profilesRef      = useRef<ExtrudeProfile[]>([]);
+  // The FULL candidate profile set (all of the sketch's profiles, including ones
+  // currently deselected) — persisted so a re-edit can re-ADD a profile, not just
+  // narrow the selection. Falls back to the op's targets for legacy nodes.
+  const candidateIdsRef  = useRef<string[]>([]);
+  const profileCount     = useCADStore((s) => s.profilePickCount);
+  const profileSel       = useCADStore((s) => s.profilePickSelected);
+  const isProfilePicking = interactionMode === 'PROFILE_PICK';
+
+  /** The target ids the extrude should actually consume = the union of the
+   *  SELECTED profiles' wire ids. Falls back to req.targetIds for non-extrude ops
+   *  or before profiles are computed. */
+  const effectiveTargetIds = useCallback((): string[] => {
+    const profs = profilesRef.current;
+    if (req.op !== 'extrude' || profs.length === 0) return req.targetIds;
+    const sel = useCADStore.getState().profilePickSelected;
+    const ids = new Set<string>();
+    sel.forEach((i) => profs[i]?.wireIds.forEach((w) => ids.add(w)));
+    return [...ids];
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req.op, req.targetIds]);
+
+  // Compute the profiles when the panel opens (or its targets change). Candidates
+  // come from the FULL set (so re-edit shows every profile, selected or not); the
+  // initial selection mirrors the op's persisted subset (all, for a fresh create).
+  useEffect(() => {
+    const store = useCADStore.getState();
+    if (req.op !== 'extrude' || !window.oc) {
+      profilesRef.current = [];
+      candidateIdsRef.current = [];
+      clearProfileFaces();
+      useCADStore.setState({ profilePickCount: 0, profilePickSelected: [] });
+      return;
+    }
+    // Full candidate set: persisted profileCandidateIds (new nodes) → falls back to
+    // the op's targets (fresh create, or legacy nodes from before this existed).
+    const stored = req.editNodeId ? store.nodes[req.editNodeId]?.params : undefined;
+    const candidateIds = ((stored?.profileCandidateIds as string[] | undefined)?.length)
+      ? (stored!.profileCandidateIds as string[])
+      : req.targetIds;
+    candidateIdsRef.current = candidateIds;
+
+    let profs: ExtrudeProfile[] = [];
+    try { profs = computeExtrudeProfiles(window.oc, candidateIds); } catch { profs = []; }
+    profilesRef.current = profs;
+    setProfileFaces(profs.map((p) => p.geometry));
+    useCADStore.setState({ profilePickCount: profs.length });
+
+    // Selection: re-edit → the profiles whose wires are in the op's (subset)
+    // targetWireIds; fresh create → all. A profile contributed ALL its wires when
+    // selected and NONE when not, so an intersection test is exact.
+    const activeSet = new Set(req.editNodeId
+      ? ((stored?.targetWireIds as string[] | undefined) ?? candidateIds)
+      : candidateIds);
+    const initSel = profs.flatMap((p, i) => (p.wireIds.some((w) => activeSet.has(w)) ? [i] : []));
+    store.setProfilePickSelected(initSel.length ? initSel : profs.map((_, i) => i));
+
+    return () => {
+      clearProfileFaces();
+      useCADStore.getState().endProfilePick();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [req.op, req.editNodeId, req.targetIds.join(',')]);
 
   // Adopt a solid the user clicked in EXTRUDE_TARGET_PICK mode, then clear the
   // one-shot store signal so re-picking the same id fires again.
@@ -464,7 +580,10 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     if (boolActive) hideById(liveTarget);
 
     try {
-      const shape = computeShape(liveReq.op, liveReq.targetIds, liveParams, liveTarget ?? undefined, liveFacePoint ?? undefined, liveDatum ?? undefined);
+      // Extrude consumes only the SELECTED profiles' wires (Profile picker).
+      const liveTargets = liveReq.op === 'extrude' ? effectiveTargetIds() : liveReq.targetIds;
+      if (!liveTargets.length) throw new Error('Select at least one profile to extrude.');
+      const shape = computeShape(liveReq.op, liveTargets, liveParams, liveTarget ?? undefined, liveFacePoint ?? undefined, liveDatum ?? undefined);
       // Live preview is throwaway — on a weak GPU build it extra-coarse so dragging
       // a slider stays responsive; Apply rebuilds it at the committed quality.
       const geo   = OccConverter.shapeToThreeGeometry(window.oc, shape, 0.2, isLowTier() ? 0.04 : undefined);
@@ -484,24 +603,29 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     // Imperative scene edit → the on-demand render loop needs an explicit nudge,
     // otherwise the new preview isn't drawn until the next pointer move.
     window.cadRequestRender?.();
-  }, [clearPreview]);
+  }, [clearPreview, effectiveTargetIds]);
 
-  // Debounce preview on param change
+  // Debounce preview on param change (and on profile-selection change).
   useEffect(() => {
     // First run on open: the committed mesh already shows these params → don't
     // tessellate a redundant preview. (New-from-scratch ops have no committed mesh
     // yet, so they DO preview immediately.)
     if (skipFirstPreviewRef.current) { skipFirstPreviewRef.current = false; return; }
+    // While picking a target/profile the preview is intentionally hidden so the
+    // overlays/faces read clearly — don't rebuild it (a profile toggle changes
+    // profileSel and would otherwise flash a preview over the overlays). It
+    // rebuilds when picking ends (this effect re-runs as the flags clear).
+    if (isPicking || isProfilePicking) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => buildPreview(req, params, targetSolidId, targetFacePoint, targetDatumId), 250);
     return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
-  }, [params, req, targetSolidId, targetFacePoint, targetDatumId, buildPreview]);
+  }, [params, req, targetSolidId, targetFacePoint, targetDatumId, profileSel, isPicking, isProfilePicking, buildPreview]);
 
   // While picking a target/face, hide the in-progress geometry (live preview +
   // the edited operation's committed mesh) so the target solid's faces are fully
   // visible and clickable. Restored when picking ends (the debounce rebuilds it).
   useEffect(() => {
-    if (!isPicking) return;
+    if (!isPicking && !isProfilePicking) return;   // also during PROFILE_PICK → overlays read clearly
     const sc = (window as any).cadScene as THREE.Scene | null;
     if (!sc) return;
     if (debounceRef.current) clearTimeout(debounceRef.current); // cancel any pending preview
@@ -512,7 +636,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
       if (obj && obj.visible) { obj.visible = false; hidden.push(obj); }
     }
     return () => { for (const o of hidden) o.visible = true; };
-  }, [isPicking, req.editNodeId, clearPreview]);
+  }, [isPicking, isProfilePicking, req.editNodeId, clearPreview]);
 
   // Cleanup on unmount
   useEffect(() => () => {
@@ -569,13 +693,22 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     setApplyErr(null);
 
     const snap = { ...params };
-    store.log(`Op3D Apply → op=${req.op} targets=[${req.targetIds.map(s => s.slice(0,6)).join(',')}]`, 'info');
+    // Extrude consumes only the SELECTED profiles' wires (Profile picker); other
+    // ops use all targets. Persisted as the feature's targetWireIds so recompute
+    // extrudes the same subset.
+    const targets = req.op === 'extrude' ? effectiveTargetIds() : req.targetIds;
+    if (req.op === 'extrude' && !targets.length) {
+      const msg = 'Select at least one profile to extrude.';
+      setApplyErr(msg); store.log(`Op3D FAIL: ${msg}`, 'error');
+      return;
+    }
+    store.log(`Op3D Apply → op=${req.op} targets=[${targets.map(s => s.slice(0,6)).join(',')}]`, 'info');
 
     // ── Validate targets are resolvable to geometry ──────────────────────────
     // A target is valid if it's a registered shape OR a SKETCH container that
     // currently encloses a closed profile (loft/extrude bind to the sketch, so a
     // sketch with no shape of its own is still valid — its profile is re-derived).
-    for (const wId of req.targetIds) {
+    for (const wId of targets) {
       if (!canResolveProfile(window.oc, wId)) {
         const isSketch = store.nodes[wId]?.type === 'sketch';
         const msg = isSketch
@@ -618,7 +751,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
 
     try {
       // ── Compute OCC shape ──────────────────────────────────────────────────
-      const shape = computeShape(req.op, req.targetIds, snap, targetSolidId ?? undefined, targetFacePoint ?? undefined, targetDatumId ?? undefined);
+      const shape = computeShape(req.op, targets, snap, targetSolidId ?? undefined, targetFacePoint ?? undefined, targetDatumId ?? undefined);
       store.log(`Op3D: OCC shape computed ✓`, 'info');
 
       // Up-to-face: capture a stable signature of the picked target face (step 4)
@@ -639,7 +772,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         window.dispatchEvent(new CustomEvent('cad-update-mesh', { detail: { id, material: old?.material } }));
         const idx = Number(old?.name?.match(/\d+$/)?.[0] ?? nextIdx(OP_NTYPE[req.op]));
         store.renameNode(id, `${OP_LABEL[req.op]}${idx}`);
-        store.setNodeParams(id, { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined });
+        store.setNodeParams(id, { opType: req.op, targetWireIds: targets, profileCandidateIds: req.op === 'extrude' ? candidateIdsRef.current : undefined, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined });
         store.log(`${old?.name ?? id} updated ✓`, 'success');
         // Propagate to anything downstream (fillet / boolean / pad on this op).
         propagateFromStore(id);
@@ -657,7 +790,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
           id, name, type, visible: true, locked: false, parentId: null, notes: '',
           transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
           material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS[type] ?? 0x5588cc },
-          params:    { opType: req.op, targetWireIds: req.targetIds, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined },
+          params:    { opType: req.op, targetWireIds: targets, profileCandidateIds: req.op === 'extrude' ? candidateIdsRef.current : undefined, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined },
         });
 
         // Verify the node is actually in the store (now placed under a component,
@@ -747,6 +880,23 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
               : 'Extrudes up to the last (furthest) surface in the model.';
             return (
             <>
+              {profileCount >= 1 && (
+                <>
+                  <ProfileRow
+                    count={profileCount}
+                    selected={profileSel}
+                    picking={isProfilePicking}
+                    onPick={() => {
+                      const st = useCADStore.getState();
+                      if (isProfilePicking) st.endProfilePick();
+                      else st.startProfilePick(profileCount, st.profilePickSelected);
+                    }}
+                    onToggle={(i) => useCADStore.getState().toggleProfilePick(i)}
+                    onAll={() => useCADStore.getState().setProfilePickSelected(Array.from({ length: profileCount }, (_, i) => i))}
+                  />
+                  <div style={{ height:1, background:'var(--border-soft)', margin:'2px 0' }} />
+                </>
+              )}
               <ToggleRow label="Limit" k="endMode" opts={[{label:'Blind',v:0},{label:'Sym',v:1},{label:'2-Sided',v:2},{label:'↥ Face',v:3},{label:'Next',v:4},{label:'Last',v:5},{label:'↥ Plane',v:6}]} params={params} onChange={set} />
               {!isUpTo && <SliderRow label={endM===1 ? 'Length (mm)' : 'Limit 1 (mm)'} k="h" min={0.01} max={500} step={0.5} params={params} onChange={set} />}
               {endM===2 && <SliderRow label="Limit 2 (mm)" k="h2" min={0.01} max={500} step={0.5} params={params} onChange={set} />}

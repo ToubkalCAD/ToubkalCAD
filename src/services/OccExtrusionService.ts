@@ -13,6 +13,7 @@
 // ============================================================
 
 import { WasmScope } from '../utils/WasmScope';
+import { buildNestedFaces } from './ProfileNesting';
 
 export type ExtrudeEnd = 'blind' | 'symmetric' | 'twoSided';
 
@@ -44,6 +45,30 @@ export class OccExtrusionService {
    * CADGeometryRegistry).
    */
   static extrude(oc: any, wire: any, opts: ExtrudeOptions): any {
+    const scope = new WasmScope();
+    try {
+      // Build face from the closed planar wire (single boundary, no holes).
+      const faceMaker = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
+      if (!faceMaker.IsDone()) {
+        throw new Error(
+          'Extrusion: face creation failed — wire must be closed and planar. ' +
+          'Only Circle, Rectangle, Ellipse, Polygon and Rounded-Rectangle can be extruded.',
+        );
+      }
+      return OccExtrusionService.extrudeFromFace(oc, faceMaker.Face(), opts);
+    } finally {
+      scope.free();
+    }
+  }
+
+  /**
+   * Extrude an already-built planar FACE (which may carry inner hole wires) into
+   * a solid with the same CATIA-style end conditions / draft / thickness as
+   * `extrude`. This is the shared core: `extrude` feeds it a single-wire face,
+   * `extrudeProfiles` feeds it nested faces-with-holes (ProfileNesting). The face
+   * is referenced, not consumed — the caller owns it.
+   */
+  static extrudeFromFace(oc: any, faceIn: any, opts: ExtrudeOptions): any {
     const {
       height,
       end          = 'blind',
@@ -78,15 +103,7 @@ export class OccExtrusionService {
 
     const scope = new WasmScope();
     try {
-      // Build face from the closed planar wire.
-      const faceMaker = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
-      if (!faceMaker.IsDone()) {
-        throw new Error(
-          'Extrusion: face creation failed — wire must be closed and planar. ' +
-          'Only Circle, Rectangle, Ellipse, Polygon and Rounded-Rectangle can be extruded.',
-        );
-      }
-      let face = faceMaker.Shape();
+      let face = faceIn;
 
       // Shift the face backwards for symmetric / two-sided sweeps.
       if (back > 1e-9) {
@@ -273,7 +290,7 @@ export class OccExtrusionService {
    */
   static extrudeUpToFace(
     oc:       any,
-    wire:     any,
+    wires:    any[],
     opts:     { direction?: [number, number, number]; reverse?: boolean; neutralPoint?: [number, number, number] },
     target:   any,
     hitPoint?: [number, number, number],
@@ -291,10 +308,10 @@ export class OccExtrusionService {
 
     const scope = new WasmScope();
     try {
-      const faceMaker = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
-      if (!faceMaker.IsDone()) throw new Error('Up-to-Face: face creation failed (closed planar wire required).');
+      // Profile basis = faces-with-holes from every coplanar wire (nested profiles).
+      const basis = OccExtrusionService.buildProfileShape(oc, wires, scope);
       const vec   = scope.keep(new oc.gp_Vec_4(dx * over, dy * over, dz * over));
-      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(faceMaker.Shape(), vec, false, true));
+      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(basis, vec, false, true));
       if (!prism.IsDone()) throw new Error('Up-to-Face: over-extrude failed.');
       const overShape = prism.Shape();
 
@@ -323,9 +340,8 @@ export class OccExtrusionService {
                      + (hitPoint![1] - neutralPoint[1]) * dy
                      + (hitPoint![2] - neutralPoint[2]) * dz;
           if (dist <= 1e-6) throw new Error('Up-to-Face: the selected face is not ahead of the sketch plane.');
-          const fm2  = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
           const vec2 = scope.keep(new oc.gp_Vec_4(dx * dist, dy * dist, dz * dist));
-          const pr2  = scope.keep(new oc.BRepPrimAPI_MakePrism_1(fm2.Shape(), vec2, false, true));
+          const pr2  = scope.keep(new oc.BRepPrimAPI_MakePrism_1(basis, vec2, false, true));
           if (!pr2.IsDone()) throw new Error('Up-to-Face: extrude to face failed.');
           return pr2.Shape();
         }
@@ -386,7 +402,7 @@ export class OccExtrusionService {
    */
   static extrudeUpToPlane(
     oc:   any,
-    wire: any,
+    wires: any[],
     opts: { direction?: [number, number, number]; reverse?: boolean; neutralPoint?: [number, number, number] },
     planeOrigin: [number, number, number],
     planeNormal: [number, number, number],
@@ -412,35 +428,37 @@ export class OccExtrusionService {
         const t = ((planeOrigin[0] - px) * nx + (planeOrigin[1] - py) * ny + (planeOrigin[2] - pz) * nz) / dN;
         tMax = Math.max(tMax, t); tMin = Math.min(tMin, t);
       };
-      const eexp = scope.keep(new oc.TopExp_Explorer_2(
-        wire, oc.TopAbs_ShapeEnum.TopAbs_EDGE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE,
-      ));
-      while (eexp.More()) {
-        const es = new WasmScope();
-        try {
-          const edge  = oc.TopoDS.Edge_1(eexp.Current());
-          const curve = es.keep(new oc.BRepAdaptor_Curve_2(edge));
-          const u0 = curve.FirstParameter(), u1 = curve.LastParameter();
-          if (isFinite(u0) && isFinite(u1) && u1 > u0) {
-            const S = 24;
-            for (let j = 0; j <= S; j++) {
-              const p = curve.Value(u0 + (u1 - u0) * (j / S));
-              accumT(p.X(), p.Y(), p.Z());
-              p.delete();
+      for (const wire of wires) {
+        const eexp = scope.keep(new oc.TopExp_Explorer_2(
+          wire, oc.TopAbs_ShapeEnum.TopAbs_EDGE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE,
+        ));
+        while (eexp.More()) {
+          const es = new WasmScope();
+          try {
+            const edge  = oc.TopoDS.Edge_1(eexp.Current());
+            const curve = es.keep(new oc.BRepAdaptor_Curve_2(edge));
+            const u0 = curve.FirstParameter(), u1 = curve.LastParameter();
+            if (isFinite(u0) && isFinite(u1) && u1 > u0) {
+              const S = 24;
+              for (let j = 0; j <= S; j++) {
+                const p = curve.Value(u0 + (u1 - u0) * (j / S));
+                accumT(p.X(), p.Y(), p.Z());
+                p.delete();
+              }
             }
-          }
-        } catch { /* skip unsamplable edge */ } finally { es.free(); }
-        eexp.Next();
+          } catch { /* skip unsamplable edge */ } finally { es.free(); }
+          eexp.Next();
+        }
       }
       if (!isFinite(tMax) || tMax <= 1e-6) throw new Error('Up-to-Plane: the plane is not ahead of the sketch on the extrusion side.');
 
-      const fm = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
-      if (!fm.IsDone()) throw new Error('Up-to-Plane: face creation failed (closed planar wire required).');
+      // Profile basis = faces-with-holes from every coplanar wire (nested profiles).
+      const basis = OccExtrusionService.buildProfileShape(oc, wires, scope);
 
       // Plane ⟂ extrusion axis → uniform distance, exact blind extrude.
       if (Math.abs(dN) > 0.999) {
         const vec = scope.keep(new oc.gp_Vec_4(dx * tMax, dy * tMax, dz * tMax));
-        const pr  = scope.keep(new oc.BRepPrimAPI_MakePrism_1(fm.Shape(), vec, false, true));
+        const pr  = scope.keep(new oc.BRepPrimAPI_MakePrism_1(basis, vec, false, true));
         if (!pr.IsDone()) throw new Error('Up-to-Plane: extrude failed.');
         return pr.Shape();
       }
@@ -448,7 +466,7 @@ export class OccExtrusionService {
       // Tilted plane → over-extrude then trim at the plane with a half-space.
       const over = tMax + 1;
       const vec   = scope.keep(new oc.gp_Vec_4(dx * over, dy * over, dz * over));
-      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(fm.Shape(), vec, false, true));
+      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(basis, vec, false, true));
       if (!prism.IsDone()) throw new Error('Up-to-Plane: over-extrude failed.');
       const overShape = prism.Shape();
 
@@ -553,21 +571,51 @@ export class OccExtrusionService {
   }
 
   /**
-   * Extrude several non-intersecting closed profiles (Multi-Pad). Each wire is
-   * extruded with the same options; the results are grouped into one compound
-   * (BRep_Builder) so a sketch with multiple regions becomes a single feature.
+   * Extrude several coplanar closed profiles, automatically resolving NESTED
+   * profiles into faces-with-holes (ProfileNesting). A circle inside a rectangle
+   * becomes one block WITH A HOLE; four circles → four holes; a profile nested
+   * inside a hole becomes a solid island again — all by even/odd containment
+   * depth, to any level. Disjoint outer regions (e.g. two separate rectangles)
+   * are grouped into one compound so the whole sketch is a single feature.
    */
   static extrudeProfiles(oc: any, wires: any[], opts: ExtrudeOptions): any {
     if (!wires.length) throw new Error('Multi-extrude: no profiles.');
-    if (wires.length === 1) return OccExtrusionService.extrude(oc, wires[0], opts);
 
-    const builder  = new oc.BRep_Builder();
-    const compound = new oc.TopoDS_Compound();   // returned → not freed here
-    builder.MakeCompound(compound);
-    for (const w of wires) {
-      const solid = OccExtrusionService.extrude(oc, w, opts);
-      builder.Add(compound, solid);
+    const faceScope = new WasmScope();
+    try {
+      const faces = buildNestedFaces(oc, wires, faceScope);
+      if (!faces.length) {
+        throw new Error('Extrusion: no closed planar profile found in the sketch.');
+      }
+      if (faces.length === 1) return OccExtrusionService.extrudeFromFace(oc, faces[0], opts);
+
+      const builder  = new oc.BRep_Builder();
+      const compound = new oc.TopoDS_Compound();   // returned → not freed here
+      builder.MakeCompound(compound);
+      for (const f of faces) {
+        const solid = OccExtrusionService.extrudeFromFace(oc, f, opts);
+        builder.Add(compound, solid);
+      }
+      return compound;
+    } finally {
+      faceScope.free();
     }
+  }
+
+  /**
+   * Basis shape for the up-to-* sweeps: the sketch's coplanar profile wires
+   * resolved to faces WITH HOLES (ProfileNesting). One nested profile → that
+   * face; several disjoint outers → a compound of faces (each prisms / trims
+   * independently). The faces are allocated in `scope` (freed by the caller).
+   */
+  private static buildProfileShape(oc: any, wires: any[], scope: WasmScope): any {
+    const faces = buildNestedFaces(oc, wires, scope);
+    if (!faces.length) throw new Error('Up-to: no closed planar profile in the sketch.');
+    if (faces.length === 1) return faces[0];
+    const builder  = scope.keep(new oc.BRep_Builder());
+    const compound = scope.keep(new oc.TopoDS_Compound());
+    builder.MakeCompound(compound);
+    for (const f of faces) builder.Add(compound, f);
     return compound;
   }
 
@@ -587,7 +635,7 @@ export class OccExtrusionService {
    */
   static extrudeUpToNext(
     oc:   any,
-    wire: any,
+    wires: any[],
     opts: { direction?: [number, number, number]; reverse?: boolean; neutralPoint?: [number, number, number] },
     bodies: any[],
   ): any {
@@ -601,10 +649,9 @@ export class OccExtrusionService {
 
     const scope = new WasmScope();
     try {
-      const fm = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
-      if (!fm.IsDone()) throw new Error('Up-to-Next: face creation failed.');
+      const basis = OccExtrusionService.buildProfileShape(oc, wires, scope);  // faces-with-holes
       const vec   = scope.keep(new oc.gp_Vec_4(dx * over, dy * over, dz * over));
-      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(fm.Shape(), vec, false, true));
+      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(basis, vec, false, true));
       if (!prism.IsDone()) throw new Error('Up-to-Next: over-extrude failed.');
 
       let cur = prism.Shape();
@@ -627,7 +674,7 @@ export class OccExtrusionService {
    */
   static extrudeUpToLast(
     oc:   any,
-    wire: any,
+    wires: any[],
     opts: { direction?: [number, number, number]; reverse?: boolean; neutralPoint?: [number, number, number] },
     bodies: any[],
   ): any {
@@ -641,10 +688,9 @@ export class OccExtrusionService {
 
     const scope = new WasmScope();
     try {
-      const fm = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
-      if (!fm.IsDone()) throw new Error('Up-to-Last: face creation failed.');
+      const basis = OccExtrusionService.buildProfileShape(oc, wires, scope);  // faces-with-holes
       const vec   = scope.keep(new oc.gp_Vec_4(dx * over, dy * over, dz * over));
-      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(fm.Shape(), vec, false, true));
+      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(basis, vec, false, true));
       if (!prism.IsDone()) throw new Error('Up-to-Last: over-extrude failed.');
       const overShape = prism.Shape();
 
@@ -662,9 +708,8 @@ export class OccExtrusionService {
       }
       if (farMost <= 1e-6) throw new Error('Up-to-Last: the profile does not reach any body.');
 
-      const fm2  = scope.keep(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
       const vec2 = scope.keep(new oc.gp_Vec_4(dx * farMost, dy * farMost, dz * farMost));
-      const out  = scope.keep(new oc.BRepPrimAPI_MakePrism_1(fm2.Shape(), vec2, false, true));
+      const out  = scope.keep(new oc.BRepPrimAPI_MakePrism_1(basis, vec2, false, true));
       if (!out.IsDone()) throw new Error('Up-to-Last: final extrude failed.');
       return out.Shape();
     } finally {

@@ -10,6 +10,8 @@
     "preview": "rspack serve --config rspack.config.ts --mode production",
     "clean": "rimraf dist",
     "test:extrude": "node scripts/test-extrude.mjs",
+    "test:nested": "tsx scripts/test-nested-profile.ts",
+    "test:candidate-durability": "node scripts/test-profile-candidate-durability.mjs",
     "test:loft": "node scripts/test-loft.mjs",
     "test:recompute": "node scripts/test-recompute.mjs",
     "test:stableref": "node scripts/test-stableref-blend.mjs",

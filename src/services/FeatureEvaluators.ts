@@ -167,17 +167,17 @@ export const EVALUATORS: Partial<Record<FeatureOp, Evaluator>> = {
       const base = firstRole(inputs, 'base');
       if (!base) throw new Error('extrude up-to-face: needs a base solid input');
       const hitPoint = resolveTargetFacePoint(oc, base.shape, p);
-      solid = OccExtrusionService.extrudeUpToFace(oc, wires[0], upTo, base.shape, hitPoint);
+      solid = OccExtrusionService.extrudeUpToFace(oc, wires, upTo, base.shape, hitPoint);
     } else if (endMode === 6) {                            // up-to-plane (datum)
       const pwp = firstRole(inputs, 'plane')?.meta?.workplane;
       if (!pwp) throw new Error('extrude up-to-plane: needs a datum plane input');
-      solid = OccExtrusionService.extrudeUpToPlane(oc, wires[0], upTo, pwp.origin, pwp.normal);
+      solid = OccExtrusionService.extrudeUpToPlane(oc, wires, upTo, pwp.origin, pwp.normal);
     } else if (endMode === 4 || endMode === 5) {           // up-to-next / up-to-last
       const bodies = byRole(inputs, 'context').map((i) => i.shape);
       if (!bodies.length) throw new Error('extrude up-to-next/last: needs context bodies (engine-supplied)');
       solid = endMode === 4
-        ? OccExtrusionService.extrudeUpToNext(oc, wires[0], upTo, bodies)
-        : OccExtrusionService.extrudeUpToLast(oc, wires[0], upTo, bodies);
+        ? OccExtrusionService.extrudeUpToNext(oc, wires, upTo, bodies)
+        : OccExtrusionService.extrudeUpToLast(oc, wires, upTo, bodies);
     } else {                                               // blind / symmetric / twoSided
       solid = OccExtrusionService.extrudeProfiles(oc, wires, {
         height:       num(p, 'h', 20),

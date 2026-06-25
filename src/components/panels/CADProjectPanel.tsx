@@ -38,12 +38,17 @@ export const CADProjectPanel: React.FC = () => {
     // Back-fill memberIds on legacy region wires so they recompute/follow (saved
     // before region members were persisted — see backfillRegionMembers).
     const nodes = backfillRegionMembers(proj.nodes);
-    // loadScene applies the scene AND migrates it to the dual tree (wrap stray
-    // features into a component, un-nest legacy adopted sketches).
+    // Clear the old meshes (the loaded scene reuses saved ids, so they'd never get
+    // their own cad-remove-mesh), apply + migrate the scene, then rebuild ALL OCC
+    // geometry from the feature tree — shapes aren't serialised. Same sequence as
+    // cadStore.loadProject; without the rebuild every body (and every candidate
+    // profile wire) would stay shapeless after a load.
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cad-scene-reset'));
     useCADStore.getState().loadScene(nodes, proj.rootIds);
+    if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cad-rebuild-all'));
     setActiveId(proj.id);
     setProjectName(proj.name);
-    log(`Project loaded: "${proj.name}" (WASM geometry must be recreated)`, 'warn');
+    log(`Project loaded: "${proj.name}" — rebuilding geometry…`, 'success');
   };
 
   const handleDelete = async (id: string, name: string) => {
