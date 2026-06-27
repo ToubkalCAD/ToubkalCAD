@@ -16,7 +16,7 @@ export type IconName =
   // primitives
   | 'box' | 'cylinder' | 'sphere' | 'torus' | 'cone'
   // modify / boolean
-  | 'fillet' | 'chamfer' | 'union' | 'subtract' | 'intersect'
+  | 'fillet' | 'chamfer' | 'shell' | 'union' | 'subtract' | 'intersect'
   // sketch
   | 'line' | 'circle' | 'rectangle' | 'arc' | 'arc3p' | 'ellipse'
   | 'bezier' | 'spline' | 'polygon' | 'roundrect' | 'constraint'
@@ -46,6 +46,8 @@ const P: Record<IconName, React.ReactNode> = {
   fillet: (<><path d="M4 14V20H10" strokeDasharray="2.4 2.4" opacity=".5" /><path d="M4 4V13A7 7 0 0 0 11 20H21" /></>),
   // sharp corner (dashed) cut off by a flat angled bevel (solid)
   chamfer: (<><path d="M4 13V20H11" strokeDasharray="2.4 2.4" opacity=".5" /><path d="M4 4V12L12 20H21" /></>),
+  // open-topped hollow box — outer walls + inset inner wall, top removed
+  shell: (<><path d="M3.5 7.2l8.5-4.6 8.5 4.6v9.6L12 21.4l-8.5-4.6z" opacity=".5" /><path d="M3.5 7.2L12 11.9l8.5-4.6M12 11.9v9.5" opacity=".5" /><path d="M7 9.4v5.2L12 17l5-2.4V9.4" /></>),
   union: (<><path d="M9 8.2A4.8 4.8 0 1 0 15.8 15 4.8 4.8 0 1 0 9 8.2z" /></>),
   subtract: (<><circle cx="10" cy="12" r="5.4" /><circle cx="15.5" cy="12" r="5.4" strokeDasharray="2.4 2.4" /></>),
   intersect: (<><circle cx="9.6" cy="12" r="5.2" opacity=".5" /><circle cx="14.4" cy="12" r="5.2" opacity=".5" /><path d="M12 7.7a5.2 5.2 0 0 1 0 8.6 5.2 5.2 0 0 1 0-8.6z" /></>),

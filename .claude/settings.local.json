@@ -88,7 +88,9 @@
       "Bash(awk '/^export declare class TopoDS_Shape /{f=1} f{print NR\": \"$0} /^}/{if\\(f\\)exit}' node_modules/opencascade.js/dist/opencascade.full.d.ts)",
       "Bash(pkill -9 -f 'npm run dev')",
       "Bash(pkill -9 -f rspack)",
-      "Bash(grep -rinA3 \"ConstraintDifference::error\" node_modules/@salusoft89/planegcs/)"
+      "Bash(grep -rinA3 \"ConstraintDifference::error\" node_modules/@salusoft89/planegcs/)",
+      "Bash(grep -v \"^\\\\s*$\")",
+      "Bash(awk '/const mkCyl =/,/^  };/' src/components/Ribbon.tsx)"
     ]
   }
 }

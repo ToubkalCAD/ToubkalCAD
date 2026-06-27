@@ -37,6 +37,7 @@ import { OccTransformService, PlaneLabel } from '../services/OccTransformService
 import { CADGeometryRegistry }      from '../services/CADGeometryRegistry';
 import { getPlacedShape }           from '../utils/placedShape';
 import { showBlendPanel }           from './BlendActionPanel';
+import { showShellPanel }           from './ShellActionPanel';
 import { showBooleanPanel }         from './BooleanActionPanel';
 import { showConstraintPanel }      from './ConstraintPanel';
 
@@ -97,7 +98,7 @@ const RIBBON_TABS: RibbonTab[] = [
     { kind:'menu', id:'m-asm',    label:'Assembly',   icon:'mate',       ids:['mate','align','concentric'] },
   ] },
   { id: 'modify', label: 'Modify', items: [
-    'fillet', 'chamfer',
+    'fillet', 'chamfer', 'shell',
     '|',
     { kind:'menu', id:'m-bool', label:'Boolean', icon:'union', ids:['union','subtract','intersect'] },
   ] },
@@ -492,6 +493,17 @@ export const Ribbon: React.FC = () => {
     }
     if (!reg.getShape(selIds[0])) { log('Shape not found in registry.', 'error'); return; }
     showBlendPanel(selIds[0], op);
+  };
+
+  // ─── Shell / hollow (face-pick panel) ────────────────────────────────────────
+  const openShell = () => {
+    if (!selIds.length) { log('Select a solid first.', 'warn'); return; }
+    const node = nodes[selIds[0]];
+    if (!node || node.type === 'sketch' || node.type === 'sketch_wire') {
+      log('Select a 3D solid (not a sketch) to shell.', 'warn'); return;
+    }
+    if (!reg.getShape(selIds[0])) { log('Shape not found in registry.', 'error'); return; }
+    showShellPanel(selIds[0]);
   };
 
   // ─── Boolean operations (guided panel) ──────────────────────────────────────
@@ -1193,6 +1205,7 @@ export const Ribbon: React.FC = () => {
     // modify
     fillet:    { id:'fillet',    icon:'fillet',    label:'Fillet',   run:() => openBlend('fillet'),  enabled:hasSel },
     chamfer:   { id:'chamfer',   icon:'chamfer',   label:'Chamfer',  run:() => openBlend('chamfer'), enabled:hasSel },
+    shell:     { id:'shell',     icon:'shell',     label:'Shell',    run:openShell, active: mode==='SHELL_FACE', enabled:hasSel },
     union:     { id:'union',     icon:'union',     label:'Union',     run:() => boolOp('FUSE'),   accent:'#2f9e54' },
     subtract:  { id:'subtract',  icon:'subtract',  label:'Subtract',  run:() => boolOp('CUT'),    accent:'#c2453f' },
     intersect: { id:'intersect', icon:'intersect', label:'Intersect', run:() => boolOp('COMMON'), accent:'#b08a2a' },

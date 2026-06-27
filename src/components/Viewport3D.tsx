@@ -21,6 +21,7 @@ import { ThreeMeshCache }      from '../services/ThreeMeshCache';
 import { useCADGizmoHotkeys }  from '../hooks/useCADGizmoHotkeys';
 import { useCADSketchTool }    from '../hooks/useCADSketchTool';
 import { useCADEdgeSelect }    from '../hooks/useCADEdgeSelect';
+import { useCADShellFacePick } from '../hooks/useCADShellFacePick';
 import { useCADBooleanPick }   from '../hooks/useCADBooleanPick';
 import { useCADConstraintPick } from '../hooks/useCADConstraintPick';
 import { useCADSketchFacePick } from '../hooks/useCADSketchFacePick';
@@ -46,6 +47,8 @@ import { useCADSketchProjectPick } from '../hooks/useCADSketchProjectPick';
 import { useCADSketchIntersectPick } from '../hooks/useCADSketchIntersectPick';
 import { CADCameraService }    from '../services/CADCameraService';
 import type { CADCamera, CADViewPreset } from '../services/CADCameraService';
+import { createInfiniteGrid, type InfiniteGridHandle } from '../utils/InfiniteGrid';
+import { workplaneBasis } from '../services/OccSketchService';
 import { CADViewportGizmo }   from './CADViewportGizmo';
 import { SketchDimensionInput } from './SketchDimensionInput';
 import { SketchDimensions }    from './SketchDimensions';
@@ -68,6 +71,11 @@ interface Viewport3DProps {
 // clips solids behind it. Tagged datumNodeId (not cadNodeId) so the solid pick
 // hooks ignore it.
 const DATUM_SIZE = 100;
+// Infinite-grid plane half-extent (world units) + the soft neutral light-mode
+// viewport background. GRID_SIZE must stay < camera.far so the plane is never
+// clipped before its radial fade has reached zero.
+const GRID_SIZE = 8000;
+const LIGHT_BG  = 0xeceef2;
 function buildDatumPlaneGroup(id: string, wp: {
   origin: [number,number,number]; normal: [number,number,number];
   uAxis: [number,number,number]; vAxis: [number,number,number];
@@ -170,8 +178,11 @@ function fitCameraToBox(
     const hFov = 2 * Math.atan(Math.tan(vFov / 2) * cam.aspect);
     const dist = Math.max(radius / Math.sin(vFov / 2), radius / Math.sin(hFov / 2)) * margin;
     cam.position.copy(center).addScaledVector(dir, dist);
-    cam.near = Math.max(dist - radius * 2, 0.01);
-    cam.far  = dist + radius * 4;
+    cam.near = Math.max(dist - radius * 2, 0.05);
+    // Floor far so the infinite ground grid + its radial fade are never clipped to
+    // a hard circle when framing a small object (near stays large enough that this
+    // generous far costs little depth precision).
+    cam.far  = Math.max(dist + radius * 4, 20000);
     cam.updateProjectionMatrix();
   } else {
     const cam   = camera as THREE.OrthographicCamera;
@@ -185,33 +196,6 @@ function fitCameraToBox(
   controls.update();
 }
 
-// Two-tier Fusion-style sketch grid: minor sub-divisions every 1 unit, kept
-// exceptionally faint; major lines every 10 units, a muted light gray. Built in
-// the XZ plane (normal +Y) so the caller's yUp→normal quaternion lays it onto the
-// active workplane. No fill mesh — the active plane reads as fully transparent.
-function buildSketchGrid(): THREE.Group {
-  const HALF = 100, MAJOR = 10;
-  const majorPts: number[] = [], minorPts: number[] = [];
-  for (let v = -HALF; v <= HALF; v += 1) {
-    const arr = v % MAJOR === 0 ? majorPts : minorPts;
-    arr.push(-HALF, 0, v, HALF, 0, v);   // line parallel to X at z=v
-    arr.push(v, 0, -HALF, v, 0, HALF);   // line parallel to Z at x=v
-  }
-  const mk = (pts: number[], opacity: number): THREE.LineSegments => {
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
-    const ls = new THREE.LineSegments(
-      g, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity, depthWrite: false }),
-    );
-    ls.renderOrder = -1;   // draw under geometry so it never z-fights sketch curves
-    return ls;
-  };
-  const group = new THREE.Group();
-  group.add(mk(minorPts, 0.04));   // rgba(0,0,0,0.04)
-  group.add(mk(majorPts, 0.15));   // rgba(0,0,0,0.15)
-  return group;
-}
-
 
 export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const containerRef      = useRef<HTMLDivElement>(null);
@@ -221,7 +205,8 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const orthoCamRef       = useRef<THREE.OrthographicCamera | null>(null);
   const orbitRef          = useRef<OrbitControls | null>(null);
   const transformRef      = useRef<TransformControls | null>(null);
-  const workplaneGridRef  = useRef<THREE.Object3D | null>(null);
+  const gridRef           = useRef<InfiniteGridHandle | null>(null);
+  const sketchGridRef     = useRef<InfiniteGridHandle | null>(null);
   const datumGroupsRef    = useRef<Map<string, THREE.Group>>(new Map()); // datum_plane visuals by node id
   const hideDatumsRef     = useRef<boolean>(false);            // true while a 3D-op/blend/boolean panel is open
   const restoreCameraRef  = useRef<(() => void) | null>(null); // stored restore fn
@@ -258,6 +243,9 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── Edge-select hook (handles BLEND_EDGE mode for per-edge fillet/chamfer) ──
   useCADEdgeSelect(containerRef, sceneRef, cameraRef);
+
+  // ─── Shell face-pick hook (handles SHELL_FACE mode — open faces for hollowing) ──
+  useCADShellFacePick(containerRef, sceneRef, cameraRef);
 
   // ─── Boolean-pick hook (handles BOOLEAN_PICK mode for base/tool selection) ───
   useCADBooleanPick(containerRef, sceneRef, cameraRef);
@@ -565,45 +553,37 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     if (!scene) return;
 
     const removePrev = () => {
-      if (workplaneGridRef.current) {
-        scene.remove(workplaneGridRef.current);
-        workplaneGridRef.current.traverse((o) => {
-          if ((o as THREE.Mesh).geometry) (o as THREE.Mesh).geometry.dispose();
-          if ((o as THREE.Mesh).material) {
-            const m = (o as THREE.Mesh).material;
-            if (Array.isArray(m)) m.forEach((x) => x.dispose()); else (m as THREE.Material).dispose();
-          }
-        });
-        workplaneGridRef.current = null;
+      if (sketchGridRef.current) {
+        scene.remove(sketchGridRef.current.group);
+        sketchGridRef.current.dispose();
+        sketchGridRef.current = null;
       }
     };
 
     // Show grid when using a sketch tool OR when a session is active
     const inSketchContext = interactionMode.startsWith('SKETCH_') || !!useCADStore.getState().sketchSession;
+
+    // Hide the infinite ground grid while sketching so only the workplane grid
+    // shows (Fusion-style); restore it on exit.
+    if (gridRef.current) gridRef.current.group.visible = !inSketchContext;
+    window.cadRequestRender?.();
+
     if (!inSketchContext) { removePrev(); return; }
 
     removePrev();
 
-    const { origin, normal } = activeWorkplane;
-    const n = new THREE.Vector3(...normal).normalize();
-    const o = new THREE.Vector3(...origin);
-
-    // Quaternion: rotate GridHelper's default Y-normal to the workplane normal
-    const yUp  = new THREE.Vector3(0, 1, 0);
-    const quat = new THREE.Quaternion().setFromUnitVectors(
-      Math.abs(n.dot(yUp)) > 0.999 ? new THREE.Vector3(0, 0, 1) : yUp, n,
-    );
-
-    // Minimalist workspace: a clean two-tier grid only — no fill mesh (the active
-    // plane reads as fully transparent) and no normal arrow. Drawing projects onto
-    // a math plane, and picks exclude isWorkplaneHelper, so there's nothing to pick
-    // here either.
-    const group = buildSketchGrid();
-    group.quaternion.copy(quat);
-    group.position.copy(o);
-    group.userData.isWorkplaneHelper = true;
-    scene.add(group);
-    workplaneGridRef.current = group;
+    // The workplane grid is the SAME adaptive infinite-grid shader, oriented to the
+    // active plane's (origin, u, v, normal) frame — so it fades to the horizon and
+    // adapts its decades just like the ground grid, but lies on the sketch plane.
+    // No green normal axis here (the U/V origin axes orient the sketch on their own).
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const b = workplaneBasis(activeWorkplane);
+    const sg = createInfiniteGrid({
+      dark, size: GRID_SIZE, showAxes: true, showNormalAxis: false,
+      frame: { origin: b.origin, u: b.uAxis, v: b.vAxis, normal: b.normal },
+    });
+    scene.add(sg.group);
+    sketchGridRef.current = sg;
 
     return removePrev;
   // sketchSession dependency ensures grid appears/disappears with the session
@@ -727,13 +707,16 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
     const isDark = () => document.documentElement.getAttribute('data-theme') === 'dark';
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(isDark() ? 0x15181d : 0xe3e8ee);
+    scene.background = new THREE.Color(isDark() ? 0x15181d : LIGHT_BG);
     sceneRef.current = scene;
 
     const aspect0 = container.clientWidth / container.clientHeight;
     const PERSP_FOV = 45;
 
-    const perspCam = new THREE.PerspectiveCamera(PERSP_FOV, aspect0, 0.01, 5000);
+    // far extended to 20000 so the GRID_SIZE ground plane (and its radial fade)
+    // are never clipped; near nudged to 0.05 (< orbit.minDistance) to claw back
+    // some depth precision against the larger far.
+    const perspCam = new THREE.PerspectiveCamera(PERSP_FOV, aspect0, 0.05, 20000);
     // Strategy 1 — frame the initial view to the standard 100mm origin planes so
     // they don't overwhelm the viewport on first load. Distance is derived the
     // same way fitCameraToBox would frame the XY/YZ/ZX corner (bounding-sphere
@@ -748,7 +731,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
     // Orthographic twin — frustum is sized on demand from the perspective view
     // when we switch into it (see switchProjection). Starts as a 1:1 placeholder.
-    const orthoCam = new THREE.OrthographicCamera(-aspect0, aspect0, 1, -1, -5000, 5000);
+    const orthoCam = new THREE.OrthographicCamera(-aspect0, aspect0, 1, -1, -20000, 20000);
     orthoCam.position.copy(perspCam.position);
     orthoCam.up.copy(perspCam.up);
     orthoCam.lookAt(0, 0, 0);
@@ -781,7 +764,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     orbit.enableDamping = true;
     orbit.dampingFactor = 0.06;
     orbit.minDistance   = 0.1;
-    orbit.maxDistance   = 3000;
+    orbit.maxDistance   = 9000;   // zoom out far enough to watch the grid decades adapt
     orbitRef.current    = orbit;
     window.cadControls  = orbit;
 
@@ -846,21 +829,18 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     fill.position.set(-20, -10, -20);
     scene.add(fill);
 
-    // Ground grid — theme-aware, recreated on theme change (GridHelper bakes
-    // its colours into vertex data, so we rebuild rather than recolour).
-    const makeGrid = (dark: boolean) =>
-      new THREE.GridHelper(200, 200, dark ? 0x3a414c : 0xa8b4c0, dark ? 0x252a31 : 0xc8d0d8);
-    let groundGrid = makeGrid(isDark());
-    scene.add(groundGrid);
+    // Ground grid — a Fusion-style infinite shader grid (adaptive decades +
+    // radial horizon fade + baked origin axes). Recoloured (not rebuilt) on theme.
+    const grid: InfiniteGridHandle = createInfiniteGrid({ dark: isDark(), size: GRID_SIZE });
+    gridRef.current = grid;
+    scene.add(grid.group);
 
     const onThemeChanged = () => {
       const dark = isDark();
-      scene.background = new THREE.Color(dark ? 0x15181d : 0xe3e8ee);
-      scene.remove(groundGrid);
-      groundGrid.geometry.dispose();
-      (groundGrid.material as THREE.Material).dispose();
-      groundGrid = makeGrid(dark);
-      scene.add(groundGrid);
+      scene.background = new THREE.Color(dark ? 0x15181d : LIGHT_BG);
+      grid.setTheme(dark);
+      sketchGridRef.current?.setTheme(dark);
+      requestRender();
     };
     window.addEventListener('cad-theme-changed', onThemeChanged);
 
@@ -1028,6 +1008,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       // drag is active (those disable orbit, so keep drawing every frame until done).
       if (renderFrames > 0 || !orbit.enabled) {
         if (renderFrames > 0) renderFrames--;
+        // Keep the infinite grid(s) centred under the camera and scale the horizon
+        // fade to the current zoom (distance camera→orbit target).
+        const focus = camera.position.distanceTo(orbit.target);
+        gridRef.current?.update(camera, focus);
+        sketchGridRef.current?.update(camera, focus);
         renderer.render(scene, camera);
         labelRenderer.render(scene, camera);   // reproject dimension labels onto the canvas
       }
@@ -1108,6 +1093,10 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       window.cadRequestRender = undefined;
       tc.dispose();
       orbit.dispose();
+      grid.dispose();
+      gridRef.current = null;
+      sketchGridRef.current?.dispose();
+      sketchGridRef.current = null;
       renderer.dispose();
       container.removeEventListener('mousemove', onMouseMove);
       if (renderer.domElement.parentElement === container)

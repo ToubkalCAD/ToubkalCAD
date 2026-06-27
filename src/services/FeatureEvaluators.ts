@@ -24,6 +24,7 @@ import { OccLoftService }       from './OccLoftService';
 import { OccSweepService }      from './OccSweepService';
 import { OccBooleanService }    from './OccBooleanService';
 import { OccFilletService }     from './OccFilletService';
+import { OccThickSolidService } from './OccThickSolidService';
 import { OccExtrusionService }  from './OccExtrusionService';
 import { OccSketchService }     from './OccSketchService';
 import { OccDatumService }      from './OccDatumService';
@@ -117,6 +118,17 @@ export const EVALUATORS: Partial<Record<FeatureOp, Evaluator>> = {
   // to StableRef sub-entity selections in step 4) + a radius/distance.
   fillet:  (oc, inputs, p) => blend(oc, inputs, p, 'fillet'),
   chamfer: (oc, inputs, p) => blend(oc, inputs, p, 'chamfer'),
+
+  // Shell / hollow — one base solid + open-face selection (faceRefs stable
+  // signatures, faceIndices positional fallback) + a signed wall thickness.
+  shell: (oc, inputs, p) => {
+    const base = firstRole(inputs, 'base') ?? inputs[0];
+    if (!base) throw new Error('shell: no source input');
+    const faces = resolveShellFaces(oc, base.shape, p);
+    if (!faces.length) throw new Error('shell: no open faces selected');
+    const thickness = num(p, 'shellThickness', -2);
+    return OccThickSolidService.createThickSolid(oc, base.shape, faces, thickness);
+  },
 
   // Sketch wire — the leaf the whole graph hangs off. Two shapes:
   //   • entity wire: params.sketchGeom (line/circle/arc/polyline) → rebuild directly.
@@ -215,6 +227,31 @@ function blend(oc: any, inputs: ResolvedInput[], p: Record<string, any>, kind: '
   return kind === 'fillet'
     ? OccFilletService.filletEdges(oc, base.shape, edges, value)
     : OccFilletService.chamferEdges(oc, base.shape, edges, value);
+}
+
+/**
+ * Map a shell's stored open-face selection onto face ordinals of the CURRENT
+ * base. Mirrors resolveBlendEdges: prefer the stable FaceSig captured at pick
+ * time (survives an upstream edit that renumbers faces), fall back to the stored
+ * raw ordinal, drop a face only if neither resolves. Legacy nodes with no
+ * `faceRefs` use the raw indices unchanged.
+ */
+export function resolveShellFaces(oc: any, baseShape: any, p: Record<string, any>): number[] {
+  const raw: number[] = Array.isArray(p.faceIndices) ? p.faceIndices : [];
+  const refs: any[]   = Array.isArray(p.faceRefs) ? p.faceRefs : [];
+  if (!refs.length) return raw;                                   // legacy node — unchanged
+
+  const out: number[] = [];
+  for (let i = 0; i < refs.length; i++) {
+    const ref = refs[i];
+    if (ref && ref.kind === 'face') {
+      const r = resolveFace(oc, baseShape, ref);
+      if (!r.rejected && r.index >= 0) { out.push(r.index); continue; }
+    }
+    if (typeof raw[i] === 'number') out.push(raw[i]);             // fall back to stored ordinal
+  }
+  if (!out.length) throw new Error('shell: no open-face reference resolved on the updated body — re-select the faces');
+  return [...new Set(out)];                                       // dedupe
 }
 
 /**

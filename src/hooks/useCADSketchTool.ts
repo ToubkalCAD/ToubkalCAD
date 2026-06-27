@@ -64,14 +64,20 @@ function sampleArc3D(
   });
 }
 
-function sampleArc3PPreview(p1: THREE.Vector3, p2: THREE.Vector3, p3: THREE.Vector3, wp: Workplane): THREE.Vector3[] | null {
-  const lp1 = toLocal2D(p1, wp); const lp2 = toLocal2D(p2, wp); const lp3 = toLocal2D(p3, wp);
-  const D = 2*(lp1.u*(lp2.v-lp3.v)+lp2.u*(lp3.v-lp1.v)+lp3.u*(lp1.v-lp2.v));
-  if (Math.abs(D) < 1e-10) return null;
-  const ux = ((lp1.u*lp1.u+lp1.v*lp1.v)*(lp2.v-lp3.v)+(lp2.u*lp2.u+lp2.v*lp2.v)*(lp3.v-lp1.v)+(lp3.u*lp3.u+lp3.v*lp3.v)*(lp1.v-lp2.v)) / D;
-  const uy = ((lp1.u*lp1.u+lp1.v*lp1.v)*(lp3.u-lp2.u)+(lp2.u*lp2.u+lp2.v*lp2.v)*(lp1.u-lp3.u)+(lp3.u*lp3.u+lp3.v*lp3.v)*(lp2.u-lp1.u)) / D;
-  const center = fromLocal2D(ux, uy, wp);
-  return sampleArc3D(center, p1, p3, wp);
+// Preview for the 3-point arc, where p2 is the MID (bulge) point and the arc runs
+// start=p1 → end=p3 THROUGH p2. Uses the exact same parameters as the committed
+// OCC edge (OccSketchService.arcParams3P) so the rubber-band preview, the
+// committed THREE.Line, and the real arc geometry always agree — including which
+// way the arc bulges (the raw CCW p1→p3 sweep would ignore p2's side).
+function sampleArc3PPreview(p1: THREE.Vector3, p2: THREE.Vector3, p3: THREE.Vector3, wp: Workplane, segs = 48): THREE.Vector3[] | null {
+  const ap = OccSketchService.arcParams3P(p1, p2, p3, wp);
+  if (!ap) return null;   // collinear → caller falls back to a chord line
+  const center = fromLocal2D(ap.c[0], ap.c[1], wp);
+  const { uAxis, vAxis } = workplaneBasis(wp);
+  return Array.from({ length: segs + 1 }, (_, i) => {
+    const a = ap.a1 + ((ap.a2 - ap.a1) * i) / segs;
+    return center.clone().addScaledVector(uAxis, ap.r * Math.cos(a)).addScaledVector(vAxis, ap.r * Math.sin(a));
+  });
 }
 
 /** Project sampled 3D curve points to local-2D — stored as a `polyline` cutter. */
@@ -310,8 +316,12 @@ export function useCADSketchTool(
         else if (clicks.length === 2 && clicks[0].distanceTo(clicks[1]) > 0.01) setPreview(sampleArc3D(clicks[0], clicks[1], pt, wp));
         break;
       case 'SKETCH_ARC_3P':
+        // Fusion-style order: click 1 = start, click 2 = end, click 3 = a point on
+        // the arc (bulge). After the 2nd click BOTH endpoints are fixed and only the
+        // bulge tracks the cursor. arc helpers take (start, mid, end), so the cursor
+        // (prospective bulge) goes in the MIDDLE slot.
         if (clicks.length === 1) setPreview([clicks[0].clone(), pt.clone()]);
-        else if (clicks.length === 2) setPreview(sampleArc3PPreview(clicks[0], clicks[1], pt, wp) ?? [clicks[0].clone(), pt.clone()]);
+        else if (clicks.length === 2) setPreview(sampleArc3PPreview(clicks[0], pt, clicks[1], wp) ?? [clicks[0].clone(), clicks[1].clone()]);
         break;
       case 'SKETCH_ELLIPSE':
         if (clicks.length === 1 && clicks[0].distanceTo(pt) > 0.01) setPreview(sampleCircle3D(clicks[0], pt, wp));
@@ -491,10 +501,25 @@ export function useCADSketchTool(
     const { interactionMode: mode, activeWorkplane: wp, sketchPolygonSides: sides } = useCADStore.getState();
     if (!mode.startsWith('SKETCH_')) return;
 
+    const clicks = clicksRef.current;
+
+    // If the user typed a dimension value, finish where the LIVE PREVIEW shows it:
+    // resolve the typed magnitude along the cursor direction so a viewport click
+    // commits the same point Enter would (preview == placement). No typed value →
+    // the raw cursor point is used unchanged.
+    let placed = pt;
+    const lock = dimLockRef.current;
+    if (lock) {
+      const scale = computeScale(wp);
+      const raw   = toLocal2D(pt, wp);
+      const priorsLocal = clicks.map((c) => { const l = toLocal2D(c, wp); return { x: l.u, y: l.v }; });
+      const set   = buildSketchDims(mode, clicks.length, priorsLocal, { x: raw.u, y: raw.v }, scale);
+      if (set) { const eff = set.resolve(lock, priorsLocal, { x: raw.u, y: raw.v }); placed = fromLocal2D(eff.x, eff.y, wp); }
+    }
+
     dimLockRef.current = null;   // a placed point ends the current step's typed lock
 
-    const clicks = clicksRef.current;
-    clicks.push(pt.clone());
+    clicks.push(placed.clone());
 
     // Sync step counter and local-2D points with store (for overlay)
     const localPts = clicks.map((c) => { const l = toLocal2D(c, wp); return { x: l.u, y: l.v }; });
@@ -568,12 +593,14 @@ export function useCADSketchTool(
 
         case 'SKETCH_ARC_3P': {
           if (clicks.length === 3) {
-            const [p1, p2, p3] = clicks;
-            const edge = OccSketchService.createArcByThreePoints(oc, p1, p2, p3, wp);
+            // Clicks are [start, end, bulge]; the arc helpers want (start, mid, end),
+            // so pass (start, bulge, end) = (clicks[0], clicks[2], clicks[1]).
+            const [start, end, bulge] = clicks;
+            const edge = OccSketchService.createArcByThreePoints(oc, start, bulge, end, wp);
             const wire = OccSketchService.createClosedWireFromEdges(oc, [edge]);
-            const preview = sampleArc3PPreview(p1, p2, p3, wp);
-            addCommitted(preview ?? [p1.clone(), p2.clone(), p3.clone()]);
-            const ap = OccSketchService.arcParams3P(p1, p2, p3, wp);
+            const preview = sampleArc3PPreview(start, bulge, end, wp);
+            addCommitted(preview ?? [start.clone(), bulge.clone(), end.clone()]);
+            const ap = OccSketchService.arcParams3P(start, bulge, end, wp);
             registerWire(oc, wire, 'Arc-3P', wp,
               ap ? { kind: 'arc', c: ap.c, r: ap.r, a1: ap.a1, a2: ap.a2 } : undefined);
           }
@@ -650,7 +677,7 @@ export function useCADSketchTool(
       useCADStore.getState().log(`Sketch error: ${err.message}`, 'error');
       cancelAll();
     }
-  }, [addCommitted, registerWire, registerStraightShape, cancelAll]);
+  }, [addCommitted, registerWire, registerStraightShape, cancelAll, computeScale]);
 
   // ─── Cleanup wires when nodes are deleted ────────────────────────────────────
 
@@ -817,6 +844,9 @@ export function useCADSketchTool(
     const onInjectPoint = (e: Event) => {
       const { localX, localY } = (e as CustomEvent).detail as { localX: number; localY: number };
       const wp = useCADStore.getState().activeWorkplane;
+      // The overlay already resolved the typed value into this point — clear the
+      // lock so processClick places it as-is instead of resolving a second time.
+      dimLockRef.current = null;
       const pt = fromLocal2D(localX, localY, wp);
       processClick(pt);
     };

@@ -52,6 +52,7 @@ export const SketchDimensionInput: React.FC = () => {
   const pillRefs  = useRef<Map<string, HTMLDivElement>>(new Map());
   const inputRefs = useRef<Map<string, HTMLInputElement>>(new Map());
   const dirtyRef  = useRef<Set<string>>(new Set());
+  const lastLockRef = useRef<string>('');   // last broadcast lock signature (dedupe)
   const keysRef   = useRef<FieldDef[]>([]);
   // Latest geometry + context, captured each frame for submit / lock.
   const viewRef   = useRef<{ set: SketchDimSet | null; priors: { x: number; y: number }[]; cursor: { x: number; y: number } | null; wp: Workplane | null }>(
@@ -101,6 +102,7 @@ export const SketchDimensionInput: React.FC = () => {
       if (!mode.startsWith('SKETCH_') || !cursor || !cam || !host) {
         if (keysRef.current.length) { keysRef.current = []; setKeys([]); }
         viewRef.current = { set: null, priors: [], cursor: null, wp: null };
+        lastLockRef.current = '';
         return;
       }
 
@@ -130,6 +132,19 @@ export const SketchDimensionInput: React.FC = () => {
           if (document.activeElement === input) input.select();
         }
       }
+
+      // Once the user has typed into ≥1 field, keep re-broadcasting the lock each
+      // frame so the UNTYPED fields keep tracking the cursor (typed fields stay
+      // fixed). currentVals() reads each input AFTER the refresh above, so untyped
+      // keys carry their live cursor value and dirty keys carry the typed value.
+      // Dedupe by signature so a stationary cursor doesn't spam events.
+      if (dirtyRef.current.size > 0) {
+        const vals = currentVals();
+        const sig = JSON.stringify(vals);
+        if (sig !== lastLockRef.current) { lastLockRef.current = sig; dispatchLock(vals); }
+      } else if (lastLockRef.current) {
+        lastLockRef.current = '';
+      }
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
@@ -147,7 +162,9 @@ export const SketchDimensionInput: React.FC = () => {
 
   const onInput = (key: string) => {
     dirtyRef.current.add(key);          // first keystroke locks this field
-    dispatchLock(currentVals());        // preview + lines follow the typed value live
+    const vals = currentVals();         // preview + lines follow the typed value live
+    lastLockRef.current = JSON.stringify(vals);   // keep the rAF dedupe in sync
+    dispatchLock(vals);
   };
 
   const onKeyDown = (e: React.KeyboardEvent, idx: number) => {
@@ -199,7 +216,13 @@ const pillStyle: React.CSSProperties = {
   position: 'absolute', transform: 'translate(-50%, -50%)',
   display: 'flex', alignItems: 'center', gap: 3, padding: '1px 4px', borderRadius: 4,
   background: 'rgba(255,255,255,0.96)', border: '1px solid rgba(40,51,64,0.5)',
-  boxShadow: '0 1px 5px rgba(0,0,0,0.25)', pointerEvents: 'auto',
+  boxShadow: '0 1px 5px rgba(0,0,0,0.25)',
+  // pointerEvents:none so a placement click passes THROUGH the pill to the canvas
+  // — radial-dimension pills (circle Ø, arc/polygon R) sit right under the cursor,
+  // and otherwise swallow the click that should finish the shape. The field is
+  // auto-focused + kept selected, so the user types directly (no click needed);
+  // Tab moves between fields, Enter or a viewport click commits. See useCADSketchTool.
+  pointerEvents: 'none',
 };
 const labelStyle: React.CSSProperties = { fontSize: 9, color: '#516072', fontWeight: 700 };
 const inputStyle: React.CSSProperties = {

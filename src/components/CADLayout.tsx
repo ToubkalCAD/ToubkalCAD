@@ -24,6 +24,7 @@ import { TreeContextMenu }     from './TreeContextMenu';
 import { Op3DPanel, show3DOpPanel } from './Op3DPanel';
 import type { Op3DRequest, Op3DType } from './Op3DPanel';
 import { BlendActionPanel }    from './BlendActionPanel';
+import { ShellActionPanel }    from './ShellActionPanel';
 import { BooleanActionPanel }  from './BooleanActionPanel';
 import { ConstraintPanel }     from './ConstraintPanel';
 import { CADConsolePanel }      from './panels/CADConsolePanel';
@@ -177,6 +178,12 @@ export const CADLayout: React.FC = () => {
         state.openBlendPanel(sourceId, blendOp, sel[0], edges);
         return;
       }
+      // Shell result → re-open ShellActionPanel
+      if (node.params?.shellOp && node.params?.sourceId) {
+        const faces = (node.params?.faceIndices as number[] | undefined) ?? [];
+        state.openShellPanel(node.params.sourceId as string, sel[0], faces);
+        return;
+      }
       // Boolean result → re-open BooleanActionPanel
       const boolOp = node.params?.boolOp as import('../store/cadStore').BooleanOp | undefined;
       if (boolOp && node.params?.baseId) {
@@ -314,6 +321,7 @@ export const CADLayout: React.FC = () => {
         />
       )}
       <BlendActionPanel />
+      <ShellActionPanel />
       <BooleanActionPanel />
       <ConstraintPanel />
       {advLoftOpen && <AdvancedLoftPanel />}

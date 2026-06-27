@@ -25,7 +25,7 @@ export type FeatureOp =
   | 'box' | 'cylinder' | 'sphere' | 'torus' | 'cone'
   | 'sketch' | 'sketchWire'
   | 'extrude' | 'revolve' | 'loft' | 'sweep'
-  | 'boolean' | 'fillet' | 'chamfer'
+  | 'boolean' | 'fillet' | 'chamfer' | 'shell'
   | 'mirror' | 'pattern'
   | 'datumPlane' | 'datumAxis' | 'datumPoint'
   | 'imported' | 'unknown';
@@ -152,8 +152,15 @@ export function nodeToFeature(node: CADNode): Feature {
       break;
 
     case 'compound': {
-      // 'compound' is overloaded: fillet/chamfer, torus/cone primitives, or import.
-      if (p.blendOp || p.sourceId) {
+      // 'compound' is overloaded: shell, fillet/chamfer, torus/cone primitives, or import.
+      if (p.shellOp) {
+        op = 'shell';
+        push(inputs, refOf(p.sourceId, 'base'));
+        // faceRefs: stable face signatures (step 4); faceIndices: positional fallback.
+        params = pick(p, ['faceIndices', 'faceRefs', 'shellThickness', 'shellOp']);
+        complete = !!p.sourceId;
+        if (!complete) note = 'missing source input';
+      } else if (p.blendOp || p.sourceId) {
         op = (p.blendOp as FeatureOp) === 'chamfer' ? 'chamfer' : 'fillet';
         push(inputs, refOf(p.sourceId, 'base'));
         // edgeRefs: Phase 1a stable signatures (step 4); edgeIndices: legacy

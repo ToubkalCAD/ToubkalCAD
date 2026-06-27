@@ -132,6 +132,7 @@ export type InteractionMode =
   | 'SKETCH_POLYGON'
   | 'MEASURE_DISTANCE'
   | 'BLEND_EDGE'
+  | 'SHELL_FACE'    // picking faces to OPEN for a shell / hollow-solid
   | 'BOOLEAN_PICK'
   | 'CONSTRAIN'
   | 'DIMENSION'     // Smart Dimension — click entities to add a driving dimension + its annotation
@@ -572,6 +573,19 @@ interface CADState {
   /** Replace the whole edge selection (used by Select-All / Clear). */
   setSelectedEdgeIndices: (idx: number[]) => void;
 
+  /** Shell (hollow/thick-solid) request — non-null while the shell panel is open. */
+  shellReq: { targetId: string; editNodeId?: string } | null;
+  /** Stable 0-based face ordinals the user has picked as OPEN faces for the shell. */
+  selectedFaceIndices: number[];
+  /** Open the shell panel and enter SHELL_FACE face-picking mode. */
+  openShellPanel:  (targetId: string, editNodeId?: string, preFaces?: number[]) => void;
+  /** Close the shell panel and return to SELECT mode. */
+  closeShellPanel: () => void;
+  /** Toggle a single face ordinal in/out of the open-face selection. */
+  toggleFaceIndex: (i: number) => void;
+  /** Replace the whole open-face selection. */
+  setSelectedFaceIndices: (idx: number[]) => void;
+
   /** Boolean op request — non-null while the guided boolean panel is open. */
   booleanReq: { op: BooleanOp; editNodeId?: string } | null;
   /** The base solid (the one kept / cut from). */
@@ -885,6 +899,8 @@ export const useCADStore = create<CADState>((set, get) => ({
   profilePickSelected: [],
   blendReq:            null,
   selectedEdgeIndices: [],
+  shellReq:            null,
+  selectedFaceIndices: [],
   booleanReq:          null,
   booleanBaseId:       null,
   booleanToolIds:      [],
@@ -1102,6 +1118,20 @@ export const useCADStore = create<CADState>((set, get) => ({
       : [...s.selectedEdgeIndices, i],
   })),
   setSelectedEdgeIndices: (idx) => set({ selectedEdgeIndices: [...idx] }),
+
+  openShellPanel: (targetId, editNodeId, preFaces) => set({
+    shellReq: { targetId, editNodeId },
+    selectedFaceIndices: preFaces ? [...preFaces] : [],
+    interactionMode: 'SHELL_FACE',
+    selectedIds: [targetId],
+  }),
+  closeShellPanel: () => set({ shellReq: null, selectedFaceIndices: [], interactionMode: 'SELECT' }),
+  toggleFaceIndex: (i) => set((s) => ({
+    selectedFaceIndices: s.selectedFaceIndices.includes(i)
+      ? s.selectedFaceIndices.filter((x) => x !== i)
+      : [...s.selectedFaceIndices, i],
+  })),
+  setSelectedFaceIndices: (idx) => set({ selectedFaceIndices: [...idx] }),
 
   openBooleanPanel: (op, editNodeId, baseId, toolIds) => set({
     booleanReq: { op, editNodeId },
