@@ -467,8 +467,14 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     const sid = sketchSession?.id;
     if (!scene || !sid) return;
 
-    const GHOST_OPACITY_SOLID = 0.16;
+    // Faces drop to near-transparent so they never saturate the active sketch, but
+    // the body's SHARP EDGES are kept crisp (a dark, mostly-opaque wireframe overlay)
+    // so its form stays readable as context — the professional-CAD ghosting recipe.
+    const GHOST_OPACITY_SOLID = 0.08;
     const GHOST_OPACITY_LINE  = 0.30;
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const EDGE_COLOR   = dark ? 0x8a93a0 : 0x5a6472;
+    const EDGE_OPACITY = 0.55;
 
     // Clone a material into a ghosted variant: translucent, no depth write, and
     // desaturated/lifted toward a neutral mid-tone so its colour reads as "context".
@@ -497,6 +503,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
     const ghost = (root: THREE.Object3D) => {
       root.traverse((o) => {
+        if (o.userData?.isGhostEdge) return;   // our own overlay (added mid-traverse) — don't ghost it
         const holder = o as THREE.Mesh;   // Mesh / Line / Points all carry .material
         if (holder.material) {
           const orig  = holder.material;
@@ -506,6 +513,23 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
             holder.material = orig;
             (Array.isArray(ghosted) ? ghosted : [ghosted]).forEach((x) => x.dispose());
           });
+        }
+        // Keep sharp edges legible: overlay a feature-edge wireframe on solid meshes
+        // (bodies carry no edge lines of their own — see ThreeMeshCache). Skip
+        // wireframe meshes and non-solids; child overlay inherits the mesh transform.
+        const isSolidMesh = holder instanceof THREE.Mesh && holder.geometry &&
+          !(holder.material as THREE.MeshStandardMaterial)?.wireframe;
+        if (isSolidMesh) {
+          const edgeGeo = new THREE.EdgesGeometry(holder.geometry, 30);
+          const edgeMat = new THREE.LineBasicMaterial({
+            color: EDGE_COLOR, transparent: true, opacity: EDGE_OPACITY, depthWrite: false,
+          });
+          const edges = new THREE.LineSegments(edgeGeo, edgeMat);
+          edges.userData.isGhostEdge = true;
+          edges.renderOrder = 1;             // draw over the faint faces
+          edges.raycast = NOOP;
+          holder.add(edges);
+          restores.push(() => { holder.remove(edges); edgeGeo.dispose(); edgeMat.dispose(); });
         }
         if (holder.geometry) {             // make this renderable non-interactive
           const origRaycast = o.raycast;

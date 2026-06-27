@@ -46,9 +46,12 @@ export interface InfiniteGridHandle {
   dispose: () => void;
 }
 
+// Thin, low-contrast lines — the professional-CAD look. Minor lines are barely
+// there (they're a measurement aid, not decoration); major lines a touch stronger.
+// Earlier they were too dark/opaque, which read as a dense saturated mesh.
 const PALETTE = {
-  light: { thin: 0xc2cad4, thick: 0xa2adba, minorOp: 0.55, majorOp: 0.9 },
-  dark:  { thin: 0x2b313a, thick: 0x3d4651, minorOp: 0.5,  majorOp: 0.85 },
+  light: { thin: 0xdfe4ea, thick: 0xc4ccd6, minorOp: 0.30, majorOp: 0.55 },
+  dark:  { thin: 0x262b33, thick: 0x333a44, minorOp: 0.35, majorOp: 0.60 },
 };
 // Origin axes — clear but slightly desaturated, matching the viewcube triad.
 const AXIS = { u: 0xd6504e /* red */, v: 0x3f7fd0 /* blue */, n: 0x5aa84b /* green */ };
@@ -120,8 +123,8 @@ const FRAG = /* glsl */`
     float lod0  = uCellSize * pow(10.0, floor(level));  // minor
     float lod1  = lod0 * 10.0;                           // major
 
-    float minorA = gridLine(uv, lod0, 1.5) * (1.0 - f) * uMinorOpacity;  // fades across decades
-    float majorA = gridLine(uv, lod1, 1.5) * uMajorOpacity;
+    float minorA = gridLine(uv, lod0, 1.0) * (1.0 - f) * uMinorOpacity;  // fades across decades
+    float majorA = gridLine(uv, lod1, 1.1) * uMajorOpacity;
 
     vec3  col   = uThinColor;
     float alpha = minorA;
@@ -130,8 +133,8 @@ const FRAG = /* glsl */`
 
     // Origin axes (baked in so they fade with the grid): U where v==0, V where u==0.
     if (uShowAxes > 0.5) {
-      float aU = axisLine(uv.y, 2.2);   // U axis (red), runs where v == 0
-      float aV = axisLine(uv.x, 2.2);   // V axis (blue), runs where u == 0
+      float aU = axisLine(uv.y, 1.7);   // U axis (red), runs where v == 0
+      float aV = axisLine(uv.x, 1.7);   // V axis (blue), runs where u == 0
       col   = mix(col, uAxisUColor, aU);
       alpha = max(alpha, aU);
       col   = mix(col, uAxisVColor, aV);
@@ -170,7 +173,7 @@ export function createInfiniteGrid(opts: GridOptions): InfiniteGridHandle {
     uAxisUColor:   { value: new THREE.Color(AXIS.u) },
     uAxisVColor:   { value: new THREE.Color(AXIS.v) },
     uCellSize:     { value: 1.0 },    // 1 unit == 1 mm minor grid
-    uMinPixels:    { value: 2.5 },
+    uMinPixels:    { value: 3.2 },   // larger → switch decade sooner → fewer, calmer lines
     uMinorOpacity: { value: pal.minorOp },
     uMajorOpacity: { value: pal.majorOp },
     uSize:         { value: size },

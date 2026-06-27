@@ -15,9 +15,16 @@ import { buildSketchDims } from '../utils/sketchDraftDims';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const COLOR_RUBBER  = 0x0077cc;
-const COLOR_COMMIT  = 0xff8800;   // amber — high contrast vs the blue sketch grid
-                                  // (was 0x003388, which blended into grid lines)
+// Industry-standard (Fusion/SolidWorks) sketch status palette — cool, high-contrast
+// colours that pop against the neutral-grey grid instead of blending into it:
+//   active/unconstrained → vibrant blue (the line can still move)
+//   fully constrained    → near-black   (geometry is locked down)
+//   selected             → vibrant orange (warm reserved exclusively for selection)
+//   construction         → dashed grey  (recedes into the background)
+const COLOR_RUBBER       = 0x1a8cff;   // live rubber-band while drawing
+const COLOR_COMMIT       = 0x1a8cff;   // committed, unconstrained sketch geometry
+const COLOR_SELECTED     = 0xff9900;   // selected entity
+const COLOR_CONSTRAINED  = 0x222222;   // fully-constrained sketch (solver "full")
 
 // ─── Curve-sampling for preview ───────────────────────────────────────────────
 
@@ -26,7 +33,7 @@ function mkLine(pts: THREE.Vector3[], color: number): THREE.Line {
   return new THREE.Line(geo, new THREE.LineBasicMaterial({ color, depthTest: false }));
 }
 
-const COLOR_CONSTRUCTION = 0x8a93a3;   // muted blue-grey — reads as "reference"
+const COLOR_CONSTRUCTION = 0x777777;   // neutral grey — recedes as "reference"
 
 /** Dashed, dimmed line for projected reference / construction geometry. */
 function mkConstructionLine(pts: THREE.Vector3[]): THREE.Line {
@@ -121,6 +128,42 @@ function sampleRect3D(c1: THREE.Vector3, c2: THREE.Vector3, wp: Workplane): THRE
     fromLocal2D(l2.u, l2.v, wp), fromLocal2D(l1.u, l2.v, wp),
     fromLocal2D(l1.u, l1.v, wp),
   ];
+}
+
+/**
+ * Visual outline for the rounded rectangle — straight edges + faceted corner arcs.
+ * Mirrors OccSketchService.createRoundedRectangleWire's geometry (same r clamp and
+ * corner centres) so the drawn sketch matches the OCC wire that gets extruded.
+ * Each arc's first point closes the straight edge from the previous arc's last point;
+ * the final arc returns to the start, so the strip is a closed loop.
+ */
+function sampleRoundedRect3D(
+  c1: THREE.Vector3, c2: THREE.Vector3, cornerRadius: number, wp: Workplane, segs = 8,
+): THREE.Vector3[] {
+  const l1 = toLocal2D(c1, wp); const l2 = toLocal2D(c2, wp);
+  let u1 = l1.u, v1 = l1.v, u2 = l2.u, v2 = l2.v;
+  if (u1 > u2) { [u1, u2] = [u2, u1]; } if (v1 > v2) { [v1, v2] = [v2, v1]; }
+  const r = Math.min(cornerRadius, Math.min(u2 - u1, v2 - v1) / 2 - 1e-4);
+  if (r <= 1e-4) return sampleRect3D(c1, c2, wp);
+  const PI = Math.PI;
+  const pts: THREE.Vector3[] = [fromLocal2D(u1 + r, v1, wp)];
+  const arc = (cu: number, cv: number, a1: number, a2: number) => {
+    for (let i = 0; i <= segs; i++) {
+      const t = a1 + (a2 - a1) * (i / segs);
+      pts.push(fromLocal2D(cu + r * Math.cos(t), cv + r * Math.sin(t), wp));
+    }
+  };
+  arc(u2 - r, v1 + r, -PI / 2, 0);      // bottom edge + bottom-right corner
+  arc(u2 - r, v2 - r, 0, PI / 2);       // right edge  + top-right corner
+  arc(u1 + r, v2 - r, PI / 2, PI);      // top edge    + top-left corner
+  arc(u1 + r, v1 + r, PI, 3 * PI / 2);  // left edge   + bottom-left corner (back to start)
+  return pts;
+}
+
+/** Corner radius for the rounded rect — shared by preview and commit so they match. */
+function roundedRectRadius(c1: THREE.Vector3, rPt: THREE.Vector3, c2: THREE.Vector3, wp: Workplane): number {
+  const l1 = toLocal2D(c1, wp); const l2 = toLocal2D(c2, wp);
+  return Math.max(0.1, Math.min(rPt.distanceTo(c1), Math.min(Math.abs(l2.u - l1.u), Math.abs(l2.v - l1.v)) / 2 - 0.001));
 }
 
 function sampleBezier3D(pts: THREE.Vector3[], segs = 60): THREE.Vector3[] {
@@ -332,7 +375,8 @@ export function useCADSketchTool(
         break;
       case 'SKETCH_ROUNDED_RECT':
         if (clicks.length === 1) setPreview(sampleRect3D(clicks[0], pt, wp));
-        else if (clicks.length === 2) setPreview([clicks[0].clone(), pt.clone()], 0xff8800);
+        else if (clicks.length === 2)
+          setPreview(sampleRoundedRect3D(clicks[0], clicks[1], roundedRectRadius(clicks[0], pt, clicks[1], wp), wp));
         break;
       case 'SKETCH_BEZIER':
         if (clicks.length >= 1) setPreview(sampleBezier3D([...clicks, pt]));
@@ -427,7 +471,7 @@ export function useCADSketchTool(
         id: ids[i], name: `${baseName} ${i + 1}`, type: 'sketch_wire',
         visible: true, locked: false, parentId: sketchSession.id, notes: '',
         transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
-        material: { color: 0x003388, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
+        material: { color: COLOR_COMMIT, roughness: 0.5, metalness: 0, wireframe: true, opacity: 1, transparent: false },
         params: { workplane: wp, sketchGeom: { kind: 'line', a: a2, b: b2 } },
       });
       visuals.push({ id: ids[i], pts: [[a3.x, a3.y, a3.z], [b3.x, b3.y, b3.z]] });
@@ -477,7 +521,7 @@ export function useCADSketchTool(
       parentId: sketchSession?.id ?? null,
       notes: '',
       transform: { position:[0,0,0], rotation:[0,0,0], scale:[1,1,1] },
-      material:  { color:0x003388, roughness:0.5, metalness:0, wireframe:true, opacity:1, transparent:false },
+      material:  { color:COLOR_COMMIT, roughness:0.5, metalness:0, wireframe:true, opacity:1, transparent:false },
       // sketchGeom (local-2D defining points) lets Phase-8 constraints re-solve this entity.
       params: geom ? { workplane: wp, sketchGeom: geom } : { workplane: wp },
     });
@@ -656,11 +700,9 @@ export function useCADSketchTool(
         case 'SKETCH_ROUNDED_RECT': {
           if (clicks.length === 3) {
             const [c1, c2, rPt] = clicks;
-            const l1 = toLocal2D(c1, wp); const l2 = toLocal2D(c2, wp);
-            const cornerRadius = Math.max(0.1,
-              Math.min(rPt.distanceTo(c1), Math.min(Math.abs(l2.u-l1.u), Math.abs(l2.v-l1.v))/2 - 0.001));
+            const cornerRadius = roundedRectRadius(c1, rPt, c2, wp);
             const wire = OccSketchService.createRoundedRectangleWire(oc, c1, c2, cornerRadius, wp);
-            addCommitted(sampleRect3D(c1, c2, wp));
+            addCommitted(sampleRoundedRect3D(c1, c2, cornerRadius, wp));
             registerWire(oc, wire, `RndRect-r${cornerRadius.toFixed(1)}`, wp);
           }
           break;
@@ -704,6 +746,33 @@ export function useCADSketchTool(
         const node = curr.nodes[id];
         if (node) lines.forEach((l) => { l.visible = node.visible; });
       }
+    });
+    return unsub;
+  }, []);
+
+  // ─── Status colour: blue (unconstrained) / black (fully constrained) / orange (selected) ──
+  // Recolour committed sketch wires from the live selection + solver state so the
+  // viewport mirrors Fusion's status palette. Construction lines (dashed) are left
+  // grey — they're reference geometry, not driving entities.
+  useEffect(() => {
+    const applyColours = () => {
+      const { selectedIds, constraintStatus, nodes } = useCADStore.getState();
+      const sel  = new Set(selectedIds);
+      const full = constraintStatus?.state === 'full';
+      for (const [id, lines] of wireVisualsRef.current) {
+        if (nodes[id]?.params?.construction) continue;             // dashed reference — leave grey
+        const color = sel.has(id) ? COLOR_SELECTED : (full ? COLOR_CONSTRAINED : COLOR_COMMIT);
+        lines.forEach((l) => {
+          const m = l.material as THREE.LineBasicMaterial;
+          if (!(m instanceof THREE.LineDashedMaterial)) m.color.setHex(color);
+        });
+      }
+      window.cadRequestRender?.();
+    };
+    applyColours();
+    const unsub = useCADStore.subscribe((c, p) => {
+      if (c.selectedIds !== p.selectedIds || c.constraintStatus !== p.constraintStatus || c.nodes !== p.nodes)
+        applyColours();
     });
     return unsub;
   }, []);

@@ -112,6 +112,22 @@ export function workplaneBasis(wp: Workplane) {
   };
 }
 
+/**
+ * Right-handed normal for gp_Circ/gp_Elips frames built from a workplane.
+ * A gp_Ax2(loc, N, X) sets the local Y to N × X, so angle-parametrised arcs land
+ * at center + r·cosθ·uAxis + r·sinθ·(N × uAxis). For the arc maths (atan2 in the
+ * (u,v) frame, and the hard-coded rounded-rect corner angles) to be correct, that
+ * local Y must equal vAxis — which requires N = uAxis × vAxis, NOT the stored
+ * wp.normal. They agree on right-handed planes (XY, YZ) but DIFFER by sign on a
+ * left-handed one (the ZX preset: wp.normal = -(uAxis × vAxis)). Using wp.normal
+ * there flips every arc, so its endpoints miss the straight edges and the wire
+ * fails to assemble ("Wire assembly failed"). Always derive the frame normal here.
+ */
+function arcFrameNormal(wp: Workplane): THREE.Vector3 {
+  const { uAxis, vAxis } = workplaneBasis(wp);
+  return uAxis.clone().cross(vAxis).normalize();
+}
+
 /** Project a global point onto the workplane's local 2D coords (u, v). */
 export function toLocal2D(pt: V3, wp: Workplane): { u: number; v: number } {
   const { origin, uAxis, vAxis } = workplaneBasis(wp);
@@ -157,7 +173,8 @@ export class OccSketchService {
   // causing _10 to fail with "Arc edge failed".
 
   static createArcEdge(oc: any, center: V3, startPt: V3, endPt: V3, wp: Workplane): any {
-    const { normal, uAxis } = workplaneBasis(wp);
+    const { uAxis } = workplaneBasis(wp);
+    const frameN = arcFrameNormal(wp);
     const radius = center.distanceTo(startPt);
     if (radius < 1e-6) throw new Error('Arc radius too small');
 
@@ -171,7 +188,7 @@ export class OccSketchService {
     // Ensure CCW: a2 must be strictly greater than a1
     if (a2 <= a1) a2 += 2 * Math.PI;
 
-    const ax2   = ax2WithX(oc, center, normal, uAxis);
+    const ax2   = ax2WithX(oc, center, frameN, uAxis);
     const circ  = new oc.gp_Circ_2(ax2, radius);
     const maker = new oc.BRepBuilderAPI_MakeEdge_9(circ, a1, a2);
     ax2.delete(); circ.delete();
@@ -189,8 +206,9 @@ export class OccSketchService {
     if (!params) throw new Error('Arc-3P: points are collinear');
     const { c, r, a1, a2 } = params;
     const center3D = fromLocal2D(c[0], c[1], wp);
-    const { normal, uAxis } = workplaneBasis(wp);
-    const ax2   = ax2WithX(oc, center3D, normal, uAxis);
+    const { uAxis } = workplaneBasis(wp);
+    const frameN = arcFrameNormal(wp);
+    const ax2   = ax2WithX(oc, center3D, frameN, uAxis);
     const circ  = new oc.gp_Circ_2(ax2, r);
     const maker = new oc.BRepBuilderAPI_MakeEdge_9(circ, a1, a2);
     ax2.delete(); circ.delete();
@@ -256,32 +274,33 @@ export class OccSketchService {
     let u1=l1.u, v1=l1.v, u2=l2.u, v2=l2.v;
     if (u1 > u2) { [u1, u2] = [u2, u1]; } if (v1 > v2) { [v1, v2] = [v2, v1]; }
     const r  = Math.min(cornerRadius, Math.min(u2-u1, v2-v1) / 2 - 1e-4);
-    const { normal, uAxis } = workplaneBasis(wp);
+    const { uAxis } = workplaneBasis(wp);
+    const frameN = arcFrameNormal(wp);
     const PI = Math.PI;
 
-    // 4 straight edges
-    const edges: any[] = [];
-    edges.push(lineEdge(oc, fromLocal2D(u1+r, v1, wp), fromLocal2D(u2-r, v1, wp)));
-    edges.push(lineEdge(oc, fromLocal2D(u2, v1+r, wp), fromLocal2D(u2, v2-r, wp)));
-    edges.push(lineEdge(oc, fromLocal2D(u2-r, v2, wp), fromLocal2D(u1+r, v2, wp)));
-    edges.push(lineEdge(oc, fromLocal2D(u1, v2-r, wp), fromLocal2D(u1, v1+r, wp)));
-
-    // 4 corner arcs
-    const arcCorners: Array<{ cu: number; cv: number; a1: number; a2: number }> = [
-      { cu: u2-r, cv: v1+r, a1: -PI/2, a2: 0 },
-      { cu: u2-r, cv: v2-r, a1: 0,     a2: PI/2 },
-      { cu: u1+r, cv: v2-r, a1: PI/2,  a2: PI },
-      { cu: u1+r, cv: v1+r, a1: PI,    a2: 3*PI/2 },
-    ];
-    for (const { cu, cv, a1, a2 } of arcCorners) {
+    const arcEdge = (cu: number, cv: number, a1: number, a2: number): any => {
       const ctr = fromLocal2D(cu, cv, wp);
-      const ax2 = ax2WithX(oc, ctr, normal, uAxis);
+      const ax2 = ax2WithX(oc, ctr, frameN, uAxis);
       const circ = new oc.gp_Circ_2(ax2, r);
       const mk   = new oc.BRepBuilderAPI_MakeEdge_9(circ, a1, a2);
       ax2.delete(); circ.delete();
       if (!mk.IsDone()) { mk.delete(); throw new Error('Corner arc failed'); }
-      edges.push(mk.Edge()); mk.delete();
-    }
+      const e = mk.Edge(); mk.delete(); return e;
+    };
+
+    // Edges in connected order (line → corner arc → line → …) so MakeWire can
+    // assemble them end-to-end. Adding all 4 lines first then the arcs breaks the
+    // wire builder, which requires each added edge to touch the previous one.
+    const edges: any[] = [
+      lineEdge(oc, fromLocal2D(u1+r, v1, wp), fromLocal2D(u2-r, v1, wp)),  // bottom
+      arcEdge(u2-r, v1+r, -PI/2, 0),                                       // bottom-right
+      lineEdge(oc, fromLocal2D(u2, v1+r, wp), fromLocal2D(u2, v2-r, wp)),  // right
+      arcEdge(u2-r, v2-r, 0, PI/2),                                        // top-right
+      lineEdge(oc, fromLocal2D(u2-r, v2, wp), fromLocal2D(u1+r, v2, wp)),  // top
+      arcEdge(u1+r, v2-r, PI/2, PI),                                       // top-left
+      lineEdge(oc, fromLocal2D(u1, v2-r, wp), fromLocal2D(u1, v1+r, wp)),  // left
+      arcEdge(u1+r, v1+r, PI, 3*PI/2),                                     // bottom-left
+    ];
     return makeWire(oc, edges);
   }
 
