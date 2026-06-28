@@ -134,6 +134,51 @@ export class OccExtrusionService {
   }
 
   /**
+   * SURFACE extrude (zero-thickness): prism the WIRE directly instead of a face,
+   * so the result is a TopoDS_Shell (closed profile → open tube, no end caps) or a
+   * TopoDS_Face (open profile → single sheet). This is the core distinction from
+   * the solid `extrude`, which first caps the wire with BRepBuilderAPI_MakeFace.
+   * Same blind / symmetric / two-sided limits. Register the result with
+   * bodyType:'surface'. No draft / thickness (those are solid-only).
+   */
+  static extrudeSurface(oc: any, wire: any, opts: ExtrudeOptions): any {
+    const { height, end = 'blind', height2 = 0, reverse = false, direction = [0, 1, 0] } = opts;
+    if (height <= 0) throw new Error('Surface extrude height must be > 0');
+
+    let [dx, dy, dz] = direction;
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (len < 1e-10) throw new Error('Surface extrude direction is zero-length');
+    dx /= len; dy /= len; dz /= len;
+    if (reverse) { dx = -dx; dy = -dy; dz = -dz; }
+
+    let back = 0, total = height;
+    if (end === 'symmetric')     { back = height / 2; total = height; }
+    else if (end === 'twoSided') {
+      if (height2 <= 0) throw new Error('Second limit (height2) must be > 0');
+      back = height2; total = height + height2;
+    }
+
+    const scope = new WasmScope();
+    try {
+      let prof = wire;
+      if (back > 1e-9) {                                   // shift the profile back for symmetric / two-sided
+        const trsf = scope.keep(new oc.gp_Trsf_1());
+        const tv   = scope.keep(new oc.gp_Vec_4(-dx * back, -dy * back, -dz * back));
+        trsf.SetTranslation_1(tv);
+        const mover = scope.keep(new oc.BRepBuilderAPI_Transform_2(prof, trsf, true));
+        if (!mover.IsDone()) throw new Error('Surface extrude: profile offset failed');
+        prof = mover.Shape();
+      }
+      const vec   = scope.keep(new oc.gp_Vec_4(dx * total, dy * total, dz * total));
+      const prism = scope.keep(new oc.BRepPrimAPI_MakePrism_1(prof, vec, false, true));
+      if (!prism.IsDone()) throw new Error('Surface extrude: prism computation failed');
+      return prism.Shape();
+    } finally {
+      scope.free();
+    }
+  }
+
+  /**
    * Hollow a prism into an open thin-walled tube of the given wall thickness
    * (CATIA "Thick" on a closed profile). Both cap faces (normal ∥ pull dir) are
    * removed, leaving the side walls offset inward by `thickness`.

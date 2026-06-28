@@ -148,6 +148,41 @@ export class OccRevolutionService {
     return out;
   }
 
+  /**
+   * SURFACE revolve (zero-thickness): revolve the profile WIRE directly instead of
+   * a capped face, so the result is a TopoDS_Shell (full 360° tube of revolution) or
+   * a TopoDS_Face (partial sweep / open profile) — no enclosed solid. This is the
+   * core distinction from the solid `revolveProfile`, which first wraps the wire in a
+   * face. Same axis + 1–360° angle. Register the result with bodyType:'surface'.
+   */
+  static revolveSurface(
+    oc:         any,
+    wire:       any,
+    axisOrigin: [number, number, number] = [0, 0, 0],
+    axisDir:    [number, number, number] = [0, 1, 0],
+    angleDeg:   number = 360,
+  ): any {
+    if (angleDeg <= 0 || angleDeg > 360)
+      throw new Error('Revolution angle must be between 1° and 360°.');
+
+    const scope = new WasmScope();
+    try {
+      const origin = scope.keep(new oc.gp_Pnt_3(...axisOrigin));
+      const dir    = scope.keep(new oc.gp_Dir_4(...axisDir));
+      const axis   = scope.keep(new oc.gp_Ax1_2(origin, dir));
+      const prog   = scope.keep(new oc.Message_ProgressRange_1());
+
+      const mkRev = Math.abs(angleDeg - 360) < 1e-4
+        ? scope.keep(new oc.BRepPrimAPI_MakeRevol_2(wire, axis, false))
+        : scope.keep(new oc.BRepPrimAPI_MakeRevol_1(wire, axis, angleDeg * (Math.PI / 180), false));
+      mkRev.Build(prog);
+      if (!mkRev.IsDone()) throw new Error('Surface revolution computation failed.');
+      return mkRev.Shape();
+    } finally {
+      scope.free();
+    }
+  }
+
   /** Backwards-compat alias used by existing CADToolbar for torus/cone callers. */
   static revolve = OccRevolutionService.revolveProfile;
 

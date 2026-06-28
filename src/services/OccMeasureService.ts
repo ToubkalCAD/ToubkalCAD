@@ -7,35 +7,53 @@
 // ============================================================
 
 export interface ShapeProperties {
-  volume:          number;   // mm³
+  volume:          number;   // mm³ (0 for a surface body — see isSurface)
   surfaceArea:     number;   // mm²
   centerOfGravity: [number, number, number]; // mm
   // Propriétés de masse (avec densité en g/mm³)
-  mass?:           number;   // grammes
+  mass?:           number;   // grammes (undefined for a surface body)
+  /** True when the shape is a zero-thickness surface body: volume/mass are not
+   *  defined (OCC VolumeProperties on an open shell returns a misleading SWEPT
+   *  volume via the divergence theorem). The CoG is then the AREA centroid. */
+  isSurface?:      boolean;
 }
 
 export class OccMeasureService {
 
   /**
-   * Calcule les propriétés géométriques d'un solide.
-   * @param density  Densité en g/mm³ (défaut 0.00785 = acier)
+   * Calcule les propriétés géométriques d'une forme.
+   * @param density   Densité en g/mm³ (défaut 0.00785 = acier)
+   * @param isSurface Forme zéro-épaisseur (TopoDS_Shell/Face). On saute alors le
+   *                  calcul de volume/masse (non défini) et la CoG = centroïde
+   *                  d'aire. Le picker passe node.bodyType==='surface'.
    */
   static getShapeProperties(
-    oc:      any,
-    shape:   any,
-    density: number = 0.00785,
+    oc:        any,
+    shape:     any,
+    density:   number = 0.00785,
+    isSurface: boolean = false,
   ): ShapeProperties {
-    const props = new oc.GProp_GProps_1();
-    oc.BRep_Tool.prototype; // assure le chargement
-    oc.BRepGProp.VolumeProperties_1(shape, props, true, false, false);
-
-    const cog = props.CentreOfMass();
-    const vol  = props.Mass(); // BRepGProp renvoie le volume quand density=1
-
-    // Surface area
+    // Surface area + area centroid — meaningful for both solids and surfaces.
     const surfProps = new oc.GProp_GProps_1();
     oc.BRepGProp.SurfaceProperties_1(shape, surfProps, false, false);
     const area = surfProps.Mass();
+
+    if (isSurface) {
+      const acog = surfProps.CentreOfMass();
+      const out: ShapeProperties = {
+        volume:          0,
+        surfaceArea:     area,
+        centerOfGravity: [acog.X(), acog.Y(), acog.Z()],
+        isSurface:       true,
+      };
+      surfProps.delete();
+      return out;
+    }
+
+    const props = new oc.GProp_GProps_1();
+    oc.BRepGProp.VolumeProperties_1(shape, props, true, false, false);
+    const cog = props.CentreOfMass();
+    const vol = props.Mass(); // BRepGProp renvoie le volume quand density=1
 
     props.delete();
     surfProps.delete();
@@ -45,6 +63,7 @@ export class OccMeasureService {
       surfaceArea:     area,
       centerOfGravity: [cog.X(), cog.Y(), cog.Z()],
       mass:            vol * density,
+      isSurface:       false,
     };
   }
 

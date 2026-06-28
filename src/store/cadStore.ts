@@ -32,6 +32,14 @@ export type NodeType =
   | 'extrusion' | 'boolean_operation' | 'compound'
   | 'sketch' | 'sketch_wire'
   | 'revolve' | 'sweep' | 'loft'
+  | 'surface_extrude'   // Surface Modeling — zero-thickness sheet from a profile (bodyType:'surface')
+  | 'surface_patch'     // Surface Modeling — boundary/fill surface from a closed loop (bodyType:'surface')
+  | 'surface_stitch'    // Surface Modeling — sew ≥2 surfaces into a shell (solid if closed)
+  | 'surface_thicken'   // Surface Modeling — offset a surface into a solid (always bodyType:'solid')
+  | 'surface_trim'      // Surface Modeling — trim a surface body with a tool body (bodyType:'surface')
+  | 'surface_extend'    // Surface Modeling — grow a surface body's UV bounds (bodyType:'surface')
+  | 'surface_blend'     // Surface Modeling — tangent G1 bridge between two surfaces (bodyType:'surface')
+  | 'surface_solidify'  // Surface Modeling — cap open boundaries + sew into a solid (bodyType:'solid')
   | 'mirror' | 'pattern'
   // Reference geometry (Track D) — carry no OCC solid; render from params.
   | 'datum_plane' | 'datum_axis' | 'datum_point';
@@ -51,8 +59,14 @@ export const DATUM_TYPES = new Set<NodeType>(['datum_plane', 'datum_axis', 'datu
  *  (sketch_wire is excluded — it is a child of its `sketch`, not of the component.) */
 export const FEATURE_TYPES = new Set<NodeType>([
   'box', 'cylinder', 'sphere', 'extrusion', 'boolean_operation', 'compound',
-  'sketch', 'revolve', 'sweep', 'loft', 'mirror', 'pattern',
+  'sketch', 'revolve', 'sweep', 'loft', 'surface_extrude', 'surface_patch',
+  'surface_stitch', 'surface_thicken', 'surface_trim', 'surface_extend', 'surface_blend',
+  'surface_solidify', 'mirror', 'pattern',
 ]);
+
+/** Feature types that produce a zero-thickness SURFACE body rather than a solid.
+ *  The renderer/tree use this (plus the node's `bodyType`) for material + iconography. */
+export const SURFACE_FEATURE_TYPES = new Set<NodeType>(['surface_extrude', 'surface_patch', 'surface_trim', 'surface_extend', 'surface_blend']);
 
 export const isStructural = (t: NodeType): boolean => STRUCTURAL_TYPES.has(t);
 export const isDatum      = (t: NodeType): boolean => DATUM_TYPES.has(t);
@@ -132,6 +146,7 @@ export type InteractionMode =
   | 'SKETCH_POLYGON'
   | 'MEASURE_DISTANCE'
   | 'BLEND_EDGE'
+  | 'SURFACE_BLEND_EDGE'  // picking one boundary edge on each of two surface bodies to bridge
   | 'SHELL_FACE'    // picking faces to OPEN for a shell / hollow-solid
   | 'BOOLEAN_PICK'
   | 'CONSTRAIN'
@@ -306,6 +321,9 @@ export interface CADNode {
     scale:    [number, number, number];
   };
   material: CADMaterial;
+  /** Solid vs zero-thickness surface body. Absent ⇒ 'solid' (back-compat). Drives
+   *  the render material (DoubleSide + translucent) and the tree's surface badge. */
+  bodyType?: 'solid' | 'surface';
   notes:    string;
   /**
    * Type-specific metadata. Notable contracts:
@@ -573,6 +591,18 @@ interface CADState {
   /** Replace the whole edge selection (used by Select-All / Clear). */
   setSelectedEdgeIndices: (idx: number[]) => void;
 
+  /** Surface-blend request — non-null while the SurfaceBlendPanel is open. The two
+   *  bodies are bridged; `pickA`/`pickB` are optional explicit boundary-edge ordinals
+   *  (null ⇒ auto-nearest for that side). */
+  surfaceBlendReq: { aId: string; bId: string; editNodeId?: string } | null;
+  surfaceBlendPick: { a: number | null; b: number | null };
+  /** Open the surface-blend panel + enter SURFACE_BLEND_EDGE mode. */
+  openSurfaceBlend:  (aId: string, bId: string, editNodeId?: string, picks?: { a: number | null; b: number | null }) => void;
+  /** Close the panel and return to SELECT mode. */
+  closeSurfaceBlend: () => void;
+  /** Set the picked edge ordinal for body 'a' or 'b' (null clears → auto). */
+  setSurfaceBlendPick: (which: 'a' | 'b', ordinal: number | null) => void;
+
   /** Shell (hollow/thick-solid) request — non-null while the shell panel is open. */
   shellReq: { targetId: string; editNodeId?: string } | null;
   /** Stable 0-based face ordinals the user has picked as OPEN faces for the shell. */
@@ -670,6 +700,18 @@ export const DEFAULT_MATERIAL: CADMaterial = {
   transparent: false,
 };
 
+// Surface bodies render translucent + matte in a warm amber so a zero-thickness
+// sheet reads instantly as "surface, not solid". DoubleSide is applied globally in
+// ThreeMeshCache, so the underside of trimmed sheets/patches is visible.
+export const SURFACE_MATERIAL: CADMaterial = {
+  color:       0xe0a32e,
+  roughness:   0.6,
+  metalness:   0.0,
+  wireframe:   false,
+  opacity:     0.72,
+  transparent: true,
+};
+
 export function normalizeMaterial(material: Partial<CADMaterial>): CADMaterial {
   const color = Number.isFinite(material.color) ? (((material.color as number) & 0xffffff)) : DEFAULT_MATERIAL.color;
   const roughness = Number.isFinite(material.roughness)
@@ -706,6 +748,15 @@ export const NODE_TYPE_COLORS: Record<NodeType, number> = {
   revolve:           0xcc4488,
   sweep:             0x44bbcc,
   loft:              0xcc8844,
+  surface_extrude:   0xe0a32e,   // amber — surface body
+  surface_patch:     0xe0a32e,   // amber — surface body
+  surface_stitch:    0x4aa58a,   // teal — sewn shell (solid if closed)
+  surface_thicken:   0x5fa9d6,   // steel-blue — solid from offset surface
+  surface_trim:      0xe0a32e,   // amber — surface body
+  surface_extend:    0xe0a32e,   // amber — surface body
+  surface_blend:     0xe0a32e,   // amber — surface body
+  surface_solidify:  0x6a9a3a,   // green — surface capped into a solid
+
   mirror:            0x4488cc,
   pattern:           0x8844cc,
   datum_plane:       0xf0a30a,   // Fusion amber
@@ -899,6 +950,8 @@ export const useCADStore = create<CADState>((set, get) => ({
   profilePickSelected: [],
   blendReq:            null,
   selectedEdgeIndices: [],
+  surfaceBlendReq:     null,
+  surfaceBlendPick:    { a: null, b: null },
   shellReq:            null,
   selectedFaceIndices: [],
   booleanReq:          null,
@@ -1118,6 +1171,15 @@ export const useCADStore = create<CADState>((set, get) => ({
       : [...s.selectedEdgeIndices, i],
   })),
   setSelectedEdgeIndices: (idx) => set({ selectedEdgeIndices: [...idx] }),
+
+  openSurfaceBlend: (aId, bId, editNodeId, picks) => set({
+    surfaceBlendReq: { aId, bId, editNodeId },
+    surfaceBlendPick: picks ? { ...picks } : { a: null, b: null },
+    interactionMode: 'SURFACE_BLEND_EDGE',
+    selectedIds: [aId, bId],
+  }),
+  closeSurfaceBlend: () => set({ surfaceBlendReq: null, surfaceBlendPick: { a: null, b: null }, interactionMode: 'SELECT' }),
+  setSurfaceBlendPick: (which, ordinal) => set((s) => ({ surfaceBlendPick: { ...s.surfaceBlendPick, [which]: ordinal } })),
 
   openShellPanel: (targetId, editNodeId, preFaces) => set({
     shellReq: { targetId, editNodeId },

@@ -14,13 +14,15 @@
 // ============================================================
 
 import React, { useState, useEffect, useRef } from 'react';
-import { useCADStore, DEFAULT_MATERIAL, NODE_TYPE_COLORS, InteractionMode, STANDARD_WORKPLANES, DATUM_TYPES } from '../store/cadStore';
+import { useCADStore, DEFAULT_MATERIAL, SURFACE_MATERIAL, NODE_TYPE_COLORS, InteractionMode, STANDARD_WORKPLANES, DATUM_TYPES } from '../store/cadStore';
 import { Icon, IconName }            from './Icon';
 import { showParamModal }           from './ParameterModal';
 import { setSketchCornerValue }     from '../hooks/useCADSketchCorner';
 import { OccPrimitivesService }     from '../services/OccPrimitivesService';
 import { OccExchangeService }       from '../services/OccExchangeService';
 import { OccRevolutionService }     from '../services/OccRevolutionService';
+import { OccExtrusionService }      from '../services/OccExtrusionService';
+import { OccSurfaceService }        from '../services/OccSurfaceService';
 import { OccLoftService }           from '../services/OccLoftService';
 import { OccSweepService }          from '../services/OccSweepService';
 import { OccGuideCurveService }     from '../services/OccGuideCurveService';
@@ -37,6 +39,7 @@ import { OccTransformService, PlaneLabel } from '../services/OccTransformService
 import { CADGeometryRegistry }      from '../services/CADGeometryRegistry';
 import { getPlacedShape }           from '../utils/placedShape';
 import { showBlendPanel }           from './BlendActionPanel';
+import { showSurfaceBlendPanel }    from './SurfaceBlendPanel';
 import { showShellPanel }           from './ShellActionPanel';
 import { showBooleanPanel }         from './BooleanActionPanel';
 import { showConstraintPanel }      from './ConstraintPanel';
@@ -96,6 +99,11 @@ const RIBBON_TABS: RibbonTab[] = [
     '|',
     { kind:'menu', id:'m-datum',  label:'Datum',      icon:'datumPlane', ids:['datum-origin','datum-offset','datum-3point','datum-midplane','datum-angle','datum-axis','datum-point','datum-tangent','datum-curvenormal','datum-2edge'] },
     { kind:'menu', id:'m-asm',    label:'Assembly',   icon:'mate',       ids:['mate','align','concentric'] },
+  ] },
+  { id: 'surface', label: 'Surface', items: [
+    'surface-extrude', 'surface-revolve', 'surface-sweep', 'surface-loft', 'surface-patch',
+    '|',
+    'surface-trim', 'surface-extend', 'surface-blend', 'surface-stitch', 'surface-thicken', 'surface-solidify',
   ] },
   { id: 'modify', label: 'Modify', items: [
     'fillet', 'chamfer', 'shell',
@@ -396,12 +404,19 @@ export const Ribbon: React.FC = () => {
   // ─── Helpers (verbatim from CADToolbar) ─────────────────────────────────────
   // `params` is the feature RECIPE (op knobs + input ids) — persisted so the
   // parametric graph (FeatureGraph) can recover inputs and, later, replay the op.
-  const create = (id: string, name: string, type: any, shape: any, params?: Record<string, any>) => {
+  const create = (
+    id: string, name: string, type: any, shape: any,
+    params?: Record<string, any>, bodyType?: 'solid' | 'surface',
+  ) => {
     reg.registerShape(id, shape);
+    const material = bodyType === 'surface'
+      ? { ...SURFACE_MATERIAL }
+      : { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS[type as keyof typeof NODE_TYPE_COLORS] ?? 0x5588cc };
     addNode({
       id, name, type, visible: true, locked: false, parentId: null, notes: '',
       transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
-      material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS[type as keyof typeof NODE_TYPE_COLORS] ?? 0x5588cc },
+      material,
+      ...(bodyType ? { bodyType } : {}),
       ...(params ? { params } : {}),
     });
     window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } }));
@@ -491,6 +506,9 @@ export const Ribbon: React.FC = () => {
     if (!node || node.type === 'sketch' || node.type === 'sketch_wire') {
       log('Select a 3D solid (not a sketch) to fillet/chamfer.', 'warn'); return;
     }
+    if (node.bodyType === 'surface') {
+      log('Fillet/Chamfer needs a solid body — Thicken the surface first.', 'warn'); return;
+    }
     if (!reg.getShape(selIds[0])) { log('Shape not found in registry.', 'error'); return; }
     showBlendPanel(selIds[0], op);
   };
@@ -502,16 +520,26 @@ export const Ribbon: React.FC = () => {
     if (!node || node.type === 'sketch' || node.type === 'sketch_wire') {
       log('Select a 3D solid (not a sketch) to shell.', 'warn'); return;
     }
+    if (node.bodyType === 'surface') {
+      log('Shell needs a solid body — Thicken the surface first.', 'warn'); return;
+    }
     if (!reg.getShape(selIds[0])) { log('Shape not found in registry.', 'error'); return; }
     showShellPanel(selIds[0]);
   };
 
   // ─── Boolean operations (guided panel) ──────────────────────────────────────
   const boolOp = (op: 'CUT' | 'FUSE' | 'COMMON') => {
+    // Booleans operate on solids only — surface bodies have no enclosed volume to
+    // add/cut/intersect (use Stitch/Thicken to make a solid first).
+    const hasSurface = selIds.some((id) => nodes[id]?.bodyType === 'surface');
     const solids = selIds.filter((id) => {
       const t = nodes[id]?.type;
-      return t && t !== 'sketch' && t !== 'sketch_wire' && reg.getShape(id);
+      return t && t !== 'sketch' && t !== 'sketch_wire' && nodes[id]?.bodyType !== 'surface' && reg.getShape(id);
     });
+    if (!solids.length) {
+      log('Boolean operations need solid bodies — surfaces aren\'t supported (Thicken them first).', 'warn'); return;
+    }
+    if (hasSurface) log('Surface bodies in the selection were skipped — booleans use solids only.', 'warn');
     showBooleanPanel(op, solids[0] ?? null, solids.slice(1));
   };
 
@@ -728,6 +756,266 @@ export const Ribbon: React.FC = () => {
     });
   };
 
+  // ─── Surface Revolve (Surface Modeling) ───────────────────────────────────────
+  // Revolve the profile WIRE directly into a zero-thickness shell (no capped face).
+  // Reuses the `revolve` node type + evaluator with opParams.surface=1 (same flag-on-
+  // shared-type convention as Surface Loft), tagged bodyType:'surface'.
+  const surfaceRevolve = () => {
+    if (!selIds.length) { log('Select a sketch or sketch wire.', 'warn'); return; }
+    const node = nodes[selIds[0]];
+    if (node?.type !== 'sketch_wire' && node?.type !== 'sketch') { log('Selected object must be a 2D sketch.', 'warn'); return; }
+    withOC(async () => {
+      const v = await showParamModal('Surface Revolve', [
+        { key: 'axis',  label: 'Axis (0=X 1=Y 2=Z)', default: 1, min: 0, max: 2, step: 1 },
+        { key: 'angle', label: 'Angle', default: 360, min: 1, max: 360, unit: '°' },
+      ]);
+      if (!v) return;
+      const targetId = profileTargetId() ?? (node?.type === 'sketch_wire' ? selIds[0] : null);
+      if (!targetId) { log('No profile wire found on the selected sketch.', 'warn'); return; }
+      const prof = profileShapeFor(window.oc, targetId);
+      if (!prof.shape) { log('Sketch wire not found.', 'error'); return; }
+      const axisVecs: [number,number,number][] = [[1,0,0],[0,1,0],[0,0,1]];
+      const axisLabels = ['X','Y','Z'];
+      const idx = Math.round(Math.max(0, Math.min(2, v.axis)));
+      setProc(true, 'Revolving surface…');
+      try {
+        const id = crypto.randomUUID();
+        create(id, `Surface Revolve ${v.angle.toFixed(0)}°/${axisLabels[idx]}`, 'revolve',
+          OccRevolutionService.revolveSurface(window.oc, prof.shape, [0,0,0], axisVecs[idx], v.angle),
+          { opType: 'revolve', targetWireIds: [targetId], opParams: { axis: idx, angle: v.angle, surface: 1 } },
+          'surface');
+      } catch (err: any) {
+        log(`Surface Revolve failed: ${err.message}`, 'error');
+      } finally {
+        if (prof.temp && prof.shape) try { prof.shape.delete(); } catch { /*noop*/ }
+        setProc(false);
+      }
+    });
+  };
+
+  // ─── Surface Extrude (Surface Modeling, Milestone 0) ──────────────────────────
+  // Prism a profile WIRE into a zero-thickness sheet (shell/face, no caps). Unlike
+  // the solid Extrude it never wraps the wire in a face. Binds to the sketch by id
+  // (params.targetWireIds) so it re-derives its profile on recompute; the sketch
+  // plane normal is captured as `dir` so recompute replays the same direction.
+  const surfaceExtrude = () => {
+    if (!selIds.length) { log('Select a sketch or sketch wire.', 'warn'); return; }
+    const node = nodes[selIds[0]];
+    if (node?.type !== 'sketch_wire' && node?.type !== 'sketch') { log('Selected object must be a 2D sketch.', 'warn'); return; }
+    withOC(async () => {
+      const targetId = profileTargetId() ?? (node?.type === 'sketch_wire' ? selIds[0] : null);
+      if (!targetId) { log('No profile wire found on the selected sketch.', 'warn'); return; }
+      const v = await showParamModal('Surface Extrude', [
+        { key: 'h',         label: 'Distance',  default: 20, min: 0.1, max: 1000, unit: 'mm' },
+        { key: 'symmetric', label: 'Symmetric', default: 0,  min: 0,   max: 1,    step: 1 },
+        { key: 'reverse',   label: 'Reverse',   default: 0,  min: 0,   max: 1,    step: 1 },
+      ]);
+      if (!v) return;
+      // Sketch-plane normal = extrude direction. Sketch carries params.workplane;
+      // a bare wire falls back to its parent sketch's plane, then to Y-up.
+      const tn = nodes[targetId];
+      const wp = (tn?.params?.workplane) ?? (tn?.parentId ? nodes[tn.parentId]?.params?.workplane : undefined);
+      const nm = wp?.normal;
+      const dir: [number, number, number] = Array.isArray(nm) && nm.length === 3 ? [nm[0], nm[1], nm[2]] : [0, 1, 0];
+      const endMode = v.symmetric >= 0.5 ? 1 : 0;
+      const prof = profileShapeFor(window.oc, targetId);
+      if (!prof.shape) { log('Sketch wire not found.', 'error'); return; }
+      setProc(true, 'Building surface…');
+      try {
+        const id = crypto.randomUUID();
+        create(id, `Surface Extrude ${v.h.toFixed(0)}`, 'surface_extrude',
+          OccExtrusionService.extrudeSurface(window.oc, prof.shape, {
+            height: v.h, end: endMode === 1 ? 'symmetric' : 'blind', reverse: v.reverse >= 0.5, direction: dir,
+          }),
+          { opType: 'surfaceExtrude', targetWireIds: [targetId],
+            opParams: { h: v.h, endMode, reverse: v.reverse >= 0.5 ? 1 : 0, dir } },
+          'surface');
+      } catch (err: any) {
+        log(`Surface Extrude failed: ${err.message}`, 'error');
+      } finally {
+        if (prof.temp && prof.shape) try { prof.shape.delete(); } catch { /*noop*/ }
+        setProc(false);
+      }
+    });
+  };
+
+  // ─── Surface Patch (Surface Modeling, Phase 1) ───────────────────────────────
+  // Fill ONE closed boundary loop (sketch / sketch wire) with a zero-thickness
+  // sheet: planar loops take the exact MakeFace path, non-planar loops are spanned
+  // with BRepOffsetAPI_MakeFilling (OccSurfaceService.patch). No distance/direction
+  // knobs — the boundary fully defines the surface. Binds to the sketch by id
+  // (params.targetWireIds) so it re-derives its boundary on recompute. Patch has no
+  // solid analog, so it uses its own node type/op `surface_patch`/`patch`.
+  const surfacePatch = () => {
+    if (!selIds.length) { log('Select a sketch or sketch wire (closed loop) to patch.', 'warn'); return; }
+    const node = nodes[selIds[0]];
+    if (node?.type !== 'sketch_wire' && node?.type !== 'sketch') { log('Selected object must be a 2D sketch.', 'warn'); return; }
+    withOC(async () => {
+      const targetId = profileTargetId() ?? (node?.type === 'sketch_wire' ? selIds[0] : null);
+      if (!targetId) { log('No closed boundary wire found on the selected sketch.', 'warn'); return; }
+      const prof = profileShapeFor(window.oc, targetId);
+      if (!prof.shape) { log('Sketch wire not found.', 'error'); return; }
+      setProc(true, 'Building patch…');
+      try {
+        const id = crypto.randomUUID();
+        create(id, 'Surface Patch', 'surface_patch',
+          OccSurfaceService.patch(window.oc, prof.shape),
+          { opType: 'patch', targetWireIds: [targetId], opParams: {} },
+          'surface');
+      } catch (err: any) {
+        log(`Surface Patch failed: ${err.message}`, 'error');
+      } finally {
+        if (prof.temp && prof.shape) try { prof.shape.delete(); } catch { /*noop*/ }
+        setProc(false);
+      }
+    });
+  };
+
+  // ─── Surface Stitch / Thicken (Surface Modeling, Phase 3) ────────────────────
+  // Stitch sews ≥2 selected surface bodies into one shell (and into a solid when the
+  // result is watertight); Thicken offsets one surface body into a solid. Both bind to
+  // their source bodies by id and re-run on recompute (like boolean's base/tool refs).
+  const selectedSurfaceIds = (): string[] =>
+    selIds.filter((id) => nodes[id]?.bodyType === 'surface' && reg.getShape(id));
+
+  const surfaceStitch = () => {
+    const srcIds = selectedSurfaceIds();
+    if (srcIds.length < 2) { log('Select ≥ 2 surface bodies (Ctrl+click) to stitch.', 'warn'); return; }
+    withOC(async () => {
+      const v = await showParamModal('Stitch', [
+        { key: 'solid', label: 'Make solid if closed', default: 1, min: 0, max: 1, step: 1 },
+      ]);
+      if (!v) return;
+      const shapes = srcIds.map((id) => reg.getShape(id)).filter(Boolean);
+      if (shapes.length < 2) { log('Could not retrieve the selected surfaces.', 'error'); return; }
+      setProc(true, 'Stitching…');
+      try {
+        const id = crypto.randomUUID();
+        const shape = OccSurfaceService.stitch(window.oc, shapes, v.solid >= 0.5);
+        // A watertight result is a real solid; otherwise it stays a surface body.
+        const isSolid = shape.ShapeType() === window.oc.TopAbs_ShapeEnum.TopAbs_SOLID;
+        create(id, isSolid ? 'Stitch (Solid)' : 'Stitch', 'surface_stitch', shape,
+          { opType: 'stitch', sourceIds: [...srcIds], opParams: { solid: v.solid >= 0.5 ? 1 : 0 } },
+          isSolid ? 'solid' : 'surface');
+      } catch (err: any) {
+        log(`Stitch failed: ${err.message}`, 'error');
+      } finally { setProc(false); }
+    });
+  };
+
+  const surfaceThicken = () => {
+    const srcIds = selectedSurfaceIds();
+    if (!srcIds.length) { log('Select a surface body to thicken.', 'warn'); return; }
+    withOC(async () => {
+      const v = await showParamModal('Thicken', [
+        { key: 'thickness', label: 'Thickness', default: 2, min: 0.1, max: 1000, unit: 'mm' },
+        { key: 'reverse',   label: 'Reverse side', default: 0, min: 0, max: 1, step: 1 },
+      ]);
+      if (!v) return;
+      const surface = reg.getShape(srcIds[0]);
+      if (!surface) { log('Could not retrieve the selected surface.', 'error'); return; }
+      setProc(true, 'Thickening…');
+      try {
+        const id = crypto.randomUUID();
+        create(id, `Thicken ${v.thickness.toFixed(1)}`, 'surface_thicken',
+          OccSurfaceService.thicken(window.oc, surface, v.reverse >= 0.5 ? -v.thickness : v.thickness),
+          { opType: 'thicken', sourceId: srcIds[0], opParams: { thickness: v.thickness, reverse: v.reverse >= 0.5 ? 1 : 0 } });
+          // No bodyType arg → solid (thicken always produces a solid).
+      } catch (err: any) {
+        log(`Thicken failed: ${err.message}`, 'error');
+      } finally { setProc(false); }
+    });
+  };
+
+  // ─── Surface Trim (Surface Modeling, Phase 2) ────────────────────────────────
+  // Cut a surface body with a tool body, keeping the portion outside (default) or
+  // inside the tool. Target = first selected surface body; tool = the other selected
+  // body. Pick-free (keep side = boolean, not a clicked fragment).
+  const surfaceTrim = () => {
+    const targetId = selIds.find((id) => nodes[id]?.bodyType === 'surface' && reg.getShape(id));
+    const toolId   = selIds.find((id) => id !== targetId && nodes[id]?.type !== 'sketch'
+                                      && nodes[id]?.type !== 'sketch_wire' && reg.getShape(id));
+    if (!targetId || !toolId) { log('Select a surface body and a tool body (Ctrl+click) to trim.', 'warn'); return; }
+    withOC(async () => {
+      const v = await showParamModal('Surface Trim', [
+        { key: 'keepInside', label: 'Keep inside tool (0=outside)', default: 0, min: 0, max: 1, step: 1 },
+      ]);
+      if (!v) return;
+      const target = reg.getShape(targetId);
+      const tool   = reg.getShape(toolId);
+      if (!target || !tool) { log('Could not retrieve the selected bodies.', 'error'); return; }
+      setProc(true, 'Trimming…');
+      try {
+        const id = crypto.randomUUID();
+        create(id, 'Surface Trim', 'surface_trim',
+          OccSurfaceService.trim(window.oc, target, tool, v.keepInside >= 0.5),
+          { opType: 'surfaceTrim', sourceId: targetId, toolId, opParams: { keepInside: v.keepInside >= 0.5 ? 1 : 0 } },
+          'surface');
+      } catch (err: any) {
+        log(`Surface Trim failed: ${err.message}`, 'error');
+      } finally { setProc(false); }
+    });
+  };
+
+  // ─── Surface Extend (Surface Modeling, Phase 2) ──────────────────────────────
+  // Grow a surface body outward by enlarging each face's UV bounds (pure-param, no
+  // tool). Exact mm for planar/extruded sheets; periodic directions (cylinder angle)
+  // are left untouched. Binds to the source body by id.
+  const surfaceExtend = () => {
+    const targetId = selIds.find((id) => nodes[id]?.bodyType === 'surface' && reg.getShape(id));
+    if (!targetId) { log('Select a surface body to extend.', 'warn'); return; }
+    withOC(async () => {
+      const v = await showParamModal('Surface Extend', [
+        { key: 'distance', label: 'Distance', default: 5, min: 0.1, max: 1000, unit: 'mm' },
+      ]);
+      if (!v) return;
+      const surface = reg.getShape(targetId);
+      if (!surface) { log('Could not retrieve the selected surface.', 'error'); return; }
+      setProc(true, 'Extending…');
+      try {
+        const id = crypto.randomUUID();
+        create(id, `Surface Extend ${v.distance.toFixed(1)}`, 'surface_extend',
+          OccSurfaceService.extend(window.oc, surface, v.distance),
+          { opType: 'surfaceExtend', sourceId: targetId, opParams: { distance: v.distance } },
+          'surface');
+      } catch (err: any) {
+        log(`Surface Extend failed: ${err.message}`, 'error');
+      } finally { setProc(false); }
+    });
+  };
+
+  // ─── Surface Blend (Surface Modeling, Phase 2) ───────────────────────────────
+  // Tangent (G1) bridge between two surface bodies. Opens SurfaceBlendPanel, which
+  // bridges the nearest facing boundary edges by default OR a pair the user picks in
+  // the viewport (SURFACE_BLEND_EDGE mode) — needed when several boundaries face off.
+  const surfaceBlend = () => {
+    const srcIds = selectedSurfaceIds();
+    if (srcIds.length < 2) { log('Select 2 surface bodies (Ctrl+click) to blend.', 'warn'); return; }
+    showSurfaceBlendPanel(srcIds[0], srcIds[1]);
+  };
+
+  // ─── Surface Solidify (Surface→Solid cap/close) ──────────────────────────────
+  // Cap a surface body's open boundary loops + sew into a watertight solid. One-click,
+  // pick-free; produces a SOLID (bodyType omitted). Bind to the source body by id.
+  const surfaceSolidify = () => {
+    const targetId = selIds.find((id) => nodes[id]?.bodyType === 'surface' && reg.getShape(id));
+    if (!targetId) { log('Select a surface body to solidify (cap + close).', 'warn'); return; }
+    withOC(async () => {
+      const surface = reg.getShape(targetId);
+      if (!surface) { log('Could not retrieve the selected surface.', 'error'); return; }
+      setProc(true, 'Solidifying…');
+      try {
+        const id = crypto.randomUUID();
+        create(id, 'Solidify', 'surface_solidify',
+          OccSurfaceService.solidify(window.oc, surface),
+          { opType: 'solidify', sourceId: targetId, opParams: {} });
+          // No bodyType arg → solid.
+      } catch (err: any) {
+        log(`Solidify failed: ${err.message}`, 'error');
+      } finally { setProc(false); }
+    });
+  };
+
   // ─── Loft ───────────────────────────────────────────────────────────────────
   // Collect ordered loft profile wires from the selection. Accepts both
   // sketch-wire leaves AND sketch containers (resolved to their profile wire),
@@ -785,6 +1073,39 @@ export const Ribbon: React.FC = () => {
         create(id, `Loft(${sketchIds.length})`, 'loft',
           OccLoftService.loftProfiles(window.oc, wires, v.solid >= 0.5, v.ruled >= 0.5),
           { opType: 'loft', targetWireIds: [...sketchIds], opParams: { solid: v.solid >= 0.5 ? 1 : 0, ruled: v.ruled >= 0.5 ? 1 : 0 } });
+      } finally {
+        resolved.forEach((r) => { if (r.temp && r.shape) try { r.shape.delete(); } catch { /*noop*/ } });
+        setProc(false);
+      }
+    });
+  };
+
+  // ─── Surface Loft (Surface Modeling) ──────────────────────────────────────────
+  // Same profile binding + recompute path as the solid Loft, but ThruSections runs
+  // with isSolid=false → an OPEN skinned SHELL (no end caps), tagged bodyType:
+  // 'surface'. Reuses the `loft` node type/evaluator (loft has a solid analog, so
+  // it needs no new type); the evaluator already honours opParams.solid=0.
+  const surfaceLoft = () => {
+    if (loftProfileCount < 2) { log('Select ≥ 2 sketches or sketch wires (Ctrl+click) to loft.', 'warn'); return; }
+    withOC(async () => {
+      const v = await showParamModal('Surface Loft', [
+        { key: 'ruled', label: 'Ruled (1) or Smooth (0)', default: 0, min: 0, max: 1, step: 1 },
+      ]);
+      if (!v) return;
+      const sketchIds = loftProfileWireIds();
+      if (sketchIds.length < 2) { log('Need ≥ 2 profiles to loft.', 'warn'); return; }
+      const resolved = sketchIds.map((id) => profileShapeFor(window.oc, id));
+      const wires = resolved.map((r) => r.shape).filter(Boolean);
+      if (wires.length < 2) { resolved.forEach((r) => { if (r.temp && r.shape) try { r.shape.delete(); } catch { /*noop*/ } }); log('Could not retrieve all sketch shapes.', 'error'); return; }
+      setProc(true, 'Lofting surface…');
+      try {
+        const id = crypto.randomUUID();
+        create(id, `Surface Loft(${sketchIds.length})`, 'loft',
+          OccLoftService.loftProfiles(window.oc, wires, false, v.ruled >= 0.5),
+          { opType: 'loft', targetWireIds: [...sketchIds], opParams: { solid: 0, ruled: v.ruled >= 0.5 ? 1 : 0 } },
+          'surface');
+      } catch (err: any) {
+        log(`Surface Loft failed: ${err.message}`, 'error');
       } finally {
         resolved.forEach((r) => { if (r.temp && r.shape) try { r.shape.delete(); } catch { /*noop*/ } });
         setProc(false);
@@ -905,6 +1226,29 @@ export const Ribbon: React.FC = () => {
         const id = crypto.randomUUID();
         create(id, 'Sweep', 'sweep', OccSweepService.sweepProfile(window.oc, profile, spine),
           { opType: 'sweep', targetWireIds: [sketchIds[0], sketchIds[1]], opParams: { spineIndex: 1 } });
+      } finally { setProc(false); }
+    });
+  };
+
+  // ─── Surface Sweep (Surface Modeling) ─────────────────────────────────────────
+  // Pipe the profile WIRE directly along the spine into a zero-thickness shell (open
+  // tube, no caps). Reuses the `sweep` node type + evaluator with opParams.surface=1,
+  // tagged bodyType:'surface'. Selection = profile then spine (Ctrl+click).
+  const surfaceSweep = () => {
+    const sketchIds = selIds.filter((id) => nodes[id]?.type === 'sketch_wire');
+    if (sketchIds.length < 2) { log('Select profile then spine (Ctrl+click) to sweep.', 'warn'); return; }
+    withOC(async () => {
+      const profile = reg.getShape(sketchIds[0]);
+      const spine   = reg.getShape(sketchIds[1]);
+      if (!profile || !spine) { log('Could not retrieve sketch shapes.', 'error'); return; }
+      setProc(true, 'Sweeping surface…');
+      try {
+        const id = crypto.randomUUID();
+        create(id, 'Surface Sweep', 'sweep', OccSweepService.sweepSurface(window.oc, profile, spine),
+          { opType: 'sweep', targetWireIds: [sketchIds[0], sketchIds[1]], opParams: { spineIndex: 1, surface: 1 } },
+          'surface');
+      } catch (err: any) {
+        log(`Surface Sweep failed: ${err.message}`, 'error');
       } finally { setProc(false); }
     });
   };
@@ -1111,6 +1455,13 @@ export const Ribbon: React.FC = () => {
   const hasSel       = selIds.length > 0;
   const hasSketch    = hasSel && (nodes[selIds[0]]?.type === 'sketch_wire' || nodes[selIds[0]]?.type === 'sketch');
   const sketchCount  = selIds.filter((id) => nodes[id]?.type === 'sketch_wire').length;
+  const surfaceBodyCount = selIds.filter((id) => nodes[id]?.bodyType === 'surface').length;
+  // Trim needs a surface target + at least one other (non-sketch) body as the tool.
+  const otherBodyCount = selIds.filter((id) => {
+    const t = nodes[id]?.type;
+    return t && t !== 'sketch' && t !== 'sketch_wire' && nodes[id]?.bodyType !== 'surface';
+  }).length;
+  const canTrim = surfaceBodyCount >= 1 && (surfaceBodyCount + otherBodyCount) >= 2;
   // Loft profiles: a selected sketch_wire counts directly; a selected sketch
   // container counts if it holds at least one wire (resolved to a profile on run).
   const loftProfileCount = selIds.filter((id) => {
@@ -1192,6 +1543,17 @@ export const Ribbon: React.FC = () => {
     extrude:   { id:'extrude',   icon:'extrude',   label:'Extrude',  run:extrude, enabled:hasSketch,         accent:'#9944cc' },
     revolve:   { id:'revolve',   icon:'revolve',   label:'Revolve',  run:revolve, enabled:hasSketch,         accent:'#cc4488' },
     loft:      { id:'loft',      icon:'loft',      label:'Loft',     run:loft,    enabled:loftProfileCount>=2, accent:'#cc8844' },
+    'surface-extrude': { id:'surface-extrude', icon:'extrude', label:'Surf. Extrude', run:surfaceExtrude, enabled:hasSketch, accent:'#e0a32e' },
+    'surface-loft':    { id:'surface-loft',    icon:'loft',    label:'Surf. Loft',    run:surfaceLoft,    enabled:loftProfileCount>=2, accent:'#e0a32e' },
+    'surface-patch':   { id:'surface-patch',   icon:'extrude', label:'Surf. Patch',   run:surfacePatch,   enabled:hasSketch, accent:'#e0a32e' },
+    'surface-revolve': { id:'surface-revolve', icon:'revolve', label:'Surf. Revolve', run:surfaceRevolve, enabled:hasSketch, accent:'#e0a32e' },
+    'surface-sweep':   { id:'surface-sweep',   icon:'sweep',   label:'Surf. Sweep',   run:surfaceSweep,   enabled:sketchCount>=2, accent:'#e0a32e' },
+    'surface-trim':    { id:'surface-trim',    icon:'trim',    label:'Trim',          run:surfaceTrim,    enabled:canTrim, accent:'#e0a32e' },
+    'surface-extend':  { id:'surface-extend',  icon:'extend',  label:'Extend',        run:surfaceExtend,  enabled:surfaceBodyCount>=1, accent:'#e0a32e' },
+    'surface-blend':   { id:'surface-blend',   icon:'fillet',  label:'Blend',         run:surfaceBlend,   enabled:surfaceBodyCount>=2, accent:'#e0a32e' },
+    'surface-stitch':  { id:'surface-stitch',  icon:'union',   label:'Stitch',        run:surfaceStitch,  enabled:surfaceBodyCount>=2, accent:'#4aa58a' },
+    'surface-thicken': { id:'surface-thicken', icon:'shell',   label:'Thicken',       run:surfaceThicken, enabled:surfaceBodyCount>=1, accent:'#5fa9d6' },
+    'surface-solidify':{ id:'surface-solidify',icon:'box',     label:'Solidify',      run:surfaceSolidify,enabled:surfaceBodyCount>=1, accent:'#6a9a3a' },
     advLoft:   { id:'advLoft',   icon:'loft',      label:'Adv. Loft', run:() => useCADStore.getState().openAdvancedLoft(), accent:'#cc8844',
                  tooltip:'Guided loft — pick 2 profiles, draw 3D guide curves, then Generate (opens the Advanced Loft dialog)' },
     sweep:     { id:'sweep',     icon:'sweep',     label:'Sweep',    run:sweep,   enabled:sketchCount>=2,    accent:'#44bbcc' },

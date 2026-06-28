@@ -24,6 +24,7 @@ import { TreeContextMenu }     from './TreeContextMenu';
 import { Op3DPanel, show3DOpPanel } from './Op3DPanel';
 import type { Op3DRequest, Op3DType } from './Op3DPanel';
 import { BlendActionPanel }    from './BlendActionPanel';
+import { SurfaceBlendPanel }   from './SurfaceBlendPanel';
 import { ShellActionPanel }    from './ShellActionPanel';
 import { BooleanActionPanel }  from './BooleanActionPanel';
 import { ConstraintPanel }     from './ConstraintPanel';
@@ -321,6 +322,7 @@ export const CADLayout: React.FC = () => {
         />
       )}
       <BlendActionPanel />
+      <SurfaceBlendPanel />
       <ShellActionPanel />
       <BooleanActionPanel />
       <ConstraintPanel />

@@ -21,6 +21,7 @@ import { ThreeMeshCache }      from '../services/ThreeMeshCache';
 import { useCADGizmoHotkeys }  from '../hooks/useCADGizmoHotkeys';
 import { useCADSketchTool }    from '../hooks/useCADSketchTool';
 import { useCADEdgeSelect }    from '../hooks/useCADEdgeSelect';
+import { useCADSurfaceBlendEdge } from '../hooks/useCADSurfaceBlendEdge';
 import { useCADShellFacePick } from '../hooks/useCADShellFacePick';
 import { useCADBooleanPick }   from '../hooks/useCADBooleanPick';
 import { useCADConstraintPick } from '../hooks/useCADConstraintPick';
@@ -243,6 +244,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── Edge-select hook (handles BLEND_EDGE mode for per-edge fillet/chamfer) ──
   useCADEdgeSelect(containerRef, sceneRef, cameraRef);
+  useCADSurfaceBlendEdge(containerRef, sceneRef, cameraRef);
 
   // ─── Shell face-pick hook (handles SHELL_FACE mode — open faces for hollowing) ──
   useCADShellFacePick(containerRef, sceneRef, cameraRef);

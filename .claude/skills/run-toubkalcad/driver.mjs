@@ -100,6 +100,15 @@ async function run(line) {
       await page.mouse.down(); await page.waitForTimeout(60); await page.mouse.up();
       await page.waitForTimeout(250);
       console.log('mclick', x, y); break; }
+    case 'ctrlclick': {                              // ctrlclick <x> <y>  — Ctrl-held click at page coords (multi-select)
+      const [x, y] = arg.split(/\s+/).map(Number);
+      await page.mouse.move(x, y, { steps: 5 });
+      await page.waitForTimeout(80);
+      await page.keyboard.down('Control');
+      await page.mouse.down(); await page.waitForTimeout(60); await page.mouse.up();
+      await page.keyboard.up('Control');
+      await page.waitForTimeout(250);
+      console.log('ctrlclick', x, y); break; }
     case 'fill': {                                   // fill <selector> <value>  — type into an input (value = last token, React-safe)
       const fsp = arg.lastIndexOf(' ');
       const sel = arg.slice(0, fsp), val = arg.slice(fsp + 1);

@@ -26,6 +26,7 @@ import { OccBooleanService }    from './OccBooleanService';
 import { OccFilletService }     from './OccFilletService';
 import { OccThickSolidService } from './OccThickSolidService';
 import { OccExtrusionService }  from './OccExtrusionService';
+import { OccSurfaceService }    from './OccSurfaceService';
 import { OccSketchService }     from './OccSketchService';
 import { OccDatumService }      from './OccDatumService';
 import { OccFaceService }       from './OccFaceService';
@@ -68,12 +69,17 @@ export const EVALUATORS: Partial<Record<FeatureOp, Evaluator>> = {
   torus:    (oc, _in, p) => OccRevolutionService.createTorus(oc, num(p, 'R', 15), num(p, 'r', 3)),
   cone:     (oc, _in, p) => OccRevolutionService.createCone(oc, num(p, 'r1', 8), num(p, 'r2', 0), num(p, 'h', 15)),
 
-  // Revolve — one profile wire, axis index + angle.
+  // Revolve — one profile wire, axis index + angle. With surface=1 the wire is
+  // revolved directly into a zero-thickness shell (no capped face) — same flag-on-
+  // shared-type convention as surface loft (bodyType:'surface' is set on the node).
   revolve: (oc, inputs, p) => {
     const prof = firstRole(inputs, 'profile') ?? inputs[0];
     if (!prof) throw new Error('revolve: no profile input');
     const axis = AXIS_VEC[clampIdx(num(p, 'axis', 1), 2)];
-    return OccRevolutionService.revolveProfile(oc, prof.shape, [0, 0, 0], axis, num(p, 'angle', 360));
+    const angle = num(p, 'angle', 360);
+    return num(p, 'surface', 0) >= 0.5
+      ? OccRevolutionService.revolveSurface(oc, prof.shape, [0, 0, 0], axis, angle)
+      : OccRevolutionService.revolveProfile(oc, prof.shape, [0, 0, 0], axis, angle);
   },
 
   // Loft — ≥2 profile wires (order preserved), solid/ruled flags.
@@ -84,14 +90,98 @@ export const EVALUATORS: Partial<Record<FeatureOp, Evaluator>> = {
     return OccLoftService.loftProfiles(oc, wires, num(p, 'solid', 1) >= 0.5, num(p, 'ruled', 0) >= 0.5);
   },
 
+  // Surface extrude — one profile wire swept into a zero-thickness sheet (shell for
+  // a closed profile, face for an open one). No caps. Direction + limits ride in
+  // params (dir = the sketch-plane normal, captured at create so recompute replays
+  // it deterministically). bodyType:'surface' is set on the node, not here.
+  surfaceExtrude: (oc, inputs, p) => {
+    const prof = firstRole(inputs, 'profile') ?? inputs[0];
+    if (!prof) throw new Error('surfaceExtrude: no profile input');
+    const dir = Array.isArray(p.dir) && p.dir.length === 3 ? p.dir as V3 : [0, 1, 0] as V3;
+    const end = (['blind', 'symmetric', 'twoSided'] as const)[clampIdx(num(p, 'endMode', 0), 2)];
+    return OccExtrusionService.extrudeSurface(oc, prof.shape, {
+      height:    num(p, 'h', 20),
+      end,
+      height2:   num(p, 'h2', 10),
+      reverse:   num(p, 'reverse', 0) >= 0.5,
+      direction: dir,
+    });
+  },
+
+  // Surface patch — fill ONE closed boundary loop with a zero-thickness sheet
+  // (TopoDS_Face): planar loop → exact MakeFace, non-planar → MakeFilling. No knobs
+  // beyond the profile; bodyType:'surface' is set on the node, not here.
+  patch: (oc, inputs, _p) => {
+    const prof = firstRole(inputs, 'profile') ?? inputs[0];
+    if (!prof) throw new Error('patch: no profile input');
+    return OccSurfaceService.patch(oc, prof.shape);
+  },
+
+  // Stitch — sew ≥2 surface bodies into a shell; solid=1 promotes a closed shell to
+  // a solid. Result type (shell vs solid) is carried by the node's bodyType.
+  stitch: (oc, inputs, p) => {
+    const srcs = byRole(inputs, 'source');
+    const shapes = (srcs.length ? srcs : inputs).map((i) => i.shape);
+    if (shapes.length < 2) throw new Error('stitch: needs ≥2 surfaces');
+    return OccSurfaceService.stitch(oc, shapes, num(p, 'solid', 1) >= 0.5);
+  },
+
+  // Thicken — offset one surface body into a solid; reverse=1 offsets the other side.
+  thicken: (oc, inputs, p) => {
+    const src = firstRole(inputs, 'base') ?? inputs[0];
+    if (!src) throw new Error('thicken: no source surface');
+    const t = num(p, 'thickness', 2);
+    return OccSurfaceService.thicken(oc, src.shape, num(p, 'reverse', 0) >= 0.5 ? -t : t);
+  },
+
+  // Surface trim — cut a surface body (base) with a tool body (tool); keepInside=1
+  // keeps the portion inside the tool (Common), else outside (Cut).
+  surfaceTrim: (oc, inputs, p) => {
+    const target = firstRole(inputs, 'base') ?? inputs[0];
+    const tool   = firstRole(inputs, 'tool');
+    if (!target) throw new Error('surfaceTrim: no target surface');
+    if (!tool)   throw new Error('surfaceTrim: no trimming tool');
+    return OccSurfaceService.trim(oc, target.shape, tool.shape, num(p, 'keepInside', 0) >= 0.5);
+  },
+
+  // Surface extend — grow a surface body's UV bounds by `distance`.
+  surfaceExtend: (oc, inputs, p) => {
+    const src = firstRole(inputs, 'base') ?? inputs[0];
+    if (!src) throw new Error('surfaceExtend: no source surface');
+    return OccSurfaceService.extend(oc, src.shape, num(p, 'distance', 5));
+  },
+
+  // Surface blend — tangent (G1) bridge between the two source surface bodies.
+  // Optional explicit boundary-edge ordinals (edgeA/edgeB) pick the bridged pair;
+  // null/absent ⇒ auto-nearest.
+  surfaceBlend: (oc, inputs, p) => {
+    const srcs = byRole(inputs, 'source');
+    const shapes = (srcs.length ? srcs : inputs).map((i) => i.shape);
+    if (shapes.length < 2) throw new Error('surfaceBlend: needs 2 surfaces');
+    const ordA = typeof p.edgeA === 'number' ? p.edgeA : null;
+    const ordB = typeof p.edgeB === 'number' ? p.edgeB : null;
+    return OccSurfaceService.blend(oc, shapes[0], shapes[1], ordA, ordB);
+  },
+
+  // Solidify — cap a surface body's open boundaries + sew into a solid.
+  solidify: (oc, inputs, _p) => {
+    const src = firstRole(inputs, 'base') ?? inputs[0];
+    if (!src) throw new Error('solidify: no source surface');
+    return OccSurfaceService.solidify(oc, src.shape);
+  },
+
   // Sweep — profile then spine (convention: index 0 = profile, spineIndex = spine).
+  // surface=1 pipes the wire directly into a zero-thickness shell (no capped face);
+  // the solid path caps the profile so the pipe encloses a solid.
   sweep: (oc, inputs, p) => {
     const ordered = byRole(inputs, 'profile');
     const list = ordered.length >= 2 ? ordered : inputs;
     const profile = list[0]?.shape;
     const spine   = list[clampIdx(num(p, 'spineIndex', 1), list.length - 1)]?.shape;
     if (!profile || !spine) throw new Error('sweep: needs a profile and a spine');
-    return OccSweepService.sweepProfile(oc, profile, spine);
+    return num(p, 'surface', 0) >= 0.5
+      ? OccSweepService.sweepSurface(oc, profile, spine)
+      : OccSweepService.sweepProfile(oc, profile, spine);
   },
 
   // Boolean — fold each tool onto the base (matches the panel's computeBoolean),

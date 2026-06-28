@@ -31,7 +31,8 @@ export const CADShapeAnalysisPanel: React.FC = () => {
     setError(null);
     const t = setTimeout(() => {
       try {
-        setProps(OccMeasureService.getShapeProperties(oc, shape, density));
+        const isSurface = activeNode.bodyType === 'surface';
+        setProps(OccMeasureService.getShapeProperties(oc, shape, density, isSurface));
         setBbox(OccMeasureService.getBoundingBox(oc, shape));
       } catch (e: any) {
         setError(e.message);
@@ -66,14 +67,21 @@ export const CADShapeAnalysisPanel: React.FC = () => {
 
       {props && !loading && (
         <>
-          <Section title="Volume properties">
-            <StatRow label="Volume"    value={`${props.volume.toFixed(2)} mm³`}/>
+          <Section title={props.isSurface ? 'Surface properties' : 'Volume properties'}>
+            <StatRow label="Volume"    value={props.isSurface ? '— (surface body)' : `${props.volume.toFixed(2)} mm³`}/>
             <StatRow label="Surface"   value={`${props.surfaceArea.toFixed(2)} mm²`}/>
-            <StatRow label="CoG X"     value={`${props.centerOfGravity[0].toFixed(3)} mm`}/>
-            <StatRow label="CoG Y"     value={`${props.centerOfGravity[1].toFixed(3)} mm`}/>
-            <StatRow label="CoG Z"     value={`${props.centerOfGravity[2].toFixed(3)} mm`}/>
+            <StatRow label={props.isSurface ? 'Centroid X' : 'CoG X'} value={`${props.centerOfGravity[0].toFixed(3)} mm`}/>
+            <StatRow label={props.isSurface ? 'Centroid Y' : 'CoG Y'} value={`${props.centerOfGravity[1].toFixed(3)} mm`}/>
+            <StatRow label={props.isSurface ? 'Centroid Z' : 'CoG Z'} value={`${props.centerOfGravity[2].toFixed(3)} mm`}/>
           </Section>
 
+          {props.isSurface ? (
+            <Section title="Estimated mass">
+              <div style={{ color: 'var(--text-muted)', fontSize: '10px', fontStyle: 'italic' }}>
+                A surface body is zero-thickness — no volume or mass. Thicken it to a solid first.
+              </div>
+            </Section>
+          ) : (
           <Section title="Estimated mass">
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
               <label style={{ fontSize: '10px', color: 'var(--text-muted)', flexShrink: 0 }}>
@@ -108,6 +116,7 @@ export const CADShapeAnalysisPanel: React.FC = () => {
             <StatRow label="Mass"  value={`${(props.volume * density).toFixed(2)} g`} highlight/>
             <StatRow label=""      value={`${((props.volume * density) / 1000).toFixed(4)} kg`}/>
           </Section>
+          )}
         </>
       )}
 

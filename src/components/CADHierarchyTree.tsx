@@ -39,6 +39,14 @@ const NODE_ICONS: Record<NodeType, string> = {
   revolve:           '↻',
   sweep:             '⟿',
   loft:              '⊿',
+  surface_extrude:   '▭',
+  surface_patch:     '▭',
+  surface_stitch:    '⧉',
+  surface_thicken:   '⬚',
+  surface_trim:      '▭',
+  surface_extend:    '▭',
+  surface_blend:     '⌒',
+  surface_solidify:  '◆',
   mirror:            '◫',
   pattern:           '▦',
   datum_plane:       '▱',
@@ -60,6 +68,14 @@ const NODE_COLORS: Record<NodeType, string> = {
   revolve:           '#cc4488',
   sweep:             '#44bbcc',
   loft:              '#cc8844',
+  surface_extrude:   '#e0a32e',
+  surface_patch:     '#e0a32e',
+  surface_stitch:    '#4aa58a',
+  surface_thicken:   '#5fa9d6',
+  surface_trim:      '#e0a32e',
+  surface_extend:    '#e0a32e',
+  surface_blend:     '#e0a32e',
+  surface_solidify:  '#6a9a3a',
   mirror:            '#4488cc',
   pattern:           '#8844cc',
   datum_plane:       '#f0a30a',
@@ -128,7 +144,10 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
 
   const isSelected   = selectedIds.includes(nodeId);
   const isActiveSketch = node.type === 'sketch' && sketchSession?.id === nodeId;
-  const color        = NODE_COLORS[node.type] ?? 'var(--text-dim)';
+  // Surface bodies read consistently regardless of the op that made them (e.g. a
+  // surface loft uses the 'loft' type): amber + a sheet glyph, matching the viewport.
+  const isSurface    = node.bodyType === 'surface';
+  const color        = isSurface ? '#e0a32e' : (NODE_COLORS[node.type] ?? 'var(--text-dim)');
   const hasChildren  = node.children.length > 0;
 
   const handleClick = (e: React.MouseEvent) => {
@@ -331,7 +350,7 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
 
         {/* Type icon */}
         <span style={{ fontSize: '11px', color, flexShrink: 0 }}>
-          {NODE_ICONS[node.type] ?? '▪'}
+          {isSurface ? '▭' : (NODE_ICONS[node.type] ?? '▪')}
         </span>
 
         {/* Name / edit input */}

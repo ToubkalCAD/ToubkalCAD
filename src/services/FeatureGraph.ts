@@ -25,6 +25,7 @@ export type FeatureOp =
   | 'box' | 'cylinder' | 'sphere' | 'torus' | 'cone'
   | 'sketch' | 'sketchWire'
   | 'extrude' | 'revolve' | 'loft' | 'sweep'
+  | 'surfaceExtrude' | 'patch' | 'stitch' | 'thicken' | 'surfaceTrim' | 'surfaceExtend' | 'surfaceBlend' | 'solidify'
   | 'boolean' | 'fillet' | 'chamfer' | 'shell'
   | 'mirror' | 'pattern'
   | 'datumPlane' | 'datumAxis' | 'datumPoint'
@@ -71,6 +72,9 @@ const NTYPE_TO_OP: Partial<Record<NodeType, FeatureOp>> = {
   box: 'box', cylinder: 'cylinder', sphere: 'sphere',
   sketch: 'sketch', sketch_wire: 'sketchWire',
   extrusion: 'extrude', revolve: 'revolve', loft: 'loft', sweep: 'sweep',
+  surface_extrude: 'surfaceExtrude', surface_patch: 'patch',
+  surface_stitch: 'stitch', surface_thicken: 'thicken', surface_trim: 'surfaceTrim',
+  surface_extend: 'surfaceExtend', surface_blend: 'surfaceBlend', surface_solidify: 'solidify',
   boolean_operation: 'boolean',
   mirror: 'mirror', pattern: 'pattern',
   datum_plane: 'datumPlane', datum_axis: 'datumAxis', datum_point: 'datumPoint',
@@ -120,7 +124,7 @@ export function nodeToFeature(node: CADNode): Feature {
       if (!complete) note = p.region ? 'region wire has no member entities' : 'no 2D recipe (sketchGeom/region)';
       break;
 
-    case 'extrusion': case 'revolve': case 'loft': case 'sweep': {
+    case 'extrusion': case 'revolve': case 'loft': case 'sweep': case 'surface_extrude': case 'surface_patch': {
       if (p.opType || p.targetWireIds) {
         // Op3DPanel path — full recipe.
         op = (p.opType as FeatureOp) ?? op;
@@ -141,6 +145,62 @@ export function nodeToFeature(node: CADNode): Feature {
       }
       break;
     }
+
+    case 'surface_stitch':
+      // Sew ≥2 existing surface bodies → shell (solid if closed). Inputs are body
+      // ids (role 'source'), like boolean's base/tool but symmetric.
+      op = 'stitch';
+      for (const s of (p.sourceIds as string[] | undefined) ?? []) push(inputs, refOf(s, 'source'));
+      params = { ...(p.opParams ?? {}) };
+      complete = Array.isArray(p.sourceIds) && p.sourceIds.length >= 2;
+      if (!complete) note = 'stitch needs ≥2 source bodies';
+      break;
+
+    case 'surface_thicken':
+      // Offset one surface body → solid.
+      op = 'thicken';
+      push(inputs, refOf(p.sourceId, 'base'));
+      params = { ...(p.opParams ?? {}) };
+      complete = !!p.sourceId;
+      if (!complete) note = 'missing source body';
+      break;
+
+    case 'surface_trim':
+      // Trim a surface body (base) by a tool body (tool); keepInside in opParams.
+      op = 'surfaceTrim';
+      push(inputs, refOf(p.sourceId, 'base'));
+      push(inputs, refOf(p.toolId, 'tool'));
+      params = { ...(p.opParams ?? {}) };
+      complete = !!p.sourceId && !!p.toolId;
+      if (!complete) note = 'trim needs a surface and a tool body';
+      break;
+
+    case 'surface_extend':
+      // Grow one surface body's UV bounds; distance in opParams.
+      op = 'surfaceExtend';
+      push(inputs, refOf(p.sourceId, 'base'));
+      params = { ...(p.opParams ?? {}) };
+      complete = !!p.sourceId;
+      if (!complete) note = 'missing source body';
+      break;
+
+    case 'surface_blend':
+      // Tangent bridge between two surface bodies (symmetric — both 'source').
+      op = 'surfaceBlend';
+      for (const s of (p.sourceIds as string[] | undefined) ?? []) push(inputs, refOf(s, 'source'));
+      params = { ...(p.opParams ?? {}) };
+      complete = Array.isArray(p.sourceIds) && p.sourceIds.length >= 2;
+      if (!complete) note = 'blend needs 2 source bodies';
+      break;
+
+    case 'surface_solidify':
+      // Cap + sew one surface body into a solid.
+      op = 'solidify';
+      push(inputs, refOf(p.sourceId, 'base'));
+      params = { ...(p.opParams ?? {}) };
+      complete = !!p.sourceId;
+      if (!complete) note = 'missing source body';
+      break;
 
     case 'boolean_operation':
       op = 'boolean';

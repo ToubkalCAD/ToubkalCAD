@@ -2,11 +2,13 @@ import * as THREE from 'three';
 import type { CADNode, NodeType } from '../store/cadStore';
 import { OccTransformService } from './OccTransformService';
 
-/** Feature types that carry an exportable OCC solid (sketch/datum/structural
- *  nodes are excluded — they have no solid body of their own). */
+/** Feature types that carry an exportable OCC body — solids AND zero-thickness
+ *  surface bodies (STEP/IGES handle shells & faces natively via STEPControl_AsIs).
+ *  Sketch/datum/structural nodes are excluded — they have no body of their own. */
 const SOLID_BODY_TYPES = new Set<NodeType>([
   'box', 'cylinder', 'sphere', 'extrusion', 'revolve', 'sweep', 'loft',
   'boolean_operation', 'compound', 'mirror', 'pattern',
+  'surface_extrude', 'surface_patch', 'surface_stitch', 'surface_thicken',
 ]);
 
 /** THREE.Matrix4 for a node placement (same XYZ-euler convention as the viewport
@@ -115,7 +117,7 @@ export class OccExchangeService {
     };
     for (const rootId of rootIds) walk(rootId, new THREE.Matrix4());
 
-    if (!bodies.length) throw new Error('No visible solid bodies to export.');
+    if (!bodies.length) throw new Error('No visible bodies to export.');
 
     // 2 — transfer each placed body to a single STEP writer (one root per body).
     const tempFileName = 'project_export.stp';
