@@ -134,7 +134,7 @@ export function nodeToFeature(node: CADNode): Feature {
         // opParams hold the value knobs; the up-to-face target selection lives in
         // top-level node params — carry it through so the op replays (targetFaceRef
         // is the step-4 stable signature, targetFacePoint the positional fallback).
-        params = { ...(p.opParams ?? {}), targetFacePoint: p.targetFacePoint, targetFaceRef: p.targetFaceRef };
+        params = { ...(p.opParams ?? {}), targetFacePoint: p.targetFacePoint, targetFaceRef: p.targetFaceRef, selectedRegionOuterIds: p.selectedRegionOuterIds };
         complete = inputs.some((i) => i.role === 'profile');
         if (!complete) note = 'no profile input';
       } else {

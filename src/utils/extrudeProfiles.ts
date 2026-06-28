@@ -18,22 +18,31 @@
 
 import * as THREE from 'three';
 import { WasmScope } from './WasmScope';
-import { classifyNestedProfiles } from '../services/ProfileNesting';
+import { classifyAllRegions } from '../services/ProfileNesting';
 import { OccConverter } from '../services/OccConverter';
 import { profileShapeFor } from './sketchProfile';
 
 export interface ExtrudeProfile {
-  /** Subset of the extrude's target ids whose wires form this profile (outer + holes). */
+  /** Subset of the extrude's target ids whose wires form this region (outer + holes). */
   wireIds:  string[];
+  /** Stable identity of this region = its OUTER wire's id. The picker selection is
+   *  persisted as a list of these so a re-edit / reload restores exactly which
+   *  regions were chosen (ring vs inner disk), even though they share wires. */
+  outerId:  string;
+  /** EVEN nesting depth → a "solid" region by the classic even/odd rule (the ring
+   *  in a ring+disk). The panel pre-selects these so the default extrude is
+   *  unchanged (block with hole); the odd inner regions are opt-in. */
+  solid:    boolean;
   /** Flat triangulated face (with holes) on the sketch plane, world-space. */
   geometry: THREE.BufferGeometry;
 }
 
 /**
- * Partition an extrude's `targetIds` into nested profiles. Each profile carries
- * the target ids it consumes and a tessellated face for the picker overlay.
- * Order is stable (outer-region order from ProfileNesting) so the indices the
- * store selection uses line up with what the hook renders.
+ * Partition an extrude's `targetIds` into every MINIMAL region (outer boundary +
+ * its immediate holes) — the ring AND the inner disk, to any nesting depth — so
+ * each is an independently pickable profile. Each region carries the target ids
+ * it consumes, a stable `outerId`, a `solid` flag, and a tessellated face for the
+ * overlay. Order is stable so the store selection indices line up with the hook.
  */
 export function computeExtrudeProfiles(oc: any, targetIds: string[]): ExtrudeProfile[] {
   if (!oc || !targetIds.length) return [];
@@ -47,12 +56,13 @@ export function computeExtrudeProfiles(oc: any, targetIds: string[]): ExtrudePro
   const scope = new WasmScope();
   const out: ExtrudeProfile[] = [];
   try {
-    const profiles = classifyNestedProfiles(oc, wires, scope);
+    const profiles = classifyAllRegions(oc, wires, scope);
     for (const p of profiles) {
-      const wireIds = [valid[p.outerIndex].id, ...p.holeIndices.map((i) => valid[i].id)];
+      const outerId = valid[p.outerIndex].id;
+      const wireIds = [outerId, ...p.holeIndices.map((i) => valid[i].id)];
       // Tessellate the holed face into a flat overlay geometry (world-space verts).
       const geometry = OccConverter.shapeToThreeGeometry(oc, p.outer, 0.2);
-      out.push({ wireIds, geometry });
+      out.push({ wireIds, outerId, solid: (p.depth ?? 0) % 2 === 0, geometry });
     }
   } finally {
     scope.free();                                   // provisional + holed faces

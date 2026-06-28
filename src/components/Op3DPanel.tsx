@@ -174,14 +174,18 @@ function computeShape(
   targetSolidId?: string,
   targetFacePoint?: [number, number, number],
   targetDatumId?: string,
+  selectedRegionOuterIds?: string[],
 ): any {
   const oc = window.oc;
   switch (op) {
     case 'extrude': {
       // Each target resolves to a wire: a SKETCH container → its current profile
       // (temp, freed below); a sketch_wire / region node → its registered shape.
-      const built = ids.map((id) => profileShapeFor(oc, id));
-      const wires = built.map((b) => b.shape).filter(Boolean);
+      // Keep id↔wire aligned (no filter-drop) so region selection can map back.
+      const built   = ids.map((id) => ({ id, ...profileShapeFor(oc, id) }));
+      const valid   = built.filter((b) => b.shape);
+      const wires   = valid.map((b) => b.shape);
+      const wireIds = valid.map((b) => b.id);
       const freeTemps = () => built.forEach((b) => { if (b.temp && b.shape) try { b.shape.delete(); } catch { /*noop*/ } });
       try {
       if (!wires.length) throw new Error('Wire not found.');
@@ -215,8 +219,10 @@ function computeShape(
           ? OccExtrusionService.extrudeUpToNext(oc, wires, upToOpts, bodies)
           : OccExtrusionService.extrudeUpToLast(oc, wires, upToOpts, bodies);
       } else {
-        // E7: extrude every region (one wire → solid, many → compound).
-        solid = OccExtrusionService.extrudeProfiles(oc, wires, {
+        // E7: extrude the picked regions. With a Profile-picker selection, build
+        // EXACTLY the chosen regions (ring vs inner disk); otherwise (no picker)
+        // fall back to extruding every region by even/odd nesting (block w/ hole).
+        const extrudeOpts = {
           height:       p.h ?? 20,
           end:          EXTRUDE_END[endMode] ?? 'blind',
           height2:      p.h2 ?? 10,
@@ -225,7 +231,10 @@ function computeShape(
           draftAngle:   p.draft ?? 0,
           neutralPoint: getOrigin(ids[0]),
           thickness:    p.thick ?? 0,
-        });
+        };
+        solid = selectedRegionOuterIds?.length
+          ? OccExtrusionService.extrudeSelectedRegions(oc, wires, wireIds, selectedRegionOuterIds, extrudeOpts)
+          : OccExtrusionService.extrudeProfiles(oc, wires, extrudeOpts);
       }
       // Pad (fuse) / Pocket (cut) against an explicitly picked target solid.
       const boolOp = Math.round(p.op ?? 0);
@@ -472,6 +481,17 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [req.op, req.targetIds]);
 
+  /** Stable identities (outer wire ids) of the SELECTED regions — persisted so the
+   *  extrude rebuilds exactly the picked regions (ring vs inner disk), and a
+   *  re-edit restores the same selection. Empty for non-extrude ops. */
+  const selectedRegionOuters = useCallback((): string[] => {
+    if (req.op !== 'extrude') return [];
+    const profs = profilesRef.current;
+    return useCADStore.getState().profilePickSelected
+      .map((i) => profs[i]?.outerId)
+      .filter((id): id is string => !!id);
+  }, [req.op]);
+
   // Compute the profiles when the panel opens (or its targets change). Candidates
   // come from the FULL set (so re-edit shows every profile, selected or not); the
   // initial selection mirrors the op's persisted subset (all, for a fresh create).
@@ -498,13 +518,17 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     setProfileFaces(profs.map((p) => p.geometry));
     useCADStore.setState({ profilePickCount: profs.length });
 
-    // Selection: re-edit → the profiles whose wires are in the op's (subset)
-    // targetWireIds; fresh create → all. A profile contributed ALL its wires when
-    // selected and NONE when not, so an intersection test is exact.
-    const activeSet = new Set(req.editNodeId
-      ? ((stored?.targetWireIds as string[] | undefined) ?? candidateIds)
-      : candidateIds);
-    const initSel = profs.flatMap((p, i) => (p.wireIds.some((w) => activeSet.has(w)) ? [i] : []));
+    // Selection: a region's stable identity is its outer wire id. New nodes persist
+    // exactly which regions were picked (`selectedRegionOuterIds`) → restore those.
+    // Otherwise (fresh create, or a legacy node from before per-region picking) fall
+    // back to the SOLID (even-depth) regions — the block-with-hole the engine has
+    // always produced — so neither a new sketch nor an old file changes behaviour.
+    const storedOuters = req.editNodeId
+      ? (stored?.selectedRegionOuterIds as string[] | undefined)
+      : undefined;
+    const initSel = storedOuters?.length
+      ? profs.flatMap((p, i) => (storedOuters.includes(p.outerId) ? [i] : []))
+      : profs.flatMap((p, i) => (p.solid ? [i] : []));
     store.setProfilePickSelected(initSel.length ? initSel : profs.map((_, i) => i));
 
     return () => {
@@ -583,7 +607,8 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
       // Extrude consumes only the SELECTED profiles' wires (Profile picker).
       const liveTargets = liveReq.op === 'extrude' ? effectiveTargetIds() : liveReq.targetIds;
       if (!liveTargets.length) throw new Error('Select at least one profile to extrude.');
-      const shape = computeShape(liveReq.op, liveTargets, liveParams, liveTarget ?? undefined, liveFacePoint ?? undefined, liveDatum ?? undefined);
+      const liveRegions = liveReq.op === 'extrude' ? selectedRegionOuters() : undefined;
+      const shape = computeShape(liveReq.op, liveTargets, liveParams, liveTarget ?? undefined, liveFacePoint ?? undefined, liveDatum ?? undefined, liveRegions);
       // Live preview is throwaway — on a weak GPU build it extra-coarse so dragging
       // a slider stays responsive; Apply rebuilds it at the committed quality.
       const geo   = OccConverter.shapeToThreeGeometry(window.oc, shape, 0.2, isLowTier() ? 0.04 : undefined);
@@ -603,7 +628,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
     // Imperative scene edit → the on-demand render loop needs an explicit nudge,
     // otherwise the new preview isn't drawn until the next pointer move.
     window.cadRequestRender?.();
-  }, [clearPreview, effectiveTargetIds]);
+  }, [clearPreview, effectiveTargetIds, selectedRegionOuters]);
 
   // Debounce preview on param change (and on profile-selection change).
   useEffect(() => {
@@ -751,7 +776,8 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
 
     try {
       // ── Compute OCC shape ──────────────────────────────────────────────────
-      const shape = computeShape(req.op, targets, snap, targetSolidId ?? undefined, targetFacePoint ?? undefined, targetDatumId ?? undefined);
+      const regionOuters = req.op === 'extrude' ? selectedRegionOuters() : undefined;
+      const shape = computeShape(req.op, targets, snap, targetSolidId ?? undefined, targetFacePoint ?? undefined, targetDatumId ?? undefined, regionOuters);
       store.log(`Op3D: OCC shape computed ✓`, 'info');
 
       // Up-to-face: capture a stable signature of the picked target face (step 4)
@@ -772,7 +798,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
         window.dispatchEvent(new CustomEvent('cad-update-mesh', { detail: { id, material: old?.material } }));
         const idx = Number(old?.name?.match(/\d+$/)?.[0] ?? nextIdx(OP_NTYPE[req.op]));
         store.renameNode(id, `${OP_LABEL[req.op]}${idx}`);
-        store.setNodeParams(id, { opType: req.op, targetWireIds: targets, profileCandidateIds: req.op === 'extrude' ? candidateIdsRef.current : undefined, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined });
+        store.setNodeParams(id, { opType: req.op, targetWireIds: targets, profileCandidateIds: req.op === 'extrude' ? candidateIdsRef.current : undefined, selectedRegionOuterIds: regionOuters, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined });
         store.log(`${old?.name ?? id} updated ✓`, 'success');
         // Propagate to anything downstream (fillet / boolean / pad on this op).
         propagateFromStore(id);
@@ -790,7 +816,7 @@ export const Op3DPanel: React.FC<Op3DPanelProps> = ({ req, onClose }) => {
           id, name, type, visible: true, locked: false, parentId: null, notes: '',
           transform: { position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] },
           material:  { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS[type] ?? 0x5588cc },
-          params:    { opType: req.op, targetWireIds: targets, profileCandidateIds: req.op === 'extrude' ? candidateIdsRef.current : undefined, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined },
+          params:    { opType: req.op, targetWireIds: targets, profileCandidateIds: req.op === 'extrude' ? candidateIdsRef.current : undefined, selectedRegionOuterIds: regionOuters, opParams: snap, targetSolidId: targetSolidId ?? undefined, targetFacePoint: targetFacePoint ?? undefined, targetFaceRef, targetDatumId: targetDatumId ?? undefined },
         });
 
         // Verify the node is actually in the store (now placed under a component,

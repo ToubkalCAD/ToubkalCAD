@@ -254,7 +254,11 @@ export const EVALUATORS: Partial<Record<FeatureOp, Evaluator>> = {
   // which the engine supplies; defaults to Y-up / origin if absent.
   extrude: (oc, inputs, p) => {
     const profiles = byRole(inputs, 'profile');
-    const wires = (profiles.length ? profiles : inputs.filter((i) => !i.role || i.role === 'profile')).map((i) => i.shape).filter(Boolean);
+    // Keep id↔wire aligned (no filter-drop on shape until paired) so a region
+    // selection persisted by outer-wire id can be mapped back to its shape.
+    const profileInputs = (profiles.length ? profiles : inputs.filter((i) => !i.role || i.role === 'profile')).filter((i) => i.shape);
+    const wires   = profileInputs.map((i) => i.shape);
+    const wireIds = profileInputs.map((i) => i.id);
     if (!wires.length) throw new Error('extrude: no profile input');
 
     const wp = (profiles[0] ?? inputs[0])?.meta?.workplane;
@@ -281,7 +285,7 @@ export const EVALUATORS: Partial<Record<FeatureOp, Evaluator>> = {
         ? OccExtrusionService.extrudeUpToNext(oc, wires, upTo, bodies)
         : OccExtrusionService.extrudeUpToLast(oc, wires, upTo, bodies);
     } else {                                               // blind / symmetric / twoSided
-      solid = OccExtrusionService.extrudeProfiles(oc, wires, {
+      const extrudeOpts = {
         height:       num(p, 'h', 20),
         end:          EXTRUDE_END[endMode] ?? 'blind',
         height2:      num(p, 'h2', 10),
@@ -290,7 +294,13 @@ export const EVALUATORS: Partial<Record<FeatureOp, Evaluator>> = {
         draftAngle:   num(p, 'draft', 0),
         neutralPoint,
         thickness:    num(p, 'thick', 0),
-      });
+      };
+      // A Profile-picker selection (region outer-wire ids) extrudes EXACTLY those
+      // regions (ring vs inner disk); without one, every region by even/odd nesting.
+      const regionOuters = p.selectedRegionOuterIds as string[] | undefined;
+      solid = regionOuters?.length
+        ? OccExtrusionService.extrudeSelectedRegions(oc, wires, wireIds, regionOuters, extrudeOpts)
+        : OccExtrusionService.extrudeProfiles(oc, wires, extrudeOpts);
     }
 
     // Pad (fuse) / Pocket (cut) against the picked base solid.

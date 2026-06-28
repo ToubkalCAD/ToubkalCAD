@@ -49,6 +49,10 @@ export interface NestedProfile {
   holes:       any[];
   outerIndex:  number;
   holeIndices: number[];
+  /** Nesting depth of the outer wire (0 = top-level). EVEN = a solid region by the
+   *  classic even/odd rule; ODD = a region that sits inside a hole (a disk in a ring,
+   *  an annulus in a disk). Populated by both classifiers. */
+  depth?:      number;
 }
 
 const CLASSIFY_TOL = 1e-6;
@@ -147,16 +151,12 @@ function holeIsSubtractedWhenReversed(
   return Math.abs(areaWith(true) - target) <= Math.abs(areaWith(false) - target);
 }
 
-/**
- * Group coplanar closed `wires` into nested profiles (outer boundary + holes).
- * Returns one entry per even-depth (solid) region. Wires that can't form a planar
- * face are skipped. Empty input or all-invalid → empty array.
- *
- * `keep` is a WasmScope the caller supplies to own the provisional faces; the
- * returned `outer` faces are allocated in it too, so the caller frees everything
- * by freeing that one scope after the wires have been extruded.
- */
-export function classifyNestedProfiles(oc: any, wires: any[], keep: WasmScope): NestedProfile[] {
+/** Shared even/odd containment analysis: a provisional face per wire, plus each
+ *  wire's nesting depth and its immediate (smallest-area) container. Wires that
+ *  can't form a planar face are skipped. Returns null if none are usable. The
+ *  provisional faces are allocated in `keep` (caller frees the scope). */
+interface ContainmentAnalysis { infos: ProfileInfo[]; depth: number[]; parent: number[] }
+function analyzeContainment(oc: any, wires: any[], keep: WasmScope): ContainmentAnalysis | null {
   // 1. Provisional face + area + probe point per wire.
   const infos: ProfileInfo[] = [];
   for (let w = 0; w < wires.length; w++) {
@@ -169,7 +169,7 @@ export function classifyNestedProfiles(oc: any, wires: any[], keep: WasmScope): 
     if (!probe) continue;
     infos.push({ wire, index: w, face, area: faceArea(oc, face), probe });
   }
-  if (!infos.length) return [];
+  if (!infos.length) return null;
   const n = infos.length;
 
   // 2. Containment matrix: contains[i][j] = wire j lies inside wire i.
@@ -195,22 +195,62 @@ export function classifyNestedProfiles(oc: any, wires: any[], keep: WasmScope): 
       if (infos[i].area < bestArea) { bestArea = infos[i].area; parent[j] = i; }
     }
   }
+  return { infos, depth, parent };
+}
 
-  // 4. Even depth → solid outer; its holes = odd-depth wires it immediately parents.
+/** Build one NestedProfile for outer wire `o`: its face minus the wires nested
+ *  DIRECTLY inside it (depth+1). Allocates a holed face in `keep` when needed. */
+function regionFor(oc: any, a: ContainmentAnalysis, o: number, keep: WasmScope): NestedProfile {
+  const { infos, depth, parent } = a;
+  const holes = infos.filter((_, k) => parent[k] === o && depth[k] === depth[o] + 1);
+  const outer = makeFaceWithHoles(oc, infos[o].face, infos[o].area, holes);
+  if (outer !== infos[o].face) keep.keep(outer);   // new holed face (no-hole case reuses the kept provisional)
+  return {
+    outer,
+    holes:       holes.map((h) => h.wire),
+    outerIndex:  infos[o].index,
+    holeIndices: holes.map((h) => h.index),
+    depth:       depth[o],
+  };
+}
+
+/**
+ * Group coplanar closed `wires` into nested profiles (outer boundary + holes).
+ * Returns one entry per even-depth (solid) region — the odd-depth wires are
+ * swallowed as holes. This is the DEFAULT extrude-everything grouping (a circle
+ * in a rectangle → one block with a hole). Use `classifyAllRegions` instead when
+ * the inner regions must be individually selectable (the Profile picker).
+ *
+ * `keep` is a WasmScope the caller supplies to own the provisional faces; the
+ * returned `outer` faces are allocated in it too, so the caller frees everything
+ * by freeing that one scope after the wires have been extruded.
+ */
+export function classifyNestedProfiles(oc: any, wires: any[], keep: WasmScope): NestedProfile[] {
+  const a = analyzeContainment(oc, wires, keep);
+  if (!a) return [];
   const profiles: NestedProfile[] = [];
-  for (let o = 0; o < n; o++) {
-    if (depth[o] % 2 !== 0) continue;                       // odd = hole, handled by its outer
-    const holes = infos.filter((_, k) => parent[k] === o && depth[k] === depth[o] + 1);
-    const outer = makeFaceWithHoles(oc, infos[o].face, infos[o].area, holes);
-    if (outer !== infos[o].face) keep.keep(outer);     // new holed face (the no-hole case reuses the kept provisional)
-    profiles.push({
-      outer,
-      holes:       holes.map((h) => h.wire),
-      outerIndex:  infos[o].index,
-      holeIndices: holes.map((h) => h.index),
-    });
+  for (let o = 0; o < a.infos.length; o++) {
+    if (a.depth[o] % 2 !== 0) continue;              // odd = hole, handled by its outer
+    profiles.push(regionFor(oc, a, o, keep));
   }
   return profiles;
+}
+
+/**
+ * Every MINIMAL region of the wire set: ONE region per wire = that wire's face
+ * minus the wires nested DIRECTLY inside it (its immediate holes). Unlike
+ * `classifyNestedProfiles` (which keeps only the even-depth solids and swallows
+ * the odd wires as holes), this also surfaces the inner regions — the disk inside
+ * a ring, the annulus inside a disk — so the Profile picker can offer each as its
+ * own independently-extrudable area. `depth` is the nesting level (even = a solid
+ * by the classic even/odd rule → the picker pre-selects those by default).
+ */
+export function classifyAllRegions(oc: any, wires: any[], keep: WasmScope): NestedProfile[] {
+  const a = analyzeContainment(oc, wires, keep);
+  if (!a) return [];
+  const regions: NestedProfile[] = [];
+  for (let o = 0; o < a.infos.length; o++) regions.push(regionFor(oc, a, o, keep));
+  return regions;
 }
 
 /**

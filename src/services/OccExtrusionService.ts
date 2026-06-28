@@ -13,7 +13,7 @@
 // ============================================================
 
 import { WasmScope } from '../utils/WasmScope';
-import { buildNestedFaces } from './ProfileNesting';
+import { buildNestedFaces, classifyAllRegions } from './ProfileNesting';
 
 export type ExtrudeEnd = 'blind' | 'symmetric' | 'twoSided';
 
@@ -641,6 +641,41 @@ export class OccExtrusionService {
         const solid = OccExtrusionService.extrudeFromFace(oc, f, opts);
         builder.Add(compound, solid);
       }
+      return compound;
+    } finally {
+      faceScope.free();
+    }
+  }
+
+  /**
+   * Extrude only the profiles the user PICKED (Profile picker). Every wire is
+   * classified into its minimal region (`classifyAllRegions`); only the regions
+   * whose OUTER wire id is in `selectedOuterIds` are prismed (each as its own
+   * face-with-holes), then compounded. This is region-precise: picking the ring
+   * extrudes the ring, picking the inner disk extrudes the disk, picking both
+   * extrudes the two adjacent solids — no even/odd guesswork.
+   *
+   * `wireIds[i]` must name the source wire of `wires[i]` (same order); the
+   * selection refers to those ids so it survives save/reload and re-edit.
+   */
+  static extrudeSelectedRegions(
+    oc: any, wires: any[], wireIds: string[], selectedOuterIds: string[], opts: ExtrudeOptions,
+  ): any {
+    if (!wires.length) throw new Error('Multi-extrude: no profiles.');
+    const sel = new Set(selectedOuterIds);
+
+    const faceScope = new WasmScope();
+    try {
+      const faces = classifyAllRegions(oc, wires, faceScope)
+        .filter((r) => sel.has(wireIds[r.outerIndex]))
+        .map((r) => r.outer);
+      if (!faces.length) throw new Error('Extrusion: none of the selected profiles resolved to a region.');
+      if (faces.length === 1) return OccExtrusionService.extrudeFromFace(oc, faces[0], opts);
+
+      const builder  = new oc.BRep_Builder();
+      const compound = new oc.TopoDS_Compound();   // returned → not freed here
+      builder.MakeCompound(compound);
+      for (const f of faces) builder.Add(compound, OccExtrusionService.extrudeFromFace(oc, f, opts));
       return compound;
     } finally {
       faceScope.free();
