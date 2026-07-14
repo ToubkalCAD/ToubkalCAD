@@ -64,16 +64,11 @@ const toEntity2D = (geom: any): Entity2D | null => {
   if (geom?.kind === 'line')   return { kind: 'line',   a: geom.a, b: geom.b };
   if (geom?.kind === 'circle') return { kind: 'circle', c: geom.c, r: geom.r };
   if (geom?.kind === 'arc')    return { kind: 'arc',    c: geom.c, r: geom.r, a1: geom.a1, a2: geom.a2 };
-  if (geom?.kind === 'ellipse_arc') {   // sample to a polyline so it acts as a cutter
-    const pts: Pt[] = [];
-    const SEGS = 48;
-    for (let i = 0; i <= SEGS; i++) {
-      const a = geom.a1 + ((geom.a2 - geom.a1) * i) / SEGS;
-      pts.push([geom.c[0] + geom.rx * Math.cos(a), geom.c[1] + geom.ry * Math.sin(a)]);
-    }
-    return { kind: 'polyline', pts };
+  if (geom?.kind === 'ellipse_arc') return { kind: 'ellipse_arc', c: geom.c, rx: geom.rx, ry: geom.ry, a1: geom.a1, a2: geom.a2 };
+  if (geom?.kind === 'polyline' && Array.isArray(geom.pts)) {
+    const ell = ellipseOfGeom(geom);
+    return ell ? { kind: 'ellipse', ...ell } : { kind: 'polyline', pts: geom.pts };
   }
-  if (geom?.kind === 'polyline' && Array.isArray(geom.pts)) return { kind: 'polyline', pts: geom.pts };
   return null;
 };
 

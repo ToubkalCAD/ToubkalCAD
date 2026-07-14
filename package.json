@@ -12,6 +12,7 @@
     "test:extrude": "node scripts/test-extrude.mjs",
     "test:nested": "tsx scripts/test-nested-profile.ts",
     "test:region-pick": "tsx scripts/test-region-pick.ts",
+    "test:sketch-trim": "tsx scripts/test-sketch-trim-regions.ts",
     "test:candidate-durability": "node scripts/test-profile-candidate-durability.mjs",
     "test:loft": "node scripts/test-loft.mjs",
     "test:recompute": "node scripts/test-recompute.mjs",

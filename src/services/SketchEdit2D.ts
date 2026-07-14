@@ -16,6 +16,8 @@ export type Entity2D =
   | { kind: 'line';   a: Pt; b: Pt }
   | { kind: 'circle'; c: Pt; r: number }
   | { kind: 'arc';    c: Pt; r: number; a1: number; a2: number }
+  | { kind: 'ellipse'; c: Pt; rx: number; ry: number }
+  | { kind: 'ellipse_arc'; c: Pt; rx: number; ry: number; a1: number; a2: number }
   | { kind: 'polyline'; pts: Pt[] };   // tessellated curve cutter (ellipse/spline/bezier)
 export interface Line2D { a: Pt; b: Pt }
 export interface Circle2D { c: Pt; r: number }
@@ -81,6 +83,19 @@ function tLineCircleInfinite(L: Line2D, C: { c: Pt; r: number }): number[] {
   return Math.abs(disc) < EPS ? [out[0]] : out;
 }
 
+function tLineEllipseInfinite(L: Line2D, E: { c: Pt; rx: number; ry: number }): number[] {
+  const ax = (L.a[0] - E.c[0]) / E.rx, ay = (L.a[1] - E.c[1]) / E.ry;
+  const dx = (L.b[0] - L.a[0]) / E.rx, dy = (L.b[1] - L.a[1]) / E.ry;
+  const A = dx * dx + dy * dy;
+  if (A < EPS) return [];
+  const B = 2 * (ax * dx + ay * dy), C = ax * ax + ay * ay - 1;
+  const disc = B * B - 4 * A * C;
+  if (disc < 0) return [];
+  const sd = Math.sqrt(disc);
+  const out = [(-B - sd) / (2 * A), (-B + sd) / (2 * A)];
+  return Math.abs(disc) < EPS ? [out[0]] : out;
+}
+
 function rawParams(target: Line2D, cutters: Entity2D[]): number[] {
   const ts: number[] = [];
   for (const e of cutters) {
@@ -95,7 +110,16 @@ function rawParams(target: Line2D, cutters: Entity2D[]): number[] {
         const rel = norm2pi(angleOf(e.c, pointAt(target, t)) - e.a1);
         if (rel > -PARAM_EPS && rel < span + PARAM_EPS) ts.push(t);
       }
-    } else { // polyline cutter — test each chord segment
+    } else if (e.kind === 'ellipse' || e.kind === 'ellipse_arc') {
+      for (const t of tLineEllipseInfinite(target, e)) {
+        if (e.kind === 'ellipse_arc') {
+          const p = pointAt(target, t);
+          const rel = norm2pi(Math.atan2((p[1] - e.c[1]) / e.ry, (p[0] - e.c[0]) / e.rx) - e.a1);
+          if (rel > e.a2 - e.a1 + PARAM_EPS) continue;
+        }
+        ts.push(t);
+      }
+    } else {
       for (let i = 0; i < e.pts.length - 1; i++) {
         const t = tLineLineInfinite(target, { a: e.pts[i], b: e.pts[i + 1] });
         if (t !== null) ts.push(t);
@@ -205,6 +229,38 @@ function circleCirclePoints(C1: Pt, R1: number, C2: Pt, R2: number): Pt[] {
   return [[px - h * ey, py + h * ex], [px + h * ey, py - h * ex]];
 }
 
+/** Circle/ellipse crossings, parameterised on the ellipse. Using this shared
+ * calculation in both trim directions keeps the resulting arc endpoints equal. */
+function circleEllipsePoints(C: Pt, R: number, E: { c: Pt; rx: number; ry: number }): Pt[] {
+  const value = (t: number): number => {
+    const x = E.c[0] + E.rx * Math.cos(t) - C[0];
+    const y = E.c[1] + E.ry * Math.sin(t) - C[1];
+    return x * x + y * y - R * R;
+  };
+  const N = 720;
+  const roots: number[] = [];
+  let ta = 0, fa = value(0);
+  for (let i = 1; i <= N; i++) {
+    const tb = (TWO_PI * i) / N, fb = value(tb);
+    if (Math.abs(fa) < 1e-10) roots.push(ta);
+    if (fa * fb < 0) {
+      let lo = ta, hi = tb, flo = fa;
+      for (let k = 0; k < 48; k++) {
+        const mid = (lo + hi) / 2, fm = value(mid);
+        if (flo * fm <= 0) hi = mid;
+        else { lo = mid; flo = fm; }
+      }
+      roots.push((lo + hi) / 2);
+    }
+    ta = tb; fa = fb;
+  }
+  roots.sort((a, b) => a - b);
+  const unique: number[] = [];
+  for (const t of roots) if (!unique.length || t - unique[unique.length - 1] > PARAM_EPS) unique.push(t);
+  if (unique.length > 1 && unique[0] + TWO_PI - unique[unique.length - 1] < PARAM_EPS) unique.pop();
+  return unique.map((t) => [E.c[0] + E.rx * Math.cos(t), E.c[1] + E.ry * Math.sin(t)]);
+}
+
 /** All points where the cutters meet the circle (C,R), honouring cutter extents. */
 function cutterPointsOnCircle(C: Pt, R: number, cutters: Entity2D[]): Pt[] {
   const pts: Pt[] = [];
@@ -219,7 +275,15 @@ function cutterPointsOnCircle(C: Pt, R: number, cutters: Entity2D[]): Pt[] {
         const rel = norm2pi(angleOf(e.c, p) - e.a1);
         if (rel > -PARAM_EPS && rel < span + PARAM_EPS) pts.push(p);
       }
-    } else { // polyline cutter — crossings of each chord segment with the circle
+    } else if (e.kind === 'ellipse' || e.kind === 'ellipse_arc') {
+      for (const p of circleEllipsePoints(C, R, e)) {
+        if (e.kind === 'ellipse_arc') {
+          const rel = norm2pi(ellipseParam(e.c, e.rx, e.ry, p) - e.a1);
+          if (rel > e.a2 - e.a1 + PARAM_EPS) continue;
+        }
+        pts.push(p);
+      }
+    } else {
       for (let i = 0; i < e.pts.length - 1; i++) pts.push(...circleSegPoints(C, R, e.pts[i], e.pts[i + 1]));
     }
   }
@@ -376,10 +440,12 @@ function cutterSegments(e: Entity2D): [Pt, Pt][] {
     for (let i = 0; i < e.pts.length - 1; i++) segs.push([e.pts[i], e.pts[i + 1]]);
     return segs;
   }
-  const a1 = e.kind === 'arc' ? e.a1 : 0;
-  const a2 = e.kind === 'arc' ? e.a2 : TWO_PI;
-  const N = 64;
-  const cp = (a: number): Pt => [e.c[0] + e.r * Math.cos(a), e.c[1] + e.r * Math.sin(a)];
+  const a1 = e.kind === 'arc' || e.kind === 'ellipse_arc' ? e.a1 : 0;
+  const a2 = e.kind === 'arc' || e.kind === 'ellipse_arc' ? e.a2 : TWO_PI;
+  const N = 256;
+  const cp = e.kind === 'ellipse' || e.kind === 'ellipse_arc'
+    ? (a: number): Pt => [e.c[0] + e.rx * Math.cos(a), e.c[1] + e.ry * Math.sin(a)]
+    : (a: number): Pt => [e.c[0] + e.r * Math.cos(a), e.c[1] + e.r * Math.sin(a)];
   const segs: [Pt, Pt][] = [];
   for (let i = 0; i < N; i++) segs.push([cp(a1 + ((a2 - a1) * i) / N), cp(a1 + ((a2 - a1) * (i + 1)) / N)]);
   return segs;
@@ -388,7 +454,19 @@ function cutterSegments(e: Entity2D): [Pt, Pt][] {
 /** Crossing points of all cutters with the ellipse (c,rx,ry). */
 function cutterPointsOnEllipse(c: Pt, rx: number, ry: number, cutters: Entity2D[]): Pt[] {
   const pts: Pt[] = [];
-  for (const e of cutters) for (const [a, b] of cutterSegments(e)) pts.push(...segEllipsePoints(c, rx, ry, a, b));
+  for (const e of cutters) {
+    if (e.kind === 'circle' || e.kind === 'arc') {
+      for (const p of circleEllipsePoints(e.c, e.r, { c, rx, ry })) {
+        if (e.kind === 'arc') {
+          const rel = norm2pi(angleOf(e.c, p) - e.a1);
+          if (rel > e.a2 - e.a1 + PARAM_EPS) continue;
+        }
+        pts.push(p);
+      }
+    } else {
+      for (const [a, b] of cutterSegments(e)) pts.push(...segEllipsePoints(c, rx, ry, a, b));
+    }
+  }
   return pts;
 }
 
