@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { rmSync } from 'node:fs';
 import path from 'node:path';
 import initOpenCascade from 'opencascade.js/dist/node.js';
+import { importCompiledModule, prepareCommonJsOutput } from './import-compiled-cjs.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT  = path.join(ROOT, '.tk-stableref-datum-build');
@@ -32,8 +33,9 @@ execSync(
   `--rootDir "${ROOT}/src" --module commonjs --target es2020 --skipLibCheck --esModuleInterop`,
   { stdio: 'inherit' },
 );
-const { EVALUATORS, evaluateDatum } = await import(`${OUT}/services/FeatureEvaluators.js`);
-const { captureFaceAtPoint, lineSigFromPoints, vertexSigFromPoint } = await import(`${OUT}/services/StableRef.js`);
+prepareCommonJsOutput(OUT);
+const { EVALUATORS, evaluateDatum } = await importCompiledModule(OUT, 'services/FeatureEvaluators.js');
+const { captureFaceAtPoint, lineSigFromPoints, vertexSigFromPoint } = await importCompiledModule(OUT, 'services/StableRef.js');
 
 const oc = await initOpenCascade();
 

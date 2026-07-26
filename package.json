@@ -1,18 +1,19 @@
 {
-  "name": "atlascad",
+  "name": "toubkalcad",
   "version": "1.0.0",
-  "description": "Application CAO 3D dans le navigateur - AtlasCAD",
+  "description": "Browser-based 3D parametric CAD application powered by OpenCascade",
   "type": "module",
   "main": "src/index.tsx",
   "scripts": {
     "dev": "rspack serve --config rspack.config.ts",
     "build": "tsc --noEmit && rspack build --config rspack.config.ts",
+    "lint": "eslint src rspack.config.ts",
     "preview": "rspack serve --config rspack.config.ts --mode production",
     "clean": "rimraf dist",
+    "test": "npm run test:extrude && npm run test:nested && npm run test:region-pick && npm run test:candidate-durability && npm run test:loft && npm run test:recompute && npm run test:stableref && npm run test:stableref-face && npm run test:stableref-datum && npm run test:stableref-sketch && npm run test:history-delta && npm run test:region-backfill && npm run test:solver && npm run test:distance",
     "test:extrude": "node scripts/test-extrude.mjs",
     "test:nested": "tsx scripts/test-nested-profile.ts",
     "test:region-pick": "tsx scripts/test-region-pick.ts",
-    "test:sketch-trim": "tsx scripts/test-sketch-trim-regions.ts",
     "test:candidate-durability": "node scripts/test-profile-candidate-durability.mjs",
     "test:loft": "node scripts/test-loft.mjs",
     "test:recompute": "node scripts/test-recompute.mjs",
@@ -26,6 +27,22 @@
     "test:planegcs": "tsx native/slvs/test/crosscheck.ts",
     "test:distance": "tsx scripts/test-distance-lineline.mjs"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JNaruto-mar/ToubkalCAD.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JNaruto-mar/ToubkalCAD/issues"
+  },
+  "homepage": "https://github.com/JNaruto-mar/ToubkalCAD#readme",
+  "keywords": [
+    "cad",
+    "opencascade",
+    "parametric-modeling",
+    "react",
+    "threejs",
+    "webassembly"
+  ],
   "dependencies": {
     "@salusoft89/planegcs": "^1.1.7",
     "dockview": "^1.11.0",
@@ -43,16 +60,20 @@
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@types/three": "^0.170.0",
+    "eslint": "^10.8.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "file-loader": "^6.2.0",
+    "globals": "^17.7.0",
     "opencascade.js": "2.0.0-beta.b5ff984",
     "playwright-core": "^1.60.0",
     "rimraf": "^6.0.1",
     "tsx": "^4.22.4",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.65.0"
   },
   "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=9.0.0"
+    "node": ">=20.19.0",
+    "npm": ">=10.0.0"
   },
   "private": true
 }

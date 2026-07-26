@@ -1,5 +1,5 @@
 // ============================================================
-// AtlasCAD – rspack.config.ts  (v3 – Rspack 2.x + OCC beta)
+// ToubkalCAD – rspack.config.ts  (v3 – Rspack 2.x + OCC beta)
 //
 // CHANGEMENTS CLÉS vs v1 :
 //   • @rspack/core 2.0  : defineConfig vient de @rspack/core

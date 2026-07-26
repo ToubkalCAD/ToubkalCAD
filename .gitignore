@@ -1,6 +1,12 @@
 # Dependencies
 node_modules/
 
+# Generated production build
+dist/
+
+# Test scratch builds
+.tk-*-build/
+
 # Logs
 *.log
 npm-debug.log*
@@ -13,4 +19,5 @@ npm-debug.log*
 
 # Env
 .env
-.env.local
+.env.*
+!.env.example

@@ -1,0 +1,46 @@
+name: Bug report
+description: Report reproducible incorrect behavior in ToubkalCAD
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Use the private process in SECURITY.md.
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open...
+        2. Create...
+        3. Select...
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and version
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: ToubkalCAD commit
+      description: Commit hash or branch where the problem occurs
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console output
+      render: shell
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context

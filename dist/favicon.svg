@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
-  <rect width="32" height="32" rx="6" fill="#0b1726"/>
-  <!-- Toubkal peak -->
-  <path d="M4 25 L13 9 L18 18 L21 13 L28 25 Z" fill="#2b8cff"/>
-  <!-- snow cap -->
-  <path d="M13 9 L16.2 14.7 L13.4 16.2 L11.2 13.2 Z" fill="#dceaff"/>
-  <!-- ground line -->
-  <rect x="3" y="25" width="26" height="1.6" rx="0.8" fill="#1f4a7a"/>
-</svg>

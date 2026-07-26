@@ -20,9 +20,10 @@
 
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { rmSync, writeFileSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import path from 'node:path';
 import initOpenCascade from 'opencascade.js/dist/node.js';
+import { importCompiledModule, prepareCommonJsOutput } from './import-compiled-cjs.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT  = path.join(ROOT, '.tk-candidate-build');
@@ -35,11 +36,9 @@ execSync(
   `--rootDir "${ROOT}/src" --module commonjs --target es2020 --skipLibCheck --esModuleInterop`,
   { stdio: 'inherit' },
 );
-// The repo root is "type":"module", so .js in OUT would be read as ESM and the
-// CJS `exports` would be undefined. A local package.json marks the build CJS.
-writeFileSync(path.join(OUT, 'package.json'), '{"type":"commonjs"}');
-const { recompute }       = await import(`${OUT}/services/RecomputeEngine.js`);
-const { buildFeatureGraph } = await import(`${OUT}/services/FeatureGraph.js`);
+prepareCommonJsOutput(OUT);
+const { recompute } = await importCompiledModule(OUT, 'services/RecomputeEngine.js');
+const { buildFeatureGraph } = await importCompiledModule(OUT, 'services/FeatureGraph.js');
 
 const oc = await initOpenCascade();
 

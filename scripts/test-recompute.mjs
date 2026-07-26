@@ -26,11 +26,12 @@ import { fileURLToPath } from 'node:url';
 import { rmSync } from 'node:fs';
 import path from 'node:path';
 import initOpenCascade from 'opencascade.js/dist/node.js';
+import { importCompiledModule, prepareCommonJsOutput } from './import-compiled-cjs.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Compile INSIDE the repo so the compiled CJS resolves 'three' up the
-// node_modules tree (a /tmp outDir can't). This repo tracks node_modules and has
-// no .gitignore, so the build dir is removed on exit (see cleanup() below).
+// node_modules tree (a /tmp outDir can't). The ignored build directory is also
+// removed on exit (see cleanup() below).
 const OUT  = path.join(ROOT, '.tk-recompute-build');
 const cleanup = () => { try { rmSync(OUT, { recursive: true, force: true }); } catch {} };
 const done = (code) => { cleanup(); process.exit(code); };
@@ -42,8 +43,9 @@ execSync(
   `--rootDir "${ROOT}/src" --module commonjs --target es2020 --skipLibCheck --esModuleInterop`,
   { stdio: 'inherit' },
 );
-const { recompute }                  = await import(`${OUT}/services/RecomputeEngine.js`);
-const { buildFeatureGraph, dirtySet } = await import(`${OUT}/services/FeatureGraph.js`);
+prepareCommonJsOutput(OUT);
+const { recompute } = await importCompiledModule(OUT, 'services/RecomputeEngine.js');
+const { buildFeatureGraph, dirtySet } = await importCompiledModule(OUT, 'services/FeatureGraph.js');
 
 const oc = await initOpenCascade();
 

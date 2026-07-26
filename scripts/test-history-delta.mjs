@@ -12,6 +12,7 @@ import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { rmSync } from 'node:fs';
 import path from 'node:path';
+import { importCompiledModule, prepareCommonJsOutput } from './import-compiled-cjs.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const OUT  = path.join(ROOT, '.tk-history-delta-build');
@@ -24,7 +25,8 @@ execSync(
   `--rootDir "${ROOT}/src" --module commonjs --target es2020 --skipLibCheck`,
   { stdio: 'inherit' },
 );
-const { diffNodes, applyDeltas } = await import(`${OUT}/store/historyDelta.js`);
+prepareCommonJsOutput(OUT);
+const { diffNodes, applyDeltas } = await importCompiledModule(OUT, 'store/historyDelta.js');
 
 let passed = 0, failed = 0;
 const ok = (label, cond, detail = '') => {

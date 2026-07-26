@@ -8,23 +8,24 @@ ToubkalCAD — a browser-based 3D parametric CAD application. The geometry kerne
 OpenCascade (OCCT 7.8) compiled to WebAssembly via `opencascade.js@beta`; rendering is
 Three.js (r170); UI is React 18 + Zustand; layout is Dockview; bundler is Rspack 2.x.
 
-Note: the project was renamed from **AtlasCAD** → **ToubkalCAD**. `package.json` still
-reads `"name": "atlascad"` and many source-file header comments say "AtlasCAD" — same
-codebase, don't treat the two names as different projects. (`projects/AtlasCAD` and
-`projects/TunaCAD` are separate sibling repos.)
+Note: the project was renamed from **AtlasCAD** → **ToubkalCAD**. Some historical
+source-file header comments still say "AtlasCAD" — they refer to the same codebase.
 
 ## Commands
 
 ```bash
 npm run dev      # rspack serve on http://localhost:8080 (HMR)
 npm run build    # tsc --noEmit (typecheck) THEN rspack build → dist/
+npm run lint     # ESLint correctness and React Hooks checks
+npm test         # supported headless regression suite
 npm run preview  # production-mode serve
 npm run clean    # rimraf dist
 npx tsc --noEmit # typecheck only (fast feedback without bundling)
 ```
 
-There is **no test runner and no linter configured** in this project — `tsc --noEmit`
-is the only automated check. Deployment is Netlify (`netlify.toml`, publishes `dist/`).
+Headless regression tests are orchestrated by the `npm test` script. ESLint provides
+correctness and React Hooks checks through `npm run lint`. Deployment is Netlify
+(`netlify.toml`, publishes the generated `dist/` directory).
 
 ## Cross-origin isolation is mandatory
 
