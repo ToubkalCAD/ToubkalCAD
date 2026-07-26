@@ -9,6 +9,7 @@ import { useCADStore, CADNode, NodeType, canReparent } from '../store/cadStore';
 import { show3DOpPanel } from './Op3DPanel';
 import type { Op3DType } from './Op3DPanel';
 import { editPrimitive, primitiveKind } from '../utils/editPrimitive';
+import { isAssemblyComponentData, isAssemblyDocumentData } from '../assembly/types';
 
 // The node currently being dragged in the tree. Kept out-of-band (HTML5 DnD only
 // exposes dataTransfer payloads on drop, not during dragover) so we can compute
@@ -28,6 +29,7 @@ const SOLID_TYPES = new Set<NodeType>([
 const NODE_ICONS: Record<NodeType, string> = {
   assembly:          '▤',
   component:         '◰',
+  assembly_component: '◆',
   box:               '◻',
   cylinder:          '⬡',
   sphere:            '●',
@@ -57,6 +59,7 @@ const NODE_ICONS: Record<NodeType, string> = {
 const NODE_COLORS: Record<NodeType, string> = {
   assembly:          '#9aa0a6',
   component:         '#6e7681',
+  assembly_component: '#4f8fd8',
   box:               '#5588cc',
   cylinder:          '#44aa66',
   sphere:            '#cc6644',
@@ -149,6 +152,11 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
   const isSurface    = node.bodyType === 'surface';
   const color        = isSurface ? '#e0a32e' : (NODE_COLORS[node.type] ?? 'var(--text-dim)');
   const hasChildren  = node.children.length > 0;
+  const assemblyComponent = node.params?.assemblyComponent;
+  const isAssemblyComponent = node.type === 'assembly_component' && isAssemblyComponentData(assemblyComponent);
+  const parentAssemblyData = node.parentId ? useCADStore.getState().nodes[node.parentId]?.params?.assembly : undefined;
+  const isActiveAssemblyComponent = isAssemblyComponent && isAssemblyDocumentData(parentAssemblyData)
+    && parentAssemblyData.activeComponentId === node.id;
 
   const handleClick = (e: React.MouseEvent) => {
     if (isEditing) return;
@@ -159,13 +167,6 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
       e.stopPropagation();
       pickBooleanSolid(nodeId);
       return;
-    }
-    if (node.type === 'sketch' && hasChildren) {
-      // Single-click on sketch container toggles collapse
-      if (!e.ctrlKey && !e.metaKey) {
-        setCollapsed((c) => !c);
-        return;
-      }
     }
     if (e.ctrlKey || e.metaKey) {
       setSelectedIds(isSelected
@@ -341,9 +342,12 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
         onMouseEnter={(e) => { if (!isSelected && !isActiveSketch) (e.currentTarget as HTMLElement).style.background = 'var(--surface-3)'; }}
         onMouseLeave={(e) => { if (!isSelected && !isActiveSketch) (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
       >
-        {/* Collapse toggle for sketch containers */}
-        {node.type === 'sketch' ? (
-          <span style={{ fontSize: '8px', color: 'var(--text-muted)', flexShrink: 0, width: '10px' }}>
+        {/* Collapse toggle for tree containers */}
+        {(node.type === 'sketch' || node.type === 'assembly' || node.type === 'component') ? (
+          <span
+            onClick={(event) => { event.stopPropagation(); if (hasChildren) setCollapsed((value) => !value); }}
+            style={{ fontSize: '8px', color: 'var(--text-muted)', flexShrink: 0, width: '10px' }}
+          >
             {hasChildren ? (collapsed ? '▶' : '▼') : ''}
           </span>
         ) : null}
@@ -377,6 +381,15 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           }}>
             {node.name}
+            {isAssemblyComponent && assemblyComponent.suppressed && (
+              <span style={{ color: '#d28b26', marginLeft: 4, fontSize: 8 }}> SUPPRESSED</span>
+            )}
+            {isAssemblyComponent && assemblyComponent.missingPart && (
+              <span style={{ color: '#d34b4b', marginLeft: 4, fontSize: 8 }}> MISSING</span>
+            )}
+            {isActiveAssemblyComponent && (
+              <span style={{ color: '#4f8fd8', marginLeft: 4, fontSize: 8 }}> ACTIVE</span>
+            )}
             {node.locked && (
               <span style={{ color: 'var(--text-muted)', marginLeft: '4px', fontSize: '9px' }}>🔒</span>
             )}
@@ -419,7 +432,9 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
             onClick={(e) => {
               e.stopPropagation();
               const newId = duplicateNode(nodeId);
-              window.dispatchEvent(new CustomEvent('cad-duplicate-mesh', { detail: { sourceId: nodeId, newId } }));
+              if (node.type !== 'assembly_component') {
+                window.dispatchEvent(new CustomEvent('cad-duplicate-mesh', { detail: { sourceId: nodeId, newId } }));
+              }
             }}
             title="Duplicate (Ctrl+D)"
           >
@@ -439,6 +454,40 @@ const TreeNode: React.FC<{ nodeId: string; depth: number }> = ({ nodeId, depth }
       {!collapsed && node.children.map((cid) => (
         <TreeNode key={cid} nodeId={cid} depth={depth + 1} />
       ))}
+      {!collapsed && node.type === 'assembly' && isAssemblyDocumentData(node.params?.assembly) && (
+        <div style={{ paddingLeft: `${20 + (depth + 1) * 14}px`, fontSize: 10, color: 'var(--text-muted)' }}>
+          <div style={{ padding: '3px 6px' }}>⌁ Constraints ({node.params.assembly.constraintIds.length})</div>
+          {node.params.assembly.constraintIds.map((constraintId: string) => {
+            const constraint = node.params!.assembly.constraints[constraintId];
+            if (!constraint) return null;
+            const warning = constraint.status === 'conflicting' || constraint.status === 'missing-reference';
+            return (
+              <div
+                key={constraintId}
+                role="button"
+                tabIndex={0}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  useCADStore.getState().selectAssemblyConstraint(node.id, constraintId);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    useCADStore.getState().selectAssemblyConstraint(node.id, constraintId);
+                  }
+                }}
+                style={{
+                  padding: '2px 6px 2px 18px',
+                  color: warning ? '#d34b4b' : 'var(--text-muted)',
+                  cursor: 'pointer',
+                }}
+              >
+                {warning ? '⚠ ' : ''}{constraint.type}: {constraint.status}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 };

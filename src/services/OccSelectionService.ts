@@ -37,7 +37,7 @@ export class OccSelectionService {
     const selectableMeshes: THREE.Mesh[] = [];
     const selectableLines:  THREE.Line[]  = [];
 
-    scene.children.forEach((obj) => {
+    scene.traverse((obj) => {
       if (!obj.userData?.cadNodeId) return;
       if (obj instanceof THREE.Mesh) selectableMeshes.push(obj);
       else if (obj instanceof THREE.Line) selectableLines.push(obj);
@@ -53,7 +53,9 @@ export class OccSelectionService {
 
     let hitNodeId: string | null = null;
     if (bestMesh && (!bestLine || bestMesh.distance <= bestLine.distance)) {
-      hitNodeId = (bestMesh.object as THREE.Mesh).userData.cadNodeId as string;
+      let obj: THREE.Object3D | null = bestMesh.object;
+      while (obj && !obj.userData?.cadNodeId) obj = obj.parent;
+      hitNodeId = obj?.userData?.cadNodeId ?? null;
     } else if (bestLine) {
       // Walk up to the root Line object that carries cadNodeId
       let obj: THREE.Object3D | null = bestLine.object;
@@ -82,7 +84,7 @@ export class OccSelectionService {
 
   static applyHighlights(scene: THREE.Scene, ids: string[]): void {
     const idSet = new Set(ids);
-    scene.children.forEach((obj) => {
+    scene.traverse((obj) => {
       if (!obj.userData?.cadNodeId || !idSet.has(obj.userData.cadNodeId)) return;
 
       if (obj instanceof THREE.Mesh && obj.material instanceof THREE.MeshStandardMaterial) {
@@ -97,7 +99,7 @@ export class OccSelectionService {
   }
 
   static clearHighlights(scene: THREE.Scene): void {
-    scene.children.forEach((obj) => {
+    scene.traverse((obj) => {
       if (obj instanceof THREE.Mesh && obj.material instanceof THREE.MeshStandardMaterial) {
         obj.material.emissive.setHex(0x000000);
         obj.material.emissiveIntensity = 0;

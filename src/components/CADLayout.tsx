@@ -21,6 +21,7 @@ import { MenuBar }              from './MenuBar';
 import { ErrorBoundary }        from './ErrorBoundary';
 import { PlaneSelector }        from './PlaneSelector';
 import { TreeContextMenu }     from './TreeContextMenu';
+import { AssemblyInsertPartDialog } from './AssemblyInsertPartDialog';
 import { Op3DPanel, show3DOpPanel } from './Op3DPanel';
 import type { Op3DRequest, Op3DType } from './Op3DPanel';
 import { BlendActionPanel }    from './BlendActionPanel';
@@ -315,6 +316,7 @@ export const CADLayout: React.FC = () => {
       {/* Floating overlays rendered at root level to appear above Dockview */}
       <PlaneSelector />
       <TreeContextMenu />
+      <AssemblyInsertPartDialog />
       {op3DReq && (
         <Op3DPanel
           req={op3DReq as Op3DRequest}

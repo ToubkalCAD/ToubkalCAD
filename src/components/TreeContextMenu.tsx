@@ -17,6 +17,8 @@ import { showBlendPanel }      from './BlendActionPanel';
 import { editPrimitive, primitiveKind } from '../utils/editPrimitive';
 import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 import { resolveProfileWire, resolveAllProfileWires, canResolveProfile, sketchRegionCount } from '../utils/sketchProfile';
+import { isAssemblyComponentData } from '../assembly/types';
+import { showAssemblyInsertPartDialog, showAssemblyReplacePartDialog } from './AssemblyInsertPartDialog';
 
 // Node types whose right-click triggers re-edit
 const REEDITABLE_OP = new Set<NodeType>(['extrusion', 'revolve', 'loft', 'sweep', 'compound']);
@@ -66,6 +68,8 @@ export const TreeContextMenu: React.FC = () => {
   const isDatumPlane      = node.type === 'datum_plane';
   const isAssembly        = node.type === 'assembly';
   const isComponent       = node.type === 'component';
+  const isAssemblyComponent = node.type === 'assembly_component';
+  const assemblyComponent = node.params?.assemblyComponent;
   const isActiveComponent = isComponent && useCADStore.getState().activeComponentId === menu.nodeId;
 
   // Sketch wire IDs available for 3D operations (sketch container) or just this wire
@@ -83,7 +87,7 @@ export const TreeContextMenu: React.FC = () => {
   // ── Position clamped to viewport ──────────────────────────────────────────────
   const mW = 210;
   // + the universal Delete row (~32px).
-  const mH = 32 + (isSketchContainer ? 260 : (isAssembly || isComponent ? 170 : (isOp3D || isBlendResult || isBooleanResult ? 180 : 150)));
+  const mH = 32 + (isSketchContainer ? 260 : (isAssembly || isComponent || isAssemblyComponent ? 220 : (isOp3D || isBlendResult || isBooleanResult ? 180 : 150)));
   const x  = menu.x + mW > window.innerWidth  ? menu.x - mW : menu.x;
   const y  = menu.y + mH > window.innerHeight ? menu.y - mH : menu.y;
 
@@ -308,10 +312,33 @@ export const TreeContextMenu: React.FC = () => {
       {/* ── Assembly: nest components / sub-assemblies ───────────────────────── */}
       {isAssembly && (
         <div style={{ padding: '3px 0 1px' }}>
-          <Item icon="◰" label="New Component" accent="#6e7681"
-            onClick={() => { closeMenu(); const id = useCADStore.getState().createComponent(undefined, menu.nodeId); useCADStore.getState().setSelectedIds([id]); }} />
+          <Item icon="＋" label="Insert Part…" accent="#4f8fd8"
+            onClick={() => { closeMenu(); showAssemblyInsertPartDialog(menu.nodeId); }} />
+          <Item icon="◰" label="Create Part in Assembly" accent="#6e7681"
+            onClick={() => {
+              closeMenu();
+              const created = useCADStore.getState().createPartInAssembly(menu.nodeId);
+              if (created) useCADStore.getState().setSelectedIds([created.componentId]);
+            }} />
           <Item icon="▤" label="New Sub-Assembly" accent="#9aa0a6"
             onClick={() => { closeMenu(); const id = useCADStore.getState().createAssembly(undefined, menu.nodeId); useCADStore.getState().setSelectedIds([id]); }} />
+        </div>
+      )}
+
+      {isAssemblyComponent && isAssemblyComponentData(assemblyComponent) && (
+        <div style={{ padding: '3px 0 1px' }}>
+          <Item icon="◎" label="Activate" accent="#4f8fd8"
+            onClick={() => { closeMenu(); useCADStore.getState().activateAssemblyComponent(menu.nodeId); }} />
+          <Item icon="◉" label="Isolate" accent="#4f8fd8"
+            onClick={() => { closeMenu(); useCADStore.getState().isolateAssemblyComponent(menu.nodeId); }} />
+          <Item icon="⧉" label="Duplicate" accent="#4f8fd8"
+            onClick={() => { closeMenu(); useCADStore.getState().duplicateAssemblyComponent(menu.nodeId); }} />
+          <Item icon="↺" label="Replace…" accent="#4f8fd8"
+            onClick={() => { closeMenu(); showAssemblyReplacePartDialog(assemblyComponent.assemblyId, menu.nodeId); }} />
+          <Item icon="⊘" label={assemblyComponent.suppressed ? 'Unsuppress' : 'Suppress'} accent="#d28b26"
+            onClick={() => { closeMenu(); useCADStore.getState().setAssemblyComponentSuppressed(menu.nodeId, !assemblyComponent.suppressed); }} />
+          <Item icon="⌖" label={assemblyComponent.fixed ? 'Float' : 'Fix'} accent="#6e7681"
+            onClick={() => { closeMenu(); useCADStore.getState().setAssemblyComponentFixed(menu.nodeId, !assemblyComponent.fixed); }} />
         </div>
       )}
 
@@ -411,7 +438,7 @@ export const TreeContextMenu: React.FC = () => {
 // ─── Icon / colour maps ───────────────────────────────────────────────────────
 
 const NODE_ICON: Partial<Record<NodeType, string>> = {
-  assembly: '▤', component: '◰',
+  assembly: '▤', component: '◰', assembly_component: '◆',
   sketch: '✦', sketch_wire: '╱',
   extrusion: '↑', revolve: '↻', loft: '⊿', sweep: '⌇', compound: '◈',
   box: '◻', cylinder: '⬡', sphere: '●', boolean_operation: '⊕',
@@ -419,7 +446,7 @@ const NODE_ICON: Partial<Record<NodeType, string>> = {
 };
 
 const NODE_COLOR: Partial<Record<NodeType, string>> = {
-  assembly: '#9aa0a6', component: '#6e7681',
+  assembly: '#9aa0a6', component: '#6e7681', assembly_component: '#4f8fd8',
   sketch: '#ff9900', sketch_wire: '#ffcc00',
   extrusion: '#aa44cc', revolve: '#cc4488', loft: '#cc8844', sweep: '#44bbcc', compound: '#888888',
   box: '#5588cc', cylinder: '#44aa66', sphere: '#cc6644', boolean_operation: '#ccaa22',

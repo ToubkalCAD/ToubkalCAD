@@ -18,6 +18,8 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { useCADStore }         from '../store/cadStore';
 import { OccSelectionService } from '../services/OccSelectionService';
 import { ThreeMeshCache }      from '../services/ThreeMeshCache';
+import { AssemblyInstanceRenderer } from '../services/AssemblyInstanceRenderer';
+import { isAssemblyComponentData } from '../assembly/types';
 import { useCADGizmoHotkeys }  from '../hooks/useCADGizmoHotkeys';
 import { useCADSketchTool }    from '../hooks/useCADSketchTool';
 import { useCADEdgeSelect }    from '../hooks/useCADEdgeSelect';
@@ -31,6 +33,7 @@ import { useCADSketchCorner }   from '../hooks/useCADSketchCorner';
 import { useCADGuideDraw }      from '../hooks/useCADGuideDraw';
 import { useCADAssemblyMate }   from '../hooks/useCADAssemblyMate';
 import { useCADAssemblyConcentric } from '../hooks/useCADAssemblyConcentric';
+import { useCADAssemblyReferencePick } from '../hooks/useCADAssemblyReferencePick';
 import { useCADSketchTransformPick } from '../hooks/useCADSketchTransformPick';
 import { useCADExtrudeTargetPick } from '../hooks/useCADExtrudeTargetPick';
 import { useCADProfilePick } from '../hooks/useCADProfilePick';
@@ -206,6 +209,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   const orthoCamRef       = useRef<THREE.OrthographicCamera | null>(null);
   const orbitRef          = useRef<OrbitControls | null>(null);
   const transformRef      = useRef<TransformControls | null>(null);
+  const assemblyRendererRef = useRef(new AssemblyInstanceRenderer());
   const gridRef           = useRef<InfiniteGridHandle | null>(null);
   const sketchGridRef     = useRef<InfiniteGridHandle | null>(null);
   const datumGroupsRef    = useRef<Map<string, THREE.Group>>(new Map()); // datum_plane visuals by node id
@@ -221,6 +225,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   const selectedIds     = useCADStore((s) => s.selectedIds);
   const gizmoMode       = useCADStore((s) => s.gizmoMode);
+  const gizmoSpace      = useCADStore((s) => s.gizmoSpace);
   const interactionMode = useCADStore((s) => s.interactionMode);
   const activeWorkplane = useCADStore((s) => s.activeWorkplane);
   const sketchSession   = useCADStore((s) => s.sketchSession);
@@ -270,6 +275,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
   // ─── Assembly hooks (ASSEMBLY_MATE/ALIGN — faces; ASSEMBLY_CONCENTRIC — axes) ──
   useCADAssemblyMate(containerRef, sceneRef, cameraRef);
   useCADAssemblyConcentric(containerRef, sceneRef, cameraRef);
+  useCADAssemblyReferencePick(containerRef, sceneRef, cameraRef);
 
   // ─── 2D sketch transform reference picking (mirror line / array centre) ────────
   useCADSketchTransformPick(containerRef, sceneRef, cameraRef);
@@ -673,7 +679,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       if (!ids.length || !sceneRef.current || !cameraRef.current || !orbitRef.current) return;
       const box = new THREE.Box3();
       sceneRef.current.children.forEach((o) => {
-        if (o instanceof THREE.Mesh && ids.includes(o.userData.cadNodeId))
+        if (ids.includes(o.userData?.cadNodeId))
           box.expandByObject(o);
       });
       if (!box.isEmpty()) {
@@ -818,12 +824,13 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     tc.addEventListener('dragging-changed', (ev: any) => {
       orbit.enabled = !ev.value;
       if (!ev.value) {
-        const mesh = tc.object as THREE.Mesh;
+        const mesh = tc.object as THREE.Object3D;
         if (mesh?.userData.cadNodeId) {
           updateTransform(
             mesh.userData.cadNodeId,
             [mesh.position.x, mesh.position.y, mesh.position.z],
             [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+            [mesh.scale.x, mesh.scale.y, mesh.scale.z],
           );
         }
       }
@@ -831,7 +838,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
     // Continuous drag → live update (no undo entry) + notify PropertiesPanel
     tc.addEventListener('objectChange', () => {
-      const mesh = tc.object as THREE.Mesh;
+      const mesh = tc.object as THREE.Object3D;
       if (!mesh?.userData.cadNodeId) return;
       const id  = mesh.userData.cadNodeId as string;
       setTransformLive(
@@ -899,7 +906,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
         const ndcY = -((e.clientY - rect.top)  / rect.height) * 2 + 1;
         _zrc.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
         const pickable = scene.children.filter(
-          (c) => c instanceof THREE.Mesh && !c.userData.isWorkplaneHelper,
+          (c) => c.userData?.cadNodeId && !c.userData.isWorkplaneHelper,
         );
         const hits = _zrc.intersectObjects(pickable, true);
         if (hits.length) {
@@ -1067,6 +1074,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     const SCENE_EVENTS = [
       'cad-add-mesh', 'cad-update-mesh', 'cad-remove-mesh', 'cad-duplicate-mesh',
       'cad-material-changed', 'cad-visibility-changed', 'cad-apply-transform',
+      'cad-assembly-sync',
       'cad-sketch-add-visual', 'cad-sketch-replace-visual', 'cad-frame-selection',
       'cad-view-preset', 'cad-set-projection', 'cad-session-resumed', 'cad-theme-changed',
       'cad-request-render',
@@ -1139,15 +1147,48 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
   // ─── Scene events: add / remove / duplicate / material / visibility ──────────
   useEffect(() => {
+    const syncAssembly = () => {
+      const scene = sceneRef.current;
+      if (!scene) return;
+
+      // Assembly sync rebuilds component groups. Detach first so
+      // TransformControls never retains an object after it leaves the scene,
+      // then restore the gizmo to the freshly-created selected group.
+      const tc = transformRef.current;
+      tc?.detach();
+      const state = useCADStore.getState();
+      assemblyRendererRef.current.sync(scene, state.nodes);
+
+      const selectedId = state.selectedIds[0];
+      const selectedNode = selectedId ? state.nodes[selectedId] : undefined;
+      const componentData = selectedNode?.params?.assemblyComponent;
+      if (
+        tc
+        && state.interactionMode === 'SELECT'
+        && selectedNode?.type === 'assembly_component'
+        && selectedNode.visible
+        && isAssemblyComponentData(componentData)
+        && !componentData.fixed
+        && !componentData.suppressed
+      ) {
+        const group = assemblyRendererRef.current.getGroup(selectedId);
+        if (group?.parent) tc.attach(group);
+      }
+    };
     const onAdd = (e: Event) => {
       const { id } = (e as CustomEvent).detail;
       if (!sceneRef.current || !window.oc) return;
       const node = useCADStore.getState().nodes[id];
       // Sketch nodes (session containers and wires) have no OCC shape to tessellate.
-      if (node?.type === 'sketch_wire' || node?.type === 'sketch') return;
+      if (!node || node.type === 'sketch_wire' || node.type === 'sketch'
+          || node.type === 'assembly' || node.type === 'component' || node.type === 'assembly_component') {
+        syncAssembly();
+        return;
+      }
       try {
         const mesh = ThreeMeshCache.getInstance().getOrCreateMesh(id, window.oc, 0.1, node?.material);
         sceneRef.current.add(mesh);
+        syncAssembly();
       } catch (err: any) {
         const msg = err?.message ?? String(err);
         console.error('[Viewport] add mesh:', err);
@@ -1166,6 +1207,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       if (tc && (tc.object as THREE.Object3D | undefined)?.userData?.cadNodeId === id) tc.detach();
       // Remove tessellated mesh (3D shapes)
       ThreeMeshCache.getInstance().disposeMesh(id, scene);
+      assemblyRendererRef.current.remove(scene, id);
       // Remove any sketch wire lines (Three.Line objects) that are still in the scene
       // as a safety net — the hook's Zustand subscription handles these first,
       // but this path catches any that slip through.
@@ -1179,6 +1221,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
           else (line.material as THREE.Material).dispose();
         }
       });
+      syncAssembly();
     };
 
     const onDuplicate = (e: Event) => {
@@ -1204,12 +1247,27 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
 
     const onVisibility = (e: Event) => {
       const { id, visible } = (e as CustomEvent).detail;
-      const obj = sceneRef.current?.children.find((c) => c.userData?.cadNodeId === id);
-      if (obj) obj.visible = visible;
+      const node = useCADStore.getState().nodes[id];
+      if (node?.type === 'assembly_component') {
+        const data = node.params?.assemblyComponent;
+        assemblyRendererRef.current.updateVisibility(
+          id,
+          visible,
+          isAssemblyComponentData(data) ? data.suppressed : false,
+        );
+      } else {
+        const obj = sceneRef.current?.children.find((c) => c.userData?.cadNodeId === id);
+        if (obj) obj.visible = visible;
+      }
     };
 
     const onApplyTransform = (e: Event) => {
       const { id, position, rotation } = (e as CustomEvent).detail;
+      const node = useCADStore.getState().nodes[id];
+      if (node?.type === 'assembly_component') {
+        assemblyRendererRef.current.applyTransform(id, node);
+        return;
+      }
       const mesh = sceneRef.current?.children.find(
         (c) => c.userData?.cadNodeId === id,
       ) as THREE.Mesh | undefined;
@@ -1236,6 +1294,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
           tc.detach();
           tc.attach(newMesh);
         }
+        syncAssembly();
       } catch (err: any) {
         console.error('[Viewport] update mesh:', err);
         useCADStore.getState().log(`Viewport update error: ${err?.message}`, 'error');
@@ -1249,6 +1308,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       const scene = sceneRef.current;
       if (!scene) return;
       transformRef.current?.detach();
+      assemblyRendererRef.current.clear(scene);
       ThreeMeshCache.getInstance().clearAll(scene);
       const stray = scene.children.filter(
         (c) => c.userData?.cadNodeId || c.userData?.datumNodeId,
@@ -1265,6 +1325,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     window.addEventListener('cad-visibility-changed', onVisibility);
     window.addEventListener('cad-apply-transform',    onApplyTransform);
     window.addEventListener('cad-update-mesh',        onUpdate);
+    window.addEventListener('cad-assembly-sync',      syncAssembly);
     return () => {
       window.removeEventListener('cad-add-mesh',          onAdd);
       window.removeEventListener('cad-scene-reset',        onSceneReset);
@@ -1274,26 +1335,36 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       window.removeEventListener('cad-visibility-changed', onVisibility);
       window.removeEventListener('cad-apply-transform',    onApplyTransform);
       window.removeEventListener('cad-update-mesh',        onUpdate);
+      window.removeEventListener('cad-assembly-sync',      syncAssembly);
     };
   }, []);
 
   // ─── Gizmo mode sync ────────────────────────────────────────────────────────
   useEffect(() => { transformRef.current?.setMode(gizmoMode); }, [gizmoMode]);
+  useEffect(() => { transformRef.current?.setSpace(gizmoSpace); }, [gizmoSpace]);
 
   // ─── Attach gizmo to selected mesh ──────────────────────────────────────────
   useEffect(() => {
     if (!sceneRef.current || !transformRef.current) return;
     const tc = transformRef.current;
-    if (!selectedIds.length) {
+    const gizmoEnabled = interactionMode === 'SELECT';
+    tc.enabled = gizmoEnabled;
+    if (!gizmoEnabled || !selectedIds.length) {
       tc.detach();
     } else {
-      const mesh = sceneRef.current.children.find(
-        (c) => c.userData?.cadNodeId === selectedIds[0] && c instanceof THREE.Mesh,
-      ) as THREE.Mesh | undefined;
-      if (mesh) tc.attach(mesh);
+      const selectedNode = nodes[selectedIds[0]];
+      const componentData = selectedNode?.params?.assemblyComponent;
+      const object = selectedNode?.type === 'assembly_component'
+        ? assemblyRendererRef.current.getGroup(selectedIds[0])
+        : sceneRef.current.children.find(
+          (c) => c.userData?.cadNodeId === selectedIds[0] && c instanceof THREE.Mesh,
+        );
+      const componentCanTransform = !isAssemblyComponentData(componentData)
+        || (!componentData.fixed && !componentData.suppressed && selectedNode?.visible);
+      if (object?.parent && componentCanTransform) tc.attach(object);
       else tc.detach();
     }
-  }, [selectedIds]);
+  }, [selectedIds, nodes, interactionMode]);
 
   // ─── Mouse interactions (mode-driven) ───────────────────────────────────────
   useEffect(() => {

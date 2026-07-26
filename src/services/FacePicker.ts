@@ -18,6 +18,10 @@ import type { OccFaceGroup } from './OccConverter';
 export interface FaceHit {
   /** The cad node the picked solid belongs to (mesh.userData.cadNodeId). */
   nodeId:    string;
+  /** Source feature/body id for assembly-instance clones; equals nodeId otherwise. */
+  sourceNodeId: string;
+  assemblyComponentId?: string;
+  referencedPartId?: string;
   /** 0-based TopExp_Explorer face ordinal. */
   faceIndex: number;
   mesh:      THREE.Mesh;
@@ -28,10 +32,15 @@ export interface FaceHit {
 
 export class FacePicker {
   /** Real CAD solid meshes — excludes overlays, datum helpers, grids, gizmos. */
-  static pickableMeshes(scene: THREE.Scene): THREE.Mesh[] {
-    return scene.children.filter(
-      (c): c is THREE.Mesh => c instanceof THREE.Mesh && !!c.userData?.cadNodeId,
-    );
+  static pickableMeshes(scene: THREE.Scene, includeAssemblyInstances = false): THREE.Mesh[] {
+    const meshes: THREE.Mesh[] = [];
+    scene.traverse((object) => {
+      let visible = object.visible;
+      for (let parent = object.parent; visible && parent; parent = parent.parent) visible = parent.visible;
+      if (visible && object instanceof THREE.Mesh && object.userData?.cadNodeId
+          && (includeAssemblyInstances || !object.userData?.assemblyComponentId)) meshes.push(object);
+    });
+    return meshes;
   }
 
   /** Map a single intersection to the OCC face it hit (null if not a CAD mesh
@@ -49,12 +58,21 @@ export class FacePicker {
     const group = groups.find((g) => indexPos >= g.start && indexPos < g.start + g.count);
     if (!group) return null;
 
-    return { nodeId, faceIndex: group.face, mesh, group, point: hit.point.clone() };
+    return {
+      nodeId,
+      sourceNodeId: (mesh.userData?.sourceNodeId as string | undefined) ?? nodeId,
+      assemblyComponentId: mesh.userData?.assemblyComponentId as string | undefined,
+      referencedPartId: mesh.userData?.referencedPartId as string | undefined,
+      faceIndex: group.face,
+      mesh,
+      group,
+      point: hit.point.clone(),
+    };
   }
 
   /** Cast against all CAD meshes and return the nearest resolved face hit. */
-  static raycast(raycaster: THREE.Raycaster, scene: THREE.Scene): FaceHit | null {
-    const hits = raycaster.intersectObjects(this.pickableMeshes(scene), false);
+  static raycast(raycaster: THREE.Raycaster, scene: THREE.Scene, includeAssemblyInstances = false): FaceHit | null {
+    const hits = raycaster.intersectObjects(this.pickableMeshes(scene, includeAssemblyInstances), false);
     for (const h of hits) {
       const r = this.resolveHit(h);
       if (r) return r;

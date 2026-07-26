@@ -29,7 +29,6 @@ import { OccGuideCurveService }     from '../services/OccGuideCurveService';
 import { OccGuidedLoftService }     from '../services/OccGuidedLoftService';
 import { OccSketchService, fromLocal2D } from '../services/OccSketchService';
 import { findRegions, RegionEntity, toRegionEntity } from '../services/SketchRegions';
-import { setAlignOffset } from '../hooks/useCADAssemblyMate';
 import { resolveProfileWire, resolveAllProfileWires, profileShapeFor, canResolveProfile, sketchRegionCount } from '../utils/sketchProfile';
 import { createAndEditOp } from './Op3DPanel';
 import { createSketchEntityNode } from '../utils/sketchEntity';
@@ -43,6 +42,8 @@ import { showSurfaceBlendPanel }    from './SurfaceBlendPanel';
 import { showShellPanel }           from './ShellActionPanel';
 import { showBooleanPanel }         from './BooleanActionPanel';
 import { showConstraintPanel }      from './ConstraintPanel';
+import { showAssemblyInsertPartDialog } from './AssemblyInsertPartDialog';
+import { showPrompt } from './AppDialog';
 
 declare global { interface Window { oc: any; } }
 
@@ -98,7 +99,10 @@ const RIBBON_TABS: RibbonTab[] = [
     { kind:'menu', id:'m-xform',  label:'Transform',  icon:'mirror',     ids:['mirror','array-lin','array-circ'] },
     '|',
     { kind:'menu', id:'m-datum',  label:'Datum',      icon:'datumPlane', ids:['datum-origin','datum-offset','datum-3point','datum-midplane','datum-angle','datum-axis','datum-point','datum-tangent','datum-curvenormal','datum-2edge'] },
-    { kind:'menu', id:'m-asm',    label:'Assembly',   icon:'mate',       ids:['mate','align','concentric'] },
+    { kind:'menu', id:'m-asm',    label:'Assembly',   icon:'mate',       ids:[
+      'insert-part','create-part-in-assembly','mate','concentric',
+      'asm-parallel','asm-perpendicular','asm-distance','asm-angle',
+    ] },
   ] },
   { id: 'surface', label: 'Surface', items: [
     'surface-extrude', 'surface-revolve', 'surface-sweep', 'surface-loft', 'surface-patch',
@@ -436,6 +440,11 @@ export const Ribbon: React.FC = () => {
     const st = useCADStore.getState();
     const sel = st.selectedIds[0];
     const parent = sel && st.nodes[sel]?.type === 'assembly' ? sel : null;
+    if (parent) {
+      const created = st.createPartInAssembly(parent);
+      if (created) st.setSelectedIds([created.componentId]);
+      return;
+    }
     const id = st.createComponent(undefined, parent);
     st.setSelectedIds([id]);
   };
@@ -445,6 +454,35 @@ export const Ribbon: React.FC = () => {
     const parent = sel && st.nodes[sel]?.type === 'assembly' ? sel : null;
     const id = st.createAssembly(undefined, parent);
     st.setSelectedIds([id]);
+  };
+  const selectedAssemblyId = (): string | null => {
+    const st = useCADStore.getState();
+    const node = st.nodes[st.selectedIds[0]];
+    if (node?.type === 'assembly') return node.id;
+    if (node?.type === 'assembly_component' && node.parentId && st.nodes[node.parentId]?.type === 'assembly') return node.parentId;
+    return Object.values(st.nodes).find((entry) => entry.type === 'assembly')?.id ?? null;
+  };
+  const insertPart = () => {
+    const assemblyId = selectedAssemblyId();
+    if (!assemblyId) { useCADStore.getState().log('Create or select an assembly first.', 'warn'); return; }
+    showAssemblyInsertPartDialog(assemblyId);
+  };
+  const createPartInAssembly = async () => {
+    const assemblyId = selectedAssemblyId();
+    if (!assemblyId) { useCADStore.getState().log('Create or select an assembly first.', 'warn'); return; }
+    const count = Object.values(useCADStore.getState().nodes).filter((node) => node.type === 'component').length + 1;
+    const name = await showPrompt({ title: 'Create Part in Assembly', label: 'Part name', defaultValue: `Part ${count}` });
+    if (name) useCADStore.getState().createPartInAssembly(assemblyId, name);
+  };
+  const beginAssemblyConstraint = (
+    type: 'coincident' | 'concentric' | 'parallel' | 'perpendicular' | 'distance' | 'angle',
+  ) => {
+    const assemblyId = selectedAssemblyId();
+    if (!assemblyId) {
+      useCADStore.getState().log('Create or select an assembly first.', 'warn');
+      return;
+    }
+    useCADStore.getState().startAssemblyConstraint(assemblyId, type);
   };
 
   // ─── Primitives ─────────────────────────────────────────────────────────────
@@ -653,17 +691,6 @@ export const Ribbon: React.FC = () => {
   };
 
   // ─── Assembly: Align (parallel faces with offset) — ask offset, then pick ─────
-  const alignParallel = () => {
-    withOC(async () => {
-      const v = await showParamModal('Align (Parallel)', [
-        { key: 'offset', label: 'Offset', default: 0, unit: 'mm' },
-      ]);
-      if (!v) return;
-      setAlignOffset(v.offset);
-      setMode('ASSEMBLY_ALIGN');
-    });
-  };
-
   // Resolve the profile wire id for the selected sketch / sketch-wire (or null).
   // A sketch container of several open edges → its enclosed region is built.
   const profileWireFor = (): string | null => {
@@ -1534,6 +1561,10 @@ export const Ribbon: React.FC = () => {
                  tooltip:'New component (a Part) — features you create land inside it' },
     assembly:  { id:'assembly',  icon:'assembly',  label:'Assembly',  run:mkAssembly,  accent:'#9aa0a6',
                  tooltip:'New assembly — a container for components / sub-assemblies' },
+    'insert-part': { id:'insert-part', icon:'component', label:'Insert Part', run:insertPart, accent:'#4f8fd8',
+                     tooltip:'Insert an existing reusable part into the selected assembly' },
+    'create-part-in-assembly': { id:'create-part-in-assembly', icon:'component', label:'Create Part in Assembly', run:createPartInAssembly, accent:'#4f8fd8',
+                                 tooltip:'Create a new part definition and place its first instance' },
     box:       { id:'box',       icon:'box',       label:'Box',      run:mkBox },
     cylinder:  { id:'cylinder',  icon:'cylinder',  label:'Cylinder', run:mkCyl },
     sphere:    { id:'sphere',    icon:'sphere',    label:'Sphere',   run:mkSph },
@@ -1561,9 +1592,12 @@ export const Ribbon: React.FC = () => {
     mirror:        { id:'mirror',        icon:'mirror',    label:'Mirror',     run:mirror,        enabled:hasSolid||hasSketch, accent:'#4488cc' },
     'array-lin':   { id:'array-lin',     icon:'array',     label:'Lin Array',  run:linearArray,   enabled:hasSolid||hasSketch, accent:'#8844cc' },
     'array-circ':  { id:'array-circ',    icon:'circarray', label:'Circ Array', run:circularArray, enabled:hasSolid||hasSketch, accent:'#8844cc' },
-    mate:          { id:'mate', icon:'mate', label:'Mate', run:() => setMode('ASSEMBLY_MATE'), active: mode==='ASSEMBLY_MATE', enabled:hasAnySolid, accent:'#cc8844' },
-    align:         { id:'align', icon:'align', label:'Align', run:alignParallel, active: mode==='ASSEMBLY_ALIGN', enabled:hasAnySolid, accent:'#cc8844' },
-    concentric:    { id:'concentric', icon:'concentric', label:'Concentric', run:() => setMode('ASSEMBLY_CONCENTRIC'), active: mode==='ASSEMBLY_CONCENTRIC', enabled:hasAnySolid, accent:'#cc8844' },
+    mate:          { id:'mate', icon:'mate', label:'Coincident', run:() => beginAssemblyConstraint('coincident'), enabled:hasAnySolid, accent:'#cc8844' },
+    concentric:    { id:'concentric', icon:'concentric', label:'Concentric', run:() => beginAssemblyConstraint('concentric'), enabled:hasAnySolid, accent:'#cc8844' },
+    'asm-parallel': { id:'asm-parallel', icon:'align', label:'Parallel', run:() => beginAssemblyConstraint('parallel'), enabled:hasAnySolid, accent:'#cc8844' },
+    'asm-perpendicular': { id:'asm-perpendicular', icon:'align', label:'Perpendicular', run:() => beginAssemblyConstraint('perpendicular'), enabled:hasAnySolid, accent:'#cc8844' },
+    'asm-distance': { id:'asm-distance', icon:'measure', label:'Distance', run:() => beginAssemblyConstraint('distance'), enabled:hasAnySolid, accent:'#cc8844' },
+    'asm-angle': { id:'asm-angle', icon:'align', label:'Angle', run:() => beginAssemblyConstraint('angle'), enabled:hasAnySolid, accent:'#cc8844' },
     // modify
     fillet:    { id:'fillet',    icon:'fillet',    label:'Fillet',   run:() => openBlend('fillet'),  enabled:hasSel },
     chamfer:   { id:'chamfer',   icon:'chamfer',   label:'Chamfer',  run:() => openBlend('chamfer'), enabled:hasSel },

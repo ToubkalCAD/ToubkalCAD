@@ -8,6 +8,21 @@ import { create } from 'zustand';
 import { computeDatumUpdates } from '../utils/recomputeDatums';
 import { NodeDelta, diffNodes, applyDeltas } from './historyDelta';
 import { ProjectFileService } from '../services/ProjectFileService';
+import {
+  AssemblyComponentData,
+  AssemblyConstraint,
+  AssemblyConstraintDraft,
+  AssemblyConstraintType,
+  AssemblyDocumentData,
+  AssemblyReference,
+  ComponentTransform,
+  DEFAULT_ASSEMBLY_DATA,
+  isAssemblyComponentData,
+  isAssemblyDocumentData,
+} from '../assembly/types';
+import { normalizeComponentTransform } from '../assembly/transforms';
+import { AssemblyReferenceService } from '../assembly/AssemblyReferenceService';
+import { assemblyConstraintSolver, type AssemblySolverResult } from '../assembly/AssemblyConstraintSolver';
 
 // D13 — capture the body a datum is derived from (first ref pointing to a solid),
 // so a later move of that body can rigidly recompute the datum. Datum-sourced
@@ -27,6 +42,7 @@ export type NodeType =
   // ── Structural tree (assembly side) — carry NO geometry, only containment ──
   | 'assembly'    // organic container: holds components or sub-assemblies
   | 'component'   // a Part: one solid body + the boundary of a local feature tree
+  | 'assembly_component' // placed instance that references a component definition
   // ── Feature tree (per-component timeline) ──
   | 'box' | 'cylinder' | 'sphere'
   | 'extrusion' | 'boolean_operation' | 'compound'
@@ -52,7 +68,7 @@ export type NodeType =
 // sketch can feed many features (Extrusion 1 + Extrusion 2 → same Sketch).
 
 /** Containers in the structural tree. */
-export const STRUCTURAL_TYPES = new Set<NodeType>(['assembly', 'component']);
+export const STRUCTURAL_TYPES = new Set<NodeType>(['assembly', 'component', 'assembly_component']);
 /** Reference geometry — allowed inside a component alongside features. */
 export const DATUM_TYPES = new Set<NodeType>(['datum_plane', 'datum_axis', 'datum_point']);
 /** Feature-timeline nodes: geometry features that live directly under a component.
@@ -79,8 +95,9 @@ export const isFeature    = (t: NodeType): boolean => FEATURE_TYPES.has(t);
  * sketch holds its wires. Everything else is a leaf.
  */
 export function canContain(parentType: NodeType | null, childType: NodeType): boolean {
-  if (parentType === null)        return isStructural(childType);              // root: structural only
-  if (parentType === 'assembly')  return childType === 'assembly' || childType === 'component';
+  if (parentType === null)        return childType === 'assembly' || childType === 'component';
+  if (parentType === 'assembly')  return childType === 'assembly' || childType === 'component' || childType === 'assembly_component';
+  if (parentType === 'assembly_component') return childType === 'assembly_component';
   if (parentType === 'component') return isFeature(childType) || isDatum(childType);
   if (parentType === 'sketch')    return childType === 'sketch_wire';
   return false;                                                               // features/datums are leaves
@@ -161,6 +178,7 @@ export type InteractionMode =
   | 'ASSEMBLY_MATE'   // pick a reference face then a face on another solid → mate them (one-shot)
   | 'ASSEMBLY_ALIGN'  // like mate but faces parallel (same direction) with an offset
   | 'ASSEMBLY_CONCENTRIC' // pick two cylindrical faces → align their axes (peg-in-hole)
+  | 'ASSEMBLY_REFERENCE_PICK' // Phase B: capture a persistent component-aware reference
   | 'MIRROR_AXIS_PICK'    // pick 2 points on the sketch plane → mirror line for a 2D sketch mirror
   | 'ARRAY_CENTER_PICK'   // pick 1 point on the sketch plane → centre for a 2D circular array
   | 'EXTRUDE_TARGET_PICK' // pick an existing solid as the Pad/Pocket boolean target (one-shot)
@@ -319,6 +337,7 @@ export interface CADNode {
     position: [number, number, number];
     rotation: [number, number, number];
     scale:    [number, number, number];
+    matrix?:  number[];
   };
   material: CADMaterial;
   /** Solid vs zero-thickness surface body. Absent ⇒ 'solid' (back-compat). Drives
@@ -355,7 +374,7 @@ export interface LogEntry {
 }
 
 interface CADAction {
-  type:        'ADD' | 'DELETE' | 'TRANSFORM' | 'RENAME' | 'MATERIAL' | 'STRUCTURE';
+  type:        'ADD' | 'DELETE' | 'TRANSFORM' | 'RENAME' | 'MATERIAL' | 'STRUCTURE' | 'ASSEMBLY';
   description: string;
   deltas:      NodeDelta[];   // only the nodes this action changed (not a full snapshot)
   // Exact root-order snapshots. rootIds order isn't a per-node field, so it can't
@@ -379,6 +398,12 @@ interface CADState {
 
   interactionMode: InteractionMode;
   gizmoMode:       GizmoMode;
+  gizmoSpace:      'local' | 'world';
+  transformClipboard: ComponentTransform | null;
+  assemblyReferencePickType: AssemblyReference['subshapeType'] | null;
+  pickedAssemblyReference: AssemblyReference | null;
+  assemblyConstraintDraft: AssemblyConstraintDraft | null;
+  selectedAssemblyConstraint: { assemblyId: string; constraintId: string } | null;
 
   // ─── Advanced Loft: guide-curve authoring ───────────────────────────────
   /** Profile wire node ids the guide(s) bridge (exactly 2 when ready). */
@@ -437,6 +462,41 @@ interface CADState {
   createComponent:    (name?: string, parentId?: string | null) => string;
   /** Create an empty assembly container (root, or nested under another assembly). */
   createAssembly:     (name?: string, parentId?: string | null) => string;
+  /** Place a reusable part definition in an assembly. */
+  insertPartInstance: (assemblyId: string, partId: string, name?: string) => string | null;
+  /** Create a part definition and immediately place its first instance. */
+  createPartInAssembly: (assemblyId: string, name?: string) => { partId: string; componentId: string } | null;
+  duplicateAssemblyComponent: (id: string) => string | null;
+  replaceAssemblyComponent: (id: string, partId: string) => void;
+  setAssemblyComponentSuppressed: (id: string, suppressed: boolean) => void;
+  setAssemblyComponentFixed: (id: string, fixed: boolean) => void;
+  setAssemblyAutoFixFirst: (assemblyId: string, enabled: boolean) => void;
+  activateAssemblyComponent: (id: string) => void;
+  isolateAssemblyComponent: (id: string) => void;
+  copyComponentTransform: (id: string) => void;
+  pasteComponentTransform: (id: string) => void;
+  resetComponentTransform: (id: string) => void;
+  startAssemblyReferencePick: (type: AssemblyReference['subshapeType']) => void;
+  setPickedAssemblyReference: (reference: AssemblyReference) => void;
+  clearPickedAssemblyReference: () => void;
+  cancelAssemblyReferencePick: () => void;
+  startAssemblyConstraint: (assemblyId: string, type: AssemblyConstraintType) => void;
+  startAssemblyConstraintReferencePick: (
+    side: 'A' | 'B', type: AssemblyReference['subshapeType'],
+  ) => void;
+  updateAssemblyConstraintDraft: (
+    partial: Partial<Pick<AssemblyConstraintDraft, 'offset' | 'angle' | 'flipped'>>,
+  ) => void;
+  previewAssemblyConstraint: () => AssemblySolverResult | null;
+  confirmAssemblyConstraint: () => string | null;
+  cancelAssemblyConstraint: () => void;
+  selectAssemblyConstraint: (assemblyId: string, constraintId: string) => void;
+  editAssemblyConstraint: (
+    assemblyId: string, constraintId: string,
+    partial: Partial<Pick<AssemblyConstraint, 'offset' | 'angle' | 'flipped' | 'enabled'>>,
+  ) => void;
+  deleteAssemblyConstraint: (assemblyId: string, constraintId: string) => void;
+  solveAssemblyConstraints: (assemblyId: string) => AssemblySolverResult | null;
   /** Apply a loaded scene and migrate it to the dual-tree shape (wrap stray
    *  features into a component, un-nest adopted sketches). Used by project load. */
   loadScene:          (nodes: Record<string, CADNode>, rootIds: string[]) => void;
@@ -485,6 +545,7 @@ interface CADState {
   setSelectedIds:        (ids: string[]) => void;
   setInteractionMode:    (mode: InteractionMode) => void;
   setGizmoMode:          (mode: GizmoMode) => void;
+  setGizmoSpace:         (space: 'local' | 'world') => void;
   setSketchPolygonSides: (n: number) => void;
 
   // ─── Advanced Loft guide-curve actions ──────────────────────────────────
@@ -737,6 +798,7 @@ export function normalizeMaterial(material: Partial<CADMaterial>): CADMaterial {
 export const NODE_TYPE_COLORS: Record<NodeType, number> = {
   assembly:          0x9aa0a6,   // neutral grey — structural containers
   component:         0x6e7681,
+  assembly_component: 0x4f8fd8,
   box:               0x5588cc,
   cylinder:          0x44aa66,
   sphere:            0xcc6644,
@@ -767,6 +829,77 @@ export const NODE_TYPE_COLORS: Record<NodeType, number> = {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function makeId() { return crypto.randomUUID(); }
+
+function dispatchCAD(name: string, detail?: unknown): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
+function solveAssemblyNodeMap(
+  input: Record<string, CADNode>, assemblyId: string,
+): { nodes: Record<string, CADNode>; result: AssemblySolverResult } | null {
+  let prepared = input;
+  const initialAssembly = prepared[assemblyId];
+  const initialData = initialAssembly?.params?.assembly;
+  const oc = typeof window !== 'undefined' ? (window as any).oc : undefined;
+  if (initialAssembly && isAssemblyDocumentData(initialData) && oc) {
+    const refresh = (reference: AssemblyReference): AssemblyReference => {
+      if (!reference.sourceNodeId || !reference.stableRef) return { ...reference, resolutionError: undefined };
+      const resolved = AssemblyReferenceService.resolve(oc, prepared, reference);
+      return resolved.valid
+        ? { ...resolved.reference, resolutionError: undefined }
+        : { ...reference, resolutionError: resolved.reason ?? 'Persistent topology reference could not be resolved.' };
+    };
+    const constraints = Object.fromEntries(Object.entries(initialData.constraints).map(([id, constraint]) => [
+      id,
+      {
+        ...constraint,
+        referenceA: refresh(constraint.referenceA),
+        referenceB: constraint.referenceB ? refresh(constraint.referenceB) : undefined,
+      },
+    ]));
+    prepared = {
+      ...prepared,
+      [assemblyId]: {
+        ...initialAssembly,
+        params: { ...initialAssembly.params, assembly: { ...initialData, constraints } },
+      },
+    };
+  }
+  const assembly = prepared[assemblyId];
+  const data = assembly?.params?.assembly;
+  if (!assembly || !isAssemblyDocumentData(data)) return null;
+  const result = assemblyConstraintSolver.solve(prepared, assemblyId);
+  const nodes: Record<string, CADNode> = { ...prepared };
+  for (const [componentId, transform] of Object.entries(result.componentTransforms)) {
+    const component = nodes[componentId];
+    if (component) nodes[componentId] = { ...component, transform: normalizeComponentTransform(transform) };
+  }
+  const constraints = Object.fromEntries(Object.entries(data.constraints).map(([id, constraint]) => [
+    id,
+    {
+      ...constraint,
+      status: result.constraintStatuses[id] ?? constraint.status,
+      message: result.constraintMessages[id],
+    },
+  ]));
+  nodes[assemblyId] = {
+    ...assembly,
+    params: { ...assembly.params, assembly: { ...data, constraints } },
+  };
+  return { nodes, result };
+}
+
+function restoreConstraintDraftTransforms(
+  nodes: Record<string, CADNode>, draft: AssemblyConstraintDraft,
+): Record<string, CADNode> {
+  const restored: Record<string, CADNode> = { ...nodes };
+  for (const [componentId, transform] of Object.entries(draft.originalTransforms)) {
+    const component = restored[componentId];
+    if (component) restored[componentId] = { ...component, transform: normalizeComponentTransform(transform) };
+  }
+  return restored;
+}
 
 function makeLog(msg: string, level: LogEntry['level'] = 'info'): LogEntry {
   return { id: makeId(), timestamp: Date.now(), level, message: msg };
@@ -813,6 +946,7 @@ function reconcileRoots(stored: string[], nodes: Record<string, CADNode>): strin
  *  the Viewport handler. Must run AFTER the cad-add-mesh events so re-added
  *  meshes already exist in the scene. */
 function syncTransforms(nodes: Record<string, CADNode>): void {
+  if (typeof window === 'undefined') return;
   for (const id in nodes) {
     const t = nodes[id].transform;
     window.dispatchEvent(new CustomEvent('cad-apply-transform', {
@@ -827,6 +961,7 @@ function syncTransforms(nodes: Record<string, CADNode>): void {
  *  which the recompute bridge handles SYNCHRONOUSLY (rebuilding any missing shape
  *  from its recipe into the registry) so the subsequent cad-add-mesh finds it. */
 function syncScene(added: string[], removed: string[], restoredNodes: Record<string, CADNode>): void {
+  if (typeof window === 'undefined') return;
   removed.forEach((id) => window.dispatchEvent(new CustomEvent('cad-remove-mesh', { detail: { id } })));
   if (added.length) window.dispatchEvent(new CustomEvent('cad-regenerate'));
   added.forEach((id) => window.dispatchEvent(new CustomEvent('cad-add-mesh', { detail: { id } })));
@@ -859,7 +994,9 @@ function makeContainer(type: 'assembly' | 'component', name: string, parentId: s
     id: makeId(), name, type, visible: true, locked: false, parentId, children: [], notes: '',
     transform: IDENTITY_TRANSFORM(),
     material: normalizeMaterial({ color: NODE_TYPE_COLORS[type] }),
-    params: {},
+    params: type === 'assembly'
+      ? { assembly: DEFAULT_ASSEMBLY_DATA() }
+      : { partDefinition: { schemaVersion: 1 } },
   };
 }
 
@@ -910,6 +1047,47 @@ function detachFromParent(nodes: Record<string, CADNode>, rootIds: string[], nod
   return rootIds.filter((r) => r !== nodeId);
 }
 
+function syncAssemblyMembership(
+  nodes: Record<string, CADNode>, nodeId: string, oldParentId: string | null, newParentId: string | null,
+): void {
+  const node = nodes[nodeId];
+  const data = node?.params?.assemblyComponent;
+  if (!node || !isAssemblyComponentData(data) || oldParentId === newParentId) return;
+  const oldAssemblyId = data.assemblyId;
+  const parentNode = newParentId ? nodes[newParentId] : undefined;
+  const parentData = parentNode?.params?.assemblyComponent;
+  const newAssemblyId = parentNode?.type === 'assembly'
+    ? parentNode.id
+    : isAssemblyComponentData(parentData) ? parentData.assemblyId : '';
+  if (!newAssemblyId || nodes[newAssemblyId]?.type !== 'assembly') return;
+
+  const removeFrom = nodes[oldAssemblyId];
+  const removeData = removeFrom?.params?.assembly;
+  if (removeFrom && isAssemblyDocumentData(removeData)) {
+    nodes[oldAssemblyId] = {
+      ...removeFrom,
+      params: { ...removeFrom.params, assembly: { ...removeData, componentIds: removeData.componentIds.filter((id) => id !== nodeId) } },
+    };
+  }
+  const addTo = nodes[newAssemblyId];
+  const addData = isAssemblyDocumentData(addTo.params?.assembly) ? addTo.params!.assembly as AssemblyDocumentData : DEFAULT_ASSEMBLY_DATA();
+  nodes[newAssemblyId] = {
+    ...addTo,
+    params: { ...addTo.params, assembly: { ...addData, componentIds: [...addData.componentIds.filter((id) => id !== nodeId), nodeId] } },
+  };
+  nodes[nodeId] = {
+    ...node,
+    params: {
+      ...node.params,
+      assemblyComponent: {
+        ...data,
+        assemblyId: newAssemblyId,
+        parentComponentId: parentNode?.type === 'assembly_component' ? parentNode.id : undefined,
+      },
+    },
+  };
+}
+
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 export const useCADStore = create<CADState>((set, get) => ({
@@ -920,6 +1098,12 @@ export const useCADStore = create<CADState>((set, get) => ({
   future:          [],
   interactionMode: 'SELECT',
   gizmoMode:       'translate',
+  gizmoSpace:      'local',
+  transformClipboard: null,
+  assemblyReferencePickType: null,
+  pickedAssemblyReference: null,
+  assemblyConstraintDraft: null,
+  selectedAssemblyConstraint: null,
   guideProfiles:   [],
   guideDraft:      null,
   guideSnap:       null,
@@ -979,6 +1163,352 @@ export const useCADStore = create<CADState>((set, get) => ({
   setSelectedIds:        (ids)  => set({ selectedIds: ids }),
   setInteractionMode:    (mode) => set({ interactionMode: mode }),
   setGizmoMode:          (mode) => set({ gizmoMode: mode }),
+  setGizmoSpace:         (space) => set({ gizmoSpace: space }),
+  startAssemblyReferencePick: (type) => set({
+    assemblyReferencePickType: type,
+    pickedAssemblyReference: null,
+    interactionMode: 'ASSEMBLY_REFERENCE_PICK',
+  }),
+  setPickedAssemblyReference: (reference) => {
+    const draft = get().assemblyConstraintDraft;
+    if (draft?.pickSide) {
+      const restored = draft.previewed ? restoreConstraintDraftTransforms(get().nodes, draft) : get().nodes;
+      const nextDraft: AssemblyConstraintDraft = {
+        ...draft,
+        [draft.pickSide === 'A' ? 'referenceA' : 'referenceB']: reference,
+        pickSide: undefined,
+        previewed: false,
+        validationMessage: undefined,
+      };
+      if (nextDraft.referenceA && nextDraft.referenceB) {
+        const compatibility = AssemblyReferenceService.compatible(
+          nextDraft.type, nextDraft.referenceA, nextDraft.referenceB,
+        );
+        nextDraft.validationMessage = compatibility.valid ? undefined : compatibility.reason;
+      }
+      set({
+        nodes: restored,
+        assemblyConstraintDraft: nextDraft,
+        pickedAssemblyReference: reference,
+        assemblyReferencePickType: null,
+        interactionMode: 'SELECT',
+        selectedIds: [reference.componentId],
+      });
+      dispatchCAD('cad-assembly-sync');
+      return;
+    }
+    set({
+      pickedAssemblyReference: reference,
+      assemblyReferencePickType: null,
+      interactionMode: 'SELECT',
+      selectedIds: [reference.componentId],
+    });
+  },
+  clearPickedAssemblyReference: () => set({ pickedAssemblyReference: null }),
+  cancelAssemblyReferencePick: () => set((state) => ({
+    assemblyReferencePickType: null,
+    interactionMode: 'SELECT',
+    assemblyConstraintDraft: state.assemblyConstraintDraft
+      ? { ...state.assemblyConstraintDraft, pickSide: undefined }
+      : null,
+  })),
+
+  startAssemblyConstraint: (assemblyId, type) => {
+    const assembly = get().nodes[assemblyId];
+    const data = assembly?.params?.assembly;
+    if (!assembly || !isAssemblyDocumentData(data)) return;
+    const previous = get().assemblyConstraintDraft;
+    const nodes = previous?.previewed
+      ? restoreConstraintDraftTransforms(get().nodes, previous)
+      : get().nodes;
+    const originalTransforms = Object.fromEntries(data.componentIds.flatMap((componentId) => {
+      const component = nodes[componentId];
+      return component ? [[componentId, normalizeComponentTransform(component.transform)]] : [];
+    }));
+    set({
+      nodes,
+      assemblyConstraintDraft: {
+        assemblyId,
+        type,
+        offset: 0,
+        angle: Math.PI / 2,
+        flipped: false,
+        previewed: false,
+        originalTransforms,
+      },
+      selectedAssemblyConstraint: null,
+      assemblyReferencePickType: null,
+      interactionMode: 'SELECT',
+    });
+    dispatchCAD('cad-properties-tab', { tab: 'constraints' });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  startAssemblyConstraintReferencePick: (side, type) => {
+    const draft = get().assemblyConstraintDraft;
+    if (!draft) return;
+    const nodes = draft.previewed ? restoreConstraintDraftTransforms(get().nodes, draft) : get().nodes;
+    set({
+      nodes,
+      assemblyConstraintDraft: { ...draft, pickSide: side, previewed: false, validationMessage: undefined },
+      assemblyReferencePickType: type,
+      pickedAssemblyReference: null,
+      interactionMode: 'ASSEMBLY_REFERENCE_PICK',
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  updateAssemblyConstraintDraft: (partial) => {
+    const draft = get().assemblyConstraintDraft;
+    if (!draft) return;
+    const nodes = draft.previewed ? restoreConstraintDraftTransforms(get().nodes, draft) : get().nodes;
+    set({
+      nodes,
+      assemblyConstraintDraft: { ...draft, ...partial, previewed: false, validationMessage: undefined },
+    });
+    if (draft.previewed) dispatchCAD('cad-assembly-sync');
+  },
+
+  previewAssemblyConstraint: () => {
+    const draft = get().assemblyConstraintDraft;
+    if (!draft?.referenceA || !draft.referenceB) return null;
+    const compatibility = AssemblyReferenceService.compatible(draft.type, draft.referenceA, draft.referenceB);
+    if (!compatibility.valid) {
+      set({ assemblyConstraintDraft: { ...draft, validationMessage: compatibility.reason } });
+      return null;
+    }
+    const base = restoreConstraintDraftTransforms(get().nodes, draft);
+    const assembly = base[draft.assemblyId];
+    const data = assembly?.params?.assembly;
+    if (!assembly || !isAssemblyDocumentData(data)) return null;
+    const previewId = '__assembly_constraint_preview__';
+    const constraint: AssemblyConstraint = {
+      id: previewId,
+      assemblyId: draft.assemblyId,
+      type: draft.type,
+      referenceA: draft.referenceA,
+      referenceB: draft.referenceB,
+      offset: draft.offset,
+      angle: draft.angle,
+      flipped: draft.flipped,
+      enabled: true,
+      status: 'unsolved',
+    };
+    const input = {
+      ...base,
+      [assembly.id]: {
+        ...assembly,
+        params: {
+          ...assembly.params,
+          assembly: {
+            ...data,
+            constraintIds: [...data.constraintIds, previewId],
+            constraints: { ...data.constraints, [previewId]: constraint },
+          },
+        },
+      },
+    };
+    const solved = solveAssemblyNodeMap(input, draft.assemblyId);
+    if (!solved) return null;
+    const previewAssembly = solved.nodes[draft.assemblyId];
+    const previewData = previewAssembly.params?.assembly as AssemblyDocumentData;
+    const nodes = {
+      ...solved.nodes,
+      [draft.assemblyId]: {
+        ...previewAssembly,
+        params: {
+          ...previewAssembly.params,
+          assembly: {
+            ...previewData,
+            constraintIds: data.constraintIds,
+            constraints: data.constraints,
+          },
+        },
+      },
+    };
+    set({
+      nodes,
+      assemblyConstraintDraft: {
+        ...draft,
+        previewed: true,
+        validationMessage: solved.result.success ? undefined : solved.result.errors.join(' '),
+      },
+    });
+    dispatchCAD('cad-assembly-sync');
+    return solved.result;
+  },
+
+  confirmAssemblyConstraint: () => {
+    const draft = get().assemblyConstraintDraft;
+    if (!draft?.referenceA || !draft.referenceB) return null;
+    const compatibility = AssemblyReferenceService.compatible(draft.type, draft.referenceA, draft.referenceB);
+    if (!compatibility.valid) {
+      set({ assemblyConstraintDraft: { ...draft, validationMessage: compatibility.reason } });
+      return null;
+    }
+    const base = restoreConstraintDraftTransforms(get().nodes, draft);
+    const assembly = base[draft.assemblyId];
+    const data = assembly?.params?.assembly;
+    if (!assembly || !isAssemblyDocumentData(data)) return null;
+    const id = makeId();
+    const constraint: AssemblyConstraint = {
+      id,
+      assemblyId: draft.assemblyId,
+      type: draft.type,
+      referenceA: draft.referenceA,
+      referenceB: draft.referenceB,
+      offset: draft.offset,
+      angle: draft.angle,
+      flipped: draft.flipped,
+      enabled: true,
+      status: 'unsolved',
+    };
+    const input: Record<string, CADNode> = {
+      ...base,
+      [assembly.id]: {
+        ...assembly,
+        params: {
+          ...assembly.params,
+          assembly: {
+            ...data,
+            constraintIds: [...data.constraintIds, id],
+            constraints: { ...data.constraints, [id]: constraint },
+          },
+        },
+      },
+    };
+    const solved = solveAssemblyNodeMap(input, draft.assemblyId);
+    if (!solved) return null;
+    set({
+      nodes: solved.nodes,
+      assemblyConstraintDraft: null,
+      selectedAssemblyConstraint: { assemblyId: draft.assemblyId, constraintId: id },
+      assemblyReferencePickType: null,
+      interactionMode: 'SELECT',
+      past: pushPast(get().past, makeAction(
+        'ASSEMBLY', `Add ${draft.type} constraint`,
+        Object.values(base), Object.values(solved.nodes), get().rootIds, get().rootIds,
+      )),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+    get().log(
+      solved.result.success
+        ? `Added and solved ${draft.type} constraint.`
+        : `Added ${draft.type} constraint with warnings: ${solved.result.errors.join(' ')}`,
+      solved.result.success ? 'success' : 'warn',
+    );
+    return id;
+  },
+
+  cancelAssemblyConstraint: () => {
+    const draft = get().assemblyConstraintDraft;
+    const nodes = draft ? restoreConstraintDraftTransforms(get().nodes, draft) : get().nodes;
+    set({
+      nodes,
+      assemblyConstraintDraft: null,
+      assemblyReferencePickType: null,
+      interactionMode: 'SELECT',
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  selectAssemblyConstraint: (assemblyId, constraintId) => {
+    const data = get().nodes[assemblyId]?.params?.assembly;
+    if (!isAssemblyDocumentData(data) || !data.constraints[constraintId]) return;
+    set({ selectedAssemblyConstraint: { assemblyId, constraintId }, selectedIds: [assemblyId] });
+    dispatchCAD('cad-properties-tab', { tab: 'constraints' });
+  },
+
+  editAssemblyConstraint: (assemblyId, constraintId, partial) => {
+    const { nodes, rootIds } = get();
+    const assembly = nodes[assemblyId];
+    const data = assembly?.params?.assembly;
+    const existing = isAssemblyDocumentData(data) ? data.constraints[constraintId] : undefined;
+    if (!assembly || !isAssemblyDocumentData(data) || !existing) return;
+    const input: Record<string, CADNode> = {
+      ...nodes,
+      [assemblyId]: {
+        ...assembly,
+        params: {
+          ...assembly.params,
+          assembly: {
+            ...data,
+            constraints: { ...data.constraints, [constraintId]: { ...existing, ...partial, status: 'unsolved' } },
+          },
+        },
+      },
+    };
+    const solved = solveAssemblyNodeMap(input, assemblyId);
+    if (!solved) return;
+    set({
+      nodes: solved.nodes,
+      past: pushPast(get().past, makeAction(
+        'ASSEMBLY', `Edit ${existing.type} constraint`,
+        Object.values(nodes), Object.values(solved.nodes), rootIds, rootIds,
+      )),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  deleteAssemblyConstraint: (assemblyId, constraintId) => {
+    const { nodes, rootIds } = get();
+    const assembly = nodes[assemblyId];
+    const data = assembly?.params?.assembly;
+    const existing = isAssemblyDocumentData(data) ? data.constraints[constraintId] : undefined;
+    if (!assembly || !isAssemblyDocumentData(data) || !existing) return;
+    const constraints = { ...data.constraints };
+    delete constraints[constraintId];
+    const input: Record<string, CADNode> = {
+      ...nodes,
+      [assemblyId]: {
+        ...assembly,
+        params: {
+          ...assembly.params,
+          assembly: {
+            ...data,
+            constraints,
+            constraintIds: data.constraintIds.filter((id) => id !== constraintId),
+          },
+        },
+      },
+    };
+    const solved = solveAssemblyNodeMap(input, assemblyId);
+    const updated = solved?.nodes ?? input;
+    set({
+      nodes: updated,
+      selectedAssemblyConstraint: null,
+      past: pushPast(get().past, makeAction(
+        'ASSEMBLY', `Delete ${existing.type} constraint`,
+        Object.values(nodes), Object.values(updated), rootIds, rootIds,
+      )),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  solveAssemblyConstraints: (assemblyId) => {
+    const { nodes, rootIds } = get();
+    const solved = solveAssemblyNodeMap(nodes, assemblyId);
+    if (!solved) return null;
+    set({
+      nodes: solved.nodes,
+      past: pushPast(get().past, makeAction(
+        'ASSEMBLY', 'Rebuild assembly constraints',
+        Object.values(nodes), Object.values(solved.nodes), rootIds, rootIds,
+      )),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+    get().log(
+      solved.result.success
+        ? `Assembly solved in ${solved.result.iterations} iteration(s).`
+        : `Assembly rebuild reported: ${solved.result.errors.join(' ')}`,
+      solved.result.success ? 'success' : 'warn',
+    );
+    return solved.result;
+  },
 
   // ─── Advanced Loft guide-curve actions ──────────────────────────────────
   startGuideProfilePick: () => set({
@@ -1313,7 +1843,9 @@ export const useCADStore = create<CADState>((set, get) => ({
     } else {
       finalRoots = [...newRootIds, nodeId];
     }
+    syncAssemblyMembership(updated, nodeId, node.parentId, newParentId);
     set(commitStructure(before, updated, rootIds, finalRoots, `Move "${node.name}"`, get().past));
+    if (node.type === 'assembly_component') dispatchCAD('cad-assembly-sync');
   },
 
   moveNode: (nodeId, newParentId, beforeId) => {
@@ -1340,7 +1872,9 @@ export const useCADStore = create<CADState>((set, get) => ({
       const at = beforeId ? finalRoots.indexOf(beforeId) : -1;
       at >= 0 ? finalRoots.splice(at, 0, nodeId) : finalRoots.push(nodeId);
     }
+    syncAssemblyMembership(updated, nodeId, node.parentId, newParentId);
     set(commitStructure(before, updated, rootIds, finalRoots, `Reorder "${node.name}"`, get().past));
+    if (node.type === 'assembly_component') dispatchCAD('cad-assembly-sync');
   },
 
   setNodeParams: (nodeId, params) => {
@@ -1422,16 +1956,324 @@ export const useCADStore = create<CADState>((set, get) => ({
     return asm.id;
   },
 
+  insertPartInstance: (assemblyId, partId, name) => {
+    const { nodes, rootIds, past } = get();
+    const assembly = nodes[assemblyId];
+    const part = nodes[partId];
+    if (!assembly || assembly.type !== 'assembly' || !part || part.type !== 'component') {
+      get().log('Insert Part requires an assembly and a valid part definition.', 'warn');
+      return null;
+    }
+    const before = Object.values(nodes);
+    const id = makeId();
+    const current = isAssemblyDocumentData(assembly.params?.assembly)
+      ? assembly.params!.assembly as AssemblyDocumentData
+      : DEFAULT_ASSEMBLY_DATA();
+    const fixed = current.autoFixFirstComponent && current.componentIds.length === 0;
+    const data: AssemblyComponentData = {
+      schemaVersion: 1, assemblyId, partId, instanceId: id,
+      suppressed: false, fixed, missingPart: false,
+    };
+    const instance: CADNode = {
+      id,
+      name: name ?? `${part.name}:${current.componentIds.length + 1}`,
+      type: 'assembly_component',
+      visible: true,
+      locked: fixed,
+      parentId: assemblyId,
+      children: [],
+      notes: '',
+      transform: normalizeComponentTransform(),
+      material: normalizeMaterial({ color: NODE_TYPE_COLORS.assembly_component }),
+      params: { assemblyComponent: data },
+    };
+    const nextAssemblyData: AssemblyDocumentData = {
+      ...current,
+      componentIds: [...current.componentIds, id],
+      activeComponentId: id,
+    };
+    const updated = {
+      ...nodes,
+      [id]: instance,
+      [assemblyId]: {
+        ...assembly,
+        children: [...assembly.children, id],
+        params: { ...assembly.params, assembly: nextAssemblyData },
+      },
+    };
+    set({
+      nodes: updated,
+      selectedIds: [id],
+      past: pushPast(past, makeAction('ASSEMBLY', `Insert "${part.name}"`, before, Object.values(updated), rootIds, rootIds)),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+    get().log(`Inserted ${instance.name}${fixed ? ' (fixed)' : ''}.`, 'success');
+    return id;
+  },
+
+  createPartInAssembly: (assemblyId, name) => {
+    if (get().nodes[assemblyId]?.type !== 'assembly') return null;
+    const partId = get().createComponent(name);
+    const componentId = get().insertPartInstance(assemblyId, partId);
+    return componentId ? { partId, componentId } : null;
+  },
+
+  duplicateAssemblyComponent: (id) => {
+    const { nodes, rootIds } = get();
+    const source = nodes[id];
+    const data = source?.params?.assemblyComponent;
+    if (!source || source.type !== 'assembly_component' || !isAssemblyComponentData(data)) return null;
+    const assembly = nodes[data.assemblyId];
+    const assemblyData = assembly?.params?.assembly;
+    if (!assembly || !isAssemblyDocumentData(assemblyData)) return null;
+    const copyId = makeId();
+    const copyData: AssemblyComponentData = {
+      ...data,
+      instanceId: copyId,
+      fixed: false,
+    };
+    const copy: CADNode = {
+      ...JSON.parse(JSON.stringify(source)),
+      id: copyId,
+      name: `${source.name} (copy)`,
+      locked: false,
+      transform: normalizeComponentTransform({
+        ...source.transform,
+        position: [source.transform.position[0] + 10, source.transform.position[1], source.transform.position[2]],
+      }),
+      params: { ...source.params, assemblyComponent: copyData },
+      children: [],
+    };
+    const updated: Record<string, CADNode> = { ...nodes, [copyId]: copy };
+    const parent = source.parentId ? nodes[source.parentId] : assembly;
+    if (parent) updated[parent.id] = { ...parent, children: [...parent.children, copyId] };
+    const assemblyAfterParent = updated[assembly.id];
+    updated[assembly.id] = {
+      ...assemblyAfterParent,
+      params: {
+        ...assemblyAfterParent.params,
+        assembly: {
+          ...assemblyData,
+          componentIds: [...assemblyData.componentIds, copyId],
+          activeComponentId: copyId,
+        },
+      },
+    };
+    set({
+      nodes: updated,
+      selectedIds: [copyId],
+      past: pushPast(get().past, makeAction('ASSEMBLY', `Duplicate "${source.name}"`, Object.values(nodes), Object.values(updated), rootIds, rootIds)),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+    return copyId;
+  },
+
+  replaceAssemblyComponent: (id, partId) => {
+    const { nodes, rootIds } = get();
+    const node = nodes[id];
+    const data = node?.params?.assemblyComponent;
+    const part = nodes[partId];
+    if (!node || !isAssemblyComponentData(data) || part?.type !== 'component') return;
+    const updated: Record<string, CADNode> = {
+      ...nodes,
+      [id]: {
+        ...node,
+        name: `${part.name}:${node.name.split(':').pop() ?? '1'}`,
+        params: { ...node.params, assemblyComponent: { ...data, partId, missingPart: false } },
+      },
+    };
+    const assembly = updated[data.assemblyId];
+    const assemblyData = assembly?.params?.assembly;
+    if (assembly && isAssemblyDocumentData(assemblyData)) {
+      const constraints = Object.fromEntries(Object.entries(assemblyData.constraints).map(([constraintId, constraint]) => {
+        const referencesReplacedPart = [constraint.referenceA, constraint.referenceB]
+          .some((reference) => reference?.componentId === id && reference.partId !== partId);
+        return [constraintId, referencesReplacedPart ? {
+          ...constraint,
+          status: 'missing-reference' as const,
+          message: 'A referenced component was replaced with a different part.',
+        } : constraint];
+      }));
+      updated[assembly.id] = {
+        ...assembly,
+        params: { ...assembly.params, assembly: { ...assemblyData, constraints } },
+      };
+    }
+    set({
+      nodes: updated,
+      past: pushPast(get().past, makeAction('ASSEMBLY', `Replace "${node.name}"`, Object.values(nodes), Object.values(updated), rootIds, rootIds)),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  setAssemblyComponentSuppressed: (id, suppressed) => {
+    const { nodes, rootIds } = get();
+    const node = nodes[id];
+    const data = node?.params?.assemblyComponent;
+    if (!node || !isAssemblyComponentData(data) || data.suppressed === suppressed) return;
+    const updated = {
+      ...nodes,
+      [id]: { ...node, params: { ...node.params, assemblyComponent: { ...data, suppressed } } },
+    };
+    set({
+      nodes: updated,
+      past: pushPast(get().past, makeAction('ASSEMBLY', `${suppressed ? 'Suppress' : 'Unsuppress'} "${node.name}"`, Object.values(nodes), Object.values(updated), rootIds, rootIds)),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  setAssemblyComponentFixed: (id, fixed) => {
+    const { nodes, rootIds } = get();
+    const node = nodes[id];
+    const data = node?.params?.assemblyComponent;
+    if (!node || !isAssemblyComponentData(data) || data.fixed === fixed) return;
+    const updated = {
+      ...nodes,
+      [id]: {
+        ...node,
+        locked: fixed,
+        params: { ...node.params, assemblyComponent: { ...data, fixed } },
+      },
+    };
+    set({
+      nodes: updated,
+      past: pushPast(get().past, makeAction('ASSEMBLY', `${fixed ? 'Fix' : 'Float'} "${node.name}"`, Object.values(nodes), Object.values(updated), rootIds, rootIds)),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  setAssemblyAutoFixFirst: (assemblyId, enabled) => {
+    const { nodes, rootIds } = get();
+    const node = nodes[assemblyId];
+    if (!node || node.type !== 'assembly') return;
+    const data = isAssemblyDocumentData(node.params?.assembly) ? node.params!.assembly as AssemblyDocumentData : DEFAULT_ASSEMBLY_DATA();
+    const updated = {
+      ...nodes,
+      [assemblyId]: { ...node, params: { ...node.params, assembly: { ...data, autoFixFirstComponent: enabled } } },
+    };
+    set({
+      nodes: updated,
+      past: pushPast(get().past, makeAction('ASSEMBLY', 'Change assembly placement option', Object.values(nodes), Object.values(updated), rootIds, rootIds)),
+      future: [],
+    });
+  },
+
+  activateAssemblyComponent: (id) => {
+    const { nodes } = get();
+    const node = nodes[id];
+    const data = node?.params?.assemblyComponent;
+    if (!node || !isAssemblyComponentData(data)) return;
+    const assembly = nodes[data.assemblyId];
+    const assemblyData = assembly?.params?.assembly;
+    if (assembly && isAssemblyDocumentData(assemblyData)) {
+      set({
+        nodes: {
+          ...nodes,
+          [assembly.id]: { ...assembly, params: { ...assembly.params, assembly: { ...assemblyData, activeComponentId: id } } },
+        },
+        selectedIds: [id],
+      });
+    }
+  },
+
+  isolateAssemblyComponent: (id) => {
+    const node = get().nodes[id];
+    const data = node?.params?.assemblyComponent;
+    if (!node || !isAssemblyComponentData(data)) return;
+    const assemblyData = get().nodes[data.assemblyId]?.params?.assembly;
+    if (!isAssemblyDocumentData(assemblyData)) return;
+    for (const componentId of assemblyData.componentIds) {
+      const current = get().nodes[componentId];
+      if (current && current.visible !== (componentId === id)) get().toggleVisibility(componentId);
+    }
+  },
+
+  copyComponentTransform: (id) => {
+    const node = get().nodes[id];
+    if (node?.type === 'assembly_component') set({ transformClipboard: normalizeComponentTransform(node.transform) });
+  },
+
+  pasteComponentTransform: (id) => {
+    const clip = get().transformClipboard;
+    const node = get().nodes[id];
+    if (!clip || node?.type !== 'assembly_component') return;
+    get().updateTransform(id, clip.position, clip.rotation, clip.scale);
+  },
+
+  resetComponentTransform: (id) => {
+    const node = get().nodes[id];
+    if (node?.type !== 'assembly_component') return;
+    const identity = normalizeComponentTransform();
+    get().updateTransform(id, identity.position, identity.rotation, identity.scale);
+  },
+
   loadScene: (nodes, rootIds) => {
-    set({ nodes: { ...nodes }, rootIds: [...rootIds], selectedIds: [], activeComponentId: null, past: [], future: [] });
+    const normalized = { ...nodes };
+    for (const id of Object.keys(normalized)) {
+      const node = normalized[id];
+      if (node.type === 'assembly') {
+        const raw = isAssemblyDocumentData(node.params?.assembly)
+          ? node.params!.assembly as AssemblyDocumentData
+          : DEFAULT_ASSEMBLY_DATA();
+        const componentIds = node.children.filter((cid) => normalized[cid]?.type === 'assembly_component');
+        normalized[id] = {
+          ...node,
+          params: {
+            ...node.params,
+            assembly: {
+              ...raw,
+              componentIds,
+              constraintIds: raw.constraintIds.filter((cid) => !!raw.constraints[cid]),
+            },
+          },
+        };
+      } else if (node.type === 'assembly_component') {
+        const raw = node.params?.assemblyComponent;
+        const assemblyId = isAssemblyComponentData(raw) ? raw.assemblyId : (node.parentId ?? '');
+        const partId = isAssemblyComponentData(raw) ? raw.partId : String(node.params?.partId ?? '');
+        const fixed = isAssemblyComponentData(raw) ? raw.fixed : !!node.locked;
+        normalized[id] = {
+          ...node,
+          locked: fixed,
+          transform: normalizeComponentTransform(node.transform),
+          params: {
+            ...node.params,
+            assemblyComponent: {
+              schemaVersion: 1,
+              assemblyId,
+              partId,
+              instanceId: id,
+              suppressed: isAssemblyComponentData(raw) ? raw.suppressed : false,
+              fixed,
+              missingPart: normalized[partId]?.type !== 'component',
+            } satisfies AssemblyComponentData,
+          },
+        };
+      }
+    }
+    set({
+      nodes: normalized, rootIds: [...rootIds], selectedIds: [], activeComponentId: null, past: [], future: [],
+      assemblyReferencePickType: null, pickedAssemblyReference: null,
+      assemblyConstraintDraft: null, selectedAssemblyConstraint: null,
+    });
     get().migrateToComponentTree();
+    dispatchCAD('cad-assembly-sync');
   },
 
   newProject: () => {
     // Wipe the viewport (meshes + sketch/datum visuals) BEFORE clearing the
     // store — the registry frees orphaned shapes via its store subscription.
     if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('cad-scene-reset'));
-    set({ nodes: {}, rootIds: [], selectedIds: [], activeComponentId: null, past: [], future: [] });
+    set({
+      nodes: {}, rootIds: [], selectedIds: [], activeComponentId: null, past: [], future: [],
+      assemblyReferencePickType: null, pickedAssemblyReference: null,
+      assemblyConstraintDraft: null, selectedAssemblyConstraint: null,
+    });
     get().log('New project.', 'info');
   },
 
@@ -1663,6 +2505,64 @@ export const useCADStore = create<CADState>((set, get) => ({
       }
     }
 
+    // Keep assembly metadata referentially valid. Deleting an instance removes
+    // constraints that mention it; deleting a part definition leaves its placed
+    // instances in the tree but marks them as missing so the user can replace it.
+    for (const nid of Object.keys(updatedNodes)) {
+      const n = updatedNodes[nid];
+      if (n.type === 'assembly') {
+        const data = n.params?.assembly;
+        if (!isAssemblyDocumentData(data)) continue;
+        const componentIds = data.componentIds.filter((cid) => !deletedSet.has(cid) && !!updatedNodes[cid]);
+        const constraints = Object.fromEntries(
+          Object.entries(data.constraints)
+            .filter(([, constraint]) =>
+              !deletedSet.has(constraint.referenceA.componentId)
+              && !deletedSet.has(constraint.referenceB?.componentId ?? ''),
+            )
+            .map(([constraintId, constraint]) => {
+              const referenceIsMissing = (reference: typeof constraint.referenceA) => {
+                const componentData = updatedNodes[reference.componentId]?.params?.assemblyComponent;
+                return !isAssemblyComponentData(componentData)
+                  || componentData.partId !== reference.partId
+                  || updatedNodes[reference.partId]?.type !== 'component'
+                  || (!!reference.sourceNodeId && !updatedNodes[reference.sourceNodeId]);
+              };
+              const missing = referenceIsMissing(constraint.referenceA)
+                || (!!constraint.referenceB && referenceIsMissing(constraint.referenceB));
+              return [constraintId, missing ? {
+                ...constraint,
+                status: 'missing-reference' as const,
+                message: 'A referenced part, feature, or subshape is missing.',
+              } : constraint];
+            }),
+        );
+        updatedNodes[nid] = {
+          ...n,
+          params: {
+            ...n.params,
+            assembly: {
+              ...data,
+              componentIds,
+              constraints,
+              constraintIds: data.constraintIds.filter((cid) => !!constraints[cid]),
+              activeComponentId: componentIds.includes(data.activeComponentId ?? '') ? data.activeComponentId : undefined,
+            },
+          },
+        };
+      } else if (n.type === 'assembly_component') {
+        const data = n.params?.assemblyComponent;
+        if (!isAssemblyComponentData(data)) continue;
+        const missingPart = !updatedNodes[data.partId] || updatedNodes[data.partId].type !== 'component';
+        if (missingPart !== data.missingPart) {
+          updatedNodes[nid] = {
+            ...n,
+            params: { ...n.params, assemblyComponent: { ...data, missingPart } },
+          };
+        }
+      }
+    }
+
     const updatedRootIds = rootIds.filter((r) => !deletedIds.includes(r));
     if (parentId && updatedNodes[parentId]) {
       updatedNodes[parentId] = {
@@ -1691,13 +2591,10 @@ export const useCADStore = create<CADState>((set, get) => ({
     }
 
     // Notify the viewport to remove all deleted Three.js objects
-    deletedIds.forEach((did) =>
-      window.dispatchEvent(new CustomEvent('cad-remove-mesh', { detail: { id: did } }))
-    );
+    deletedIds.forEach((did) => dispatchCAD('cad-remove-mesh', { id: did }));
     // Re-show restored input meshes
-    restoredIds.forEach((rid) =>
-      window.dispatchEvent(new CustomEvent('cad-visibility-changed', { detail: { id: rid, visible: true } }))
-    );
+    restoredIds.forEach((rid) => dispatchCAD('cad-visibility-changed', { id: rid, visible: true }));
+    dispatchCAD('cad-assembly-sync');
 
     const notes = [
       restoredIds.length ? `restored ${restoredIds.length} input${restoredIds.length > 1 ? 's' : ''}` : '',
@@ -1710,6 +2607,9 @@ export const useCADStore = create<CADState>((set, get) => ({
     const { nodes } = get();
     const source = nodes[id];
     if (!source) return id;
+    if (source.type === 'assembly_component') {
+      return get().duplicateAssemblyComponent(id) ?? id;
+    }
 
     const newId   = makeId();
     const newNode: Omit<CADNode, 'children'> = {
@@ -1745,12 +2645,22 @@ export const useCADStore = create<CADState>((set, get) => ({
   updateTransform: (id, position, rotation, scale) => {
     const { nodes, rootIds } = get();
     if (!nodes[id]) return;
+    const componentData = nodes[id].params?.assemblyComponent;
+    if (isAssemblyComponentData(componentData) && componentData.fixed) {
+      get().log(`"${nodes[id].name}" is fixed. Float it before moving.`, 'warn');
+      return;
+    }
     const nodesBefore  = JSON.parse(JSON.stringify(Object.values(nodes)));
+    const transform = normalizeComponentTransform({
+      position,
+      rotation,
+      scale: scale ?? nodes[id].transform.scale,
+    });
     const updatedNodes: Record<string, any> = {
       ...nodes,
       [id]: {
         ...nodes[id],
-        transform: { position, rotation, scale: scale ?? nodes[id].transform.scale },
+        transform,
       },
     };
     // D13 — datums derived from this body follow its move (same undo entry).
@@ -1763,18 +2673,28 @@ export const useCADStore = create<CADState>((set, get) => ({
       past:  pushPast(get().past, makeAction('TRANSFORM', 'Transform', nodesBefore, Object.values(updatedNodes), rootIds, rootIds)),
       future: [],
     });
+    if (nodes[id].type === 'assembly_component') {
+      dispatchCAD('cad-apply-transform', { id, position: transform.position, rotation: transform.rotation });
+    }
   },
 
   // Updates transform in real-time during drag — no undo entry
   setTransformLive: (id, position, rotation) => {
     const { nodes } = get();
     if (!nodes[id]) return;
+    const componentData = nodes[id].params?.assemblyComponent;
+    if (isAssemblyComponentData(componentData) && componentData.fixed) return;
+    const transform = normalizeComponentTransform({
+      ...nodes[id].transform,
+      position,
+      rotation,
+    });
     set({
       nodes: {
         ...nodes,
         [id]: {
           ...nodes[id],
-          transform: { ...nodes[id].transform, position, rotation },
+          transform,
         },
       },
     });
@@ -1800,16 +2720,26 @@ export const useCADStore = create<CADState>((set, get) => ({
   },
 
   toggleVisibility: (id) => {
-    const { nodes } = get();
+    const { nodes, rootIds } = get();
     if (!nodes[id]) return;
     const visible = !nodes[id].visible;
-    set({ nodes: { ...nodes, [id]: { ...nodes[id], visible } } });
-    window.dispatchEvent(new CustomEvent('cad-visibility-changed', { detail: { id, visible } }));
+    const updated = { ...nodes, [id]: { ...nodes[id], visible } };
+    set(nodes[id].type === 'assembly_component' ? {
+      nodes: updated,
+      past: pushPast(get().past, makeAction('ASSEMBLY', `${visible ? 'Show' : 'Hide'} "${nodes[id].name}"`, Object.values(nodes), Object.values(updated), rootIds, rootIds)),
+      future: [],
+    } : { nodes: updated });
+    dispatchCAD('cad-visibility-changed', { id, visible });
   },
 
   toggleLock: (id) => {
     const { nodes } = get();
     if (!nodes[id]) return;
+    if (nodes[id].type === 'assembly_component') {
+      const data = nodes[id].params?.assemblyComponent;
+      if (isAssemblyComponentData(data)) get().setAssemblyComponentFixed(id, !data.fixed);
+      return;
+    }
     set({ nodes: { ...nodes, [id]: { ...nodes[id], locked: !nodes[id].locked } } });
   },
 
@@ -1840,8 +2770,9 @@ export const useCADStore = create<CADState>((set, get) => ({
     });
 
     syncScene(added, removed, restoredNodes);
+    dispatchCAD('cad-assembly-sync');
     const reWires = sketchWiresWithChangedGeom(currentNodes, restoredNodes);
-    if (reWires.length) window.dispatchEvent(new CustomEvent('cad-sketch-rebuild', { detail: { ids: reWires } }));
+    if (reWires.length) dispatchCAD('cad-sketch-rebuild', { ids: reWires });
     get().log(`Undo: ${action.description}`, 'info');
   },
 
@@ -1863,8 +2794,9 @@ export const useCADStore = create<CADState>((set, get) => ({
     });
 
     syncScene(added, removed, restoredNodes);
+    dispatchCAD('cad-assembly-sync');
     const reWires = sketchWiresWithChangedGeom(currentNodes, restoredNodes);
-    if (reWires.length) window.dispatchEvent(new CustomEvent('cad-sketch-rebuild', { detail: { ids: reWires } }));
+    if (reWires.length) dispatchCAD('cad-sketch-rebuild', { ids: reWires });
     get().log(`Redo: ${action.description}`, 'info');
   },
 }));

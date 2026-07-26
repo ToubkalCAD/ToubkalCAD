@@ -11,9 +11,10 @@
 // ============================================================
 
 import type { CADNode } from '../store/cadStore';
+import { migrateAssemblyNodes } from '../assembly/migration';
 
 export const TKCAD_FORMAT  = 'tkcad';
-export const TKCAD_VERSION = 1;
+export const TKCAD_VERSION = 2;
 
 export interface TkcadDocument {
   format:  typeof TKCAD_FORMAT;
@@ -129,7 +130,7 @@ export class ProjectFileService {
       app:     typeof raw.app === 'string' ? raw.app : 'ToubkalCAD',
       name:    typeof raw.name === 'string' ? raw.name : 'Untitled',
       savedAt: typeof raw.savedAt === 'string' ? raw.savedAt : '',
-      nodes:   raw.nodes,
+      nodes:   migrateAssemblyNodes(raw.nodes),
       rootIds: raw.rootIds,
     };
   }
