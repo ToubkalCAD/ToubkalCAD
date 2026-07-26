@@ -96,8 +96,7 @@ routing, and supplies the required cross-origin isolation headers. Generated
 
 ## License
 
-A project license has not yet been selected. Until a `LICENSE` file is added,
-the repository remains all rights reserved by default. The project also
-distributes LGPL-licensed dependencies, including OpenCascade.js and PlaneGCS;
-their license notices and redistribution requirements must be preserved. See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+ToubkalCAD's original source code is licensed under the [MIT License](LICENSE).
+
+Third-party components remain subject to their respective licenses. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
