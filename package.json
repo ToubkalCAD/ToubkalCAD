@@ -45,7 +45,7 @@
   ],
   "dependencies": {
     "@salusoft89/planegcs": "^1.1.7",
-    "dockview": "^1.11.0",
+    "dockview": "^7.0.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-draggable": "^4.6.0",
