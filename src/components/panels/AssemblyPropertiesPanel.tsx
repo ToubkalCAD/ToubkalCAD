@@ -7,10 +7,16 @@ const buttonStyle: React.CSSProperties = {
   padding: '6px 8px', fontSize: 10, color: 'var(--text-primary)',
   background: 'var(--surface-3)', border: '1px solid var(--border)', borderRadius: 4,
 };
+const sectionStyle: React.CSSProperties = {
+  borderTop: '1px solid var(--border)', paddingTop: 10, display: 'grid', gap: 7,
+};
 
 export const AssemblyPropertiesPanel: React.FC = () => {
   const nodes = useCADStore((state) => state.nodes);
   const selectedId = useCADStore((state) => state.selectedIds[0]);
+  const interference = useCADStore((state) => state.assemblyInterferenceReport);
+  const interferenceProgress = useCADStore((state) => state.assemblyInterferenceProgress);
+  const bom = useCADStore((state) => state.assemblyBom);
   const node = selectedId ? nodes[selectedId] : undefined;
 
   if (!node || (node.type !== 'assembly' && node.type !== 'assembly_component')) {
@@ -54,6 +60,74 @@ export const AssemblyPropertiesPanel: React.FC = () => {
             new CustomEvent('cad-properties-tab', { detail: { tab: 'constraints' } }),
           )}>Constraints</button>
         </div>
+
+        <section style={sectionStyle}>
+          <div style={{ fontWeight: 700 }}>Exploded View</div>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input type="checkbox" checked={data.exploded.enabled}
+              onChange={(event) => useCADStore.getState().setAssemblyExplodedEnabled(node.id, event.target.checked)} />
+            Show exploded
+          </label>
+          <label>
+            Explosion {(data.exploded.factor * 100).toFixed(0)}%
+            <input aria-label="Explosion factor" type="range" min={0} max={1} step={0.05}
+              value={data.exploded.factor}
+              onChange={(event) => useCADStore.getState().setAssemblyExplosionFactor(node.id, Number(event.target.value))}
+              style={{ width: '100%' }} />
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <button style={buttonStyle} onClick={() => useCADStore.getState().generateAssemblyExplosion(node.id)}>Auto Explode</button>
+            <button style={buttonStyle} onClick={() => useCADStore.getState().resetAssemblyExplosion(node.id)}>Reset</button>
+          </div>
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={{ fontWeight: 700 }}>Interference</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <button style={buttonStyle} disabled={interferenceProgress !== null}
+              onClick={() => void useCADStore.getState().runAssemblyInterferenceCheck(node.id)}>Check All</button>
+            <button style={buttonStyle} disabled={interferenceProgress !== null}
+              onClick={() => void useCADStore.getState().runAssemblyInterferenceCheck(node.id, true)}>Check Selected</button>
+          </div>
+          {interferenceProgress !== null && <div>Checking… {(interferenceProgress * 100).toFixed(0)}%</div>}
+          {interference?.assemblyId === node.id && (
+            <details open={interference.pairs.length > 0}>
+              <summary>{interference.pairs.length} contact pair(s) from {interference.candidatePairCount} candidates</summary>
+              {interference.pairs.map((pair) => (
+                <button key={`${pair.componentAId}:${pair.componentBId}`} style={{ ...buttonStyle, width: '100%', marginTop: 4 }}
+                  onClick={() => useCADStore.getState().setSelectedIds([pair.componentAId, pair.componentBId])}>
+                  {nodes[pair.componentAId]?.name} / {nodes[pair.componentBId]?.name}
+                  {' · '}{pair.kind}{pair.overlapVolume > 0 ? ` · ${pair.overlapVolume.toFixed(3)} mm³` : ''}
+                </button>
+              ))}
+              <button style={{ ...buttonStyle, width: '100%', marginTop: 5 }}
+                onClick={() => useCADStore.getState().clearAssemblyInterference()}>Clear Highlights</button>
+            </details>
+          )}
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={{ fontWeight: 700 }}>Bill of Materials</div>
+          <button style={buttonStyle} onClick={() => useCADStore.getState().generateAssemblyBom(node.id)}>Generate BOM</button>
+          {bom?.assemblyId === node.id && bom.entries.map((entry) => (
+            <div key={entry.partId} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 5 }}>
+              <span>{entry.partNumber} · {entry.partName}</span>
+              <span>×{entry.quantity}{entry.suppressedQuantity ? ` (${entry.suppressedQuantity} suppressed)` : ''}</span>
+            </div>
+          ))}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <button style={buttonStyle} onClick={() => useCADStore.getState().exportAssemblyBom(node.id, 'csv')}>Export CSV</button>
+            <button style={buttonStyle} onClick={() => useCADStore.getState().exportAssemblyBom(node.id, 'json')}>Export JSON</button>
+          </div>
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={{ fontWeight: 700 }}>Assembly Output</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <button style={buttonStyle} onClick={() => useCADStore.getState().createAssemblyCompound(node.id)}>Create Compound</button>
+            <button style={buttonStyle} onClick={() => useCADStore.getState().exportAssemblySTEP(node.id)}>Export STEP</button>
+          </div>
+        </section>
       </div>
     );
   }
@@ -61,6 +135,15 @@ export const AssemblyPropertiesPanel: React.FC = () => {
   const data = node.params?.assemblyComponent;
   if (!isAssemblyComponentData(data)) return null;
   const part = nodes[data.partId];
+  const assemblyData = nodes[data.assemblyId]?.params?.assembly;
+  const explodedOffset: [number, number, number] = isAssemblyDocumentData(assemblyData)
+    ? assemblyData.exploded.transforms[node.id]?.offset ?? [0, 0, 0]
+    : [0, 0, 0];
+  const setExplodedAxis = (axis: number, value: number) => {
+    const next = [...explodedOffset] as [number, number, number];
+    next[axis] = Number.isFinite(value) ? value : 0;
+    useCADStore.getState().setAssemblyComponentExplodedOffset(node.id, next);
+  };
   return (
     <div style={{ padding: 12, display: 'grid', gap: 10, fontSize: 11 }}>
       <div style={{ fontWeight: 700 }}>{node.name}</div>
@@ -81,6 +164,18 @@ export const AssemblyPropertiesPanel: React.FC = () => {
         <button style={buttonStyle} onClick={() => useCADStore.getState().resetComponentTransform(node.id)}>Align Origin</button>
         <button style={buttonStyle} onClick={() => showAssemblyReplacePartDialog(data.assemblyId, node.id)}>Replace…</button>
       </div>
+      <section style={sectionStyle}>
+        <div style={{ fontWeight: 700 }}>Manual Exploded Offset (mm)</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
+          {(['X', 'Y', 'Z'] as const).map((label, axis) => (
+            <label key={label}>{label}
+              <input aria-label={`Exploded offset ${label}`} type="number" value={explodedOffset[axis]}
+                onChange={(event) => setExplodedAxis(axis, Number(event.target.value))}
+                style={{ width: '100%', boxSizing: 'border-box' }} />
+            </label>
+          ))}
+        </div>
+      </section>
     </div>
   );
 };

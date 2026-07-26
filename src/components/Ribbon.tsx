@@ -102,6 +102,7 @@ const RIBBON_TABS: RibbonTab[] = [
     { kind:'menu', id:'m-asm',    label:'Assembly',   icon:'mate',       ids:[
       'insert-part','create-part-in-assembly','mate','concentric',
       'asm-parallel','asm-perpendicular','asm-distance','asm-angle',
+      'asm-interference','asm-explode','asm-bom','asm-compound','asm-export',
     ] },
   ] },
   { id: 'surface', label: 'Surface', items: [
@@ -483,6 +484,14 @@ export const Ribbon: React.FC = () => {
       return;
     }
     useCADStore.getState().startAssemblyConstraint(assemblyId, type);
+  };
+  const withSelectedAssembly = (action: (assemblyId: string) => void) => {
+    const assemblyId = selectedAssemblyId();
+    if (!assemblyId) {
+      useCADStore.getState().log('Create or select an assembly first.', 'warn');
+      return;
+    }
+    action(assemblyId);
   };
 
   // ─── Primitives ─────────────────────────────────────────────────────────────
@@ -1598,6 +1607,21 @@ export const Ribbon: React.FC = () => {
     'asm-perpendicular': { id:'asm-perpendicular', icon:'align', label:'Perpendicular', run:() => beginAssemblyConstraint('perpendicular'), enabled:hasAnySolid, accent:'#cc8844' },
     'asm-distance': { id:'asm-distance', icon:'measure', label:'Distance', run:() => beginAssemblyConstraint('distance'), enabled:hasAnySolid, accent:'#cc8844' },
     'asm-angle': { id:'asm-angle', icon:'align', label:'Angle', run:() => beginAssemblyConstraint('angle'), enabled:hasAnySolid, accent:'#cc8844' },
+    'asm-interference': { id:'asm-interference', icon:'intersect', label:'Interference', run:() =>
+      withSelectedAssembly((id) => { void useCADStore.getState().runAssemblyInterferenceCheck(id); }),
+      accent:'#d34b4b', tooltip:'Check visible, unsuppressed components for contact and interference' },
+    'asm-explode': { id:'asm-explode', icon:'array', label:'Exploded View', run:() =>
+      withSelectedAssembly((id) => useCADStore.getState().generateAssemblyExplosion(id)),
+      accent:'#4f8fd8', tooltip:'Generate a non-destructive radial exploded view' },
+    'asm-bom': { id:'asm-bom', icon:'measure', label:'BOM', run:() =>
+      withSelectedAssembly((id) => useCADStore.getState().generateAssemblyBom(id)),
+      accent:'#1d9e74', tooltip:'Generate a grouped bill of materials' },
+    'asm-compound': { id:'asm-compound', icon:'union', label:'Create Compound', run:() =>
+      withSelectedAssembly((id) => useCADStore.getState().createAssemblyCompound(id)),
+      accent:'#6e7681', tooltip:'Create an OCC compound at solved component transforms' },
+    'asm-export': { id:'asm-export', icon:'export', label:'Export Assembly', run:() =>
+      withSelectedAssembly((id) => useCADStore.getState().exportAssemblySTEP(id)),
+      accent:'#6e7681', tooltip:'Export visible, unsuppressed components as STEP' },
     // modify
     fillet:    { id:'fillet',    icon:'fillet',    label:'Fillet',   run:() => openBlend('fillet'),  enabled:hasSel },
     chamfer:   { id:'chamfer',   icon:'chamfer',   label:'Chamfer',  run:() => openBlend('chamfer'), enabled:hasSel },

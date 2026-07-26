@@ -1277,6 +1277,11 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       }
     };
 
+    const onAssemblyInterferenceHighlight = (e: Event) => {
+      const ids = (e as CustomEvent<{ componentIds?: string[] }>).detail?.componentIds ?? [];
+      assemblyRendererRef.current.setCollisionHighlights(ids);
+    };
+
     // Re-tessellate an existing node after its OCC shape was updated in-place
     const onUpdate = (e: Event) => {
       const { id, material } = (e as CustomEvent).detail;
@@ -1324,6 +1329,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
     window.addEventListener('cad-material-changed',   onMaterial);
     window.addEventListener('cad-visibility-changed', onVisibility);
     window.addEventListener('cad-apply-transform',    onApplyTransform);
+    window.addEventListener('cad-assembly-interference-highlight', onAssemblyInterferenceHighlight);
     window.addEventListener('cad-update-mesh',        onUpdate);
     window.addEventListener('cad-assembly-sync',      syncAssembly);
     return () => {
@@ -1334,6 +1340,7 @@ export const Viewport3D: React.FC<Viewport3DProps> = ({ onReady }) => {
       window.removeEventListener('cad-material-changed',   onMaterial);
       window.removeEventListener('cad-visibility-changed', onVisibility);
       window.removeEventListener('cad-apply-transform',    onApplyTransform);
+      window.removeEventListener('cad-assembly-interference-highlight', onAssemblyInterferenceHighlight);
       window.removeEventListener('cad-update-mesh',        onUpdate);
       window.removeEventListener('cad-assembly-sync',      syncAssembly);
     };

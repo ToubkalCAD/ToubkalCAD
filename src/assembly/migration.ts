@@ -59,6 +59,17 @@ export function migrateAssemblyNodes(input: Record<string, CADNode>): Record<str
           componentIds,
           constraints,
           constraintIds: raw.constraintIds.filter((constraintId) => !!constraints[constraintId]),
+          exploded: raw.exploded && typeof raw.exploded === 'object'
+            ? {
+                enabled: !!raw.exploded.enabled,
+                factor: Number.isFinite(raw.exploded.factor)
+                  ? Math.max(0, Math.min(1, raw.exploded.factor))
+                  : 0,
+                transforms: raw.exploded.transforms && typeof raw.exploded.transforms === 'object'
+                  ? raw.exploded.transforms
+                  : {},
+              }
+            : { enabled: false, factor: 0, transforms: {} },
         } satisfies AssemblyDocumentData,
       },
     };

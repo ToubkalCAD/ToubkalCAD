@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { CADNode } from '../store/cadStore';
-import { isAssemblyComponentData } from '../assembly/types';
+import { isAssemblyComponentData, isAssemblyDocumentData } from '../assembly/types';
 import { applyTransformToObject } from '../assembly/transforms';
 import { ThreeMeshCache } from './ThreeMeshCache';
 
@@ -21,6 +21,7 @@ function descendantIds(nodes: Record<string, CADNode>, rootId: string): string[]
 export class AssemblyInstanceRenderer {
   private groups = new Map<string, THREE.Group>();
   private hiddenSourceIds = new Set<string>();
+  private highlightedComponentIds = new Set<string>();
 
   sync(scene: THREE.Scene, nodes: Record<string, CADNode>): void {
     for (const sourceId of this.hiddenSourceIds) {
@@ -75,6 +76,18 @@ export class AssemblyInstanceRenderer {
       referencedPartId: data.partId,
     };
     applyTransformToObject(group, node.transform);
+    const assemblyData = nodes[data.assemblyId]?.params?.assembly;
+    if (isAssemblyDocumentData(assemblyData) && assemblyData.exploded.enabled) {
+      const exploded = assemblyData.exploded.transforms[instanceId];
+      if (exploded) {
+        group.position.add(new THREE.Vector3(...exploded.offset).multiplyScalar(assemblyData.exploded.factor));
+        if (exploded.rotationOffset) {
+          group.rotation.x += exploded.rotationOffset[0] * assemblyData.exploded.factor;
+          group.rotation.y += exploded.rotationOffset[1] * assemblyData.exploded.factor;
+          group.rotation.z += exploded.rotationOffset[2] * assemblyData.exploded.factor;
+        }
+      }
+    }
     group.visible = node.visible && !data.suppressed && !data.missingPart;
 
     for (const sourceId of descendantIds(nodes, data.partId)) {
@@ -97,6 +110,7 @@ export class AssemblyInstanceRenderer {
       };
       group.add(clone);
     }
+    this.applyHighlight(group, this.highlightedComponentIds.has(instanceId));
 
     scene.add(group);
     this.groups.set(instanceId, group);
@@ -116,6 +130,11 @@ export class AssemblyInstanceRenderer {
     return this.groups.get(instanceId);
   }
 
+  setCollisionHighlights(componentIds: string[]): void {
+    this.highlightedComponentIds = new Set(componentIds);
+    for (const [id, group] of this.groups) this.applyHighlight(group, this.highlightedComponentIds.has(id));
+  }
+
   remove(scene: THREE.Scene, instanceId: string): void {
     const group = this.groups.get(instanceId);
     if (!group) return;
@@ -130,6 +149,24 @@ export class AssemblyInstanceRenderer {
 
   clear(scene: THREE.Scene): void {
     for (const id of [...this.groups.keys()]) this.remove(scene, id);
+    this.highlightedComponentIds.clear();
+  }
+
+  private applyHighlight(group: THREE.Group, highlighted: boolean): void {
+    group.traverse((object) => {
+      if (!(object instanceof THREE.Mesh)) return;
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (!(material instanceof THREE.MeshStandardMaterial)) continue;
+        if (material.userData.assemblyOriginalEmissive === undefined) {
+          material.userData.assemblyOriginalEmissive = material.emissive.getHex();
+          material.userData.assemblyOriginalEmissiveIntensity = material.emissiveIntensity;
+        }
+        material.emissive.setHex(highlighted ? 0xff1f1f : material.userData.assemblyOriginalEmissive);
+        material.emissiveIntensity = highlighted ? 0.8 : material.userData.assemblyOriginalEmissiveIntensity;
+        material.needsUpdate = true;
+      }
+    });
   }
 }
 

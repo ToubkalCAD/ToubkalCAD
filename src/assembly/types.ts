@@ -93,6 +93,33 @@ export interface ExplodedTransform {
   rotationOffset?: Vec3;
 }
 
+export interface AssemblyInterferencePair {
+  componentAId: string;
+  componentBId: string;
+  distance: number;
+  overlapVolume: number;
+  kind: 'interference' | 'contact';
+}
+
+export interface AssemblyInterferenceReport {
+  assemblyId: string;
+  checkedComponentIds: string[];
+  candidatePairCount: number;
+  pairs: AssemblyInterferencePair[];
+  errors: string[];
+}
+
+export interface AssemblyBomEntry {
+  partId: string;
+  partNumber: string;
+  partName: string;
+  quantity: number;
+  suppressedQuantity: number;
+  material?: string;
+  unitMass?: number;
+  totalMass?: number;
+}
+
 export interface AssemblyDocumentData {
   schemaVersion: 1;
   componentIds: string[];

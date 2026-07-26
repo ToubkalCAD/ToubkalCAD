@@ -1,6 +1,6 @@
 import type { CADNode } from '../store/cadStore';
 import type { Matrix4 } from 'three';
-import { isAssemblyComponentData } from '../assembly/types';
+import { isAssemblyComponentData, isAssemblyDocumentData } from '../assembly/types';
 import { componentTransformToMatrix, matrixToOccTransform } from '../assembly/transforms';
 import { WasmScope } from '../utils/WasmScope';
 import { CADGeometryRegistry } from './CADGeometryRegistry';
@@ -64,12 +64,51 @@ export class AssemblyBRepService {
     const box = new oc.Bnd_Box_1();
     try {
       oc.BRepBndLib.Add(shape, box, true);
-      const xMin = { value: 0 }, yMin = { value: 0 }, zMin = { value: 0 };
-      const xMax = { value: 0 }, yMax = { value: 0 }, zMax = { value: 0 };
-      box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
-      return [xMin.value, yMin.value, zMin.value, xMax.value, yMax.value, zMax.value];
+      if (box.IsVoid()) throw new Error('Component has no measurable B-Rep bodies.');
+      const min = box.CornerMin();
+      const max = box.CornerMax();
+      try {
+        return [min.X(), min.Y(), min.Z(), max.X(), max.Y(), max.Z()];
+      } finally {
+        min.delete();
+        max.delete();
+      }
     } finally {
       box.delete();
+    }
+  }
+
+  /**
+   * Creates one owned compound containing the visible, non-suppressed component
+   * shapes at their solved assembly transforms. Exploded display offsets are
+   * intentionally excluded: they are presentation-only and never affect export.
+   */
+  static buildAssemblyCompound(oc: any, nodes: Record<string, CADNode>, assemblyId: string): any {
+    const assembly = nodes[assemblyId];
+    const data = assembly?.params?.assembly;
+    if (!assembly || !isAssemblyDocumentData(data)) throw new Error('Invalid assembly document.');
+
+    const builder = new oc.BRep_Builder();
+    const compound = new oc.TopoDS_Compound();
+    const componentCompounds: any[] = [];
+    try {
+      builder.MakeCompound(compound);
+      for (const componentId of data.componentIds) {
+        const component = nodes[componentId];
+        const componentData = component?.params?.assemblyComponent;
+        if (!component || !component.visible || !isAssemblyComponentData(componentData)
+          || componentData.suppressed || componentData.missingPart) continue;
+        const componentCompound = this.buildComponentCompound(oc, nodes, componentId);
+        componentCompounds.push(componentCompound);
+        builder.Add(compound, componentCompound);
+      }
+      return compound;
+    } catch (error) {
+      compound.delete();
+      throw error;
+    } finally {
+      builder.delete();
+      for (const shape of componentCompounds) shape.delete?.();
     }
   }
 }

@@ -14,6 +14,8 @@ import {
   AssemblyConstraintDraft,
   AssemblyConstraintType,
   AssemblyDocumentData,
+  AssemblyBomEntry,
+  AssemblyInterferenceReport,
   AssemblyReference,
   ComponentTransform,
   DEFAULT_ASSEMBLY_DATA,
@@ -23,6 +25,11 @@ import {
 import { normalizeComponentTransform } from '../assembly/transforms';
 import { AssemblyReferenceService } from '../assembly/AssemblyReferenceService';
 import { assemblyConstraintSolver, type AssemblySolverResult } from '../assembly/AssemblyConstraintSolver';
+import { AssemblyBomService } from '../services/AssemblyBomService';
+import { AssemblyInterferenceService } from '../services/AssemblyInterferenceService';
+import { AssemblyBRepService } from '../services/AssemblyBRepService';
+import { OccExchangeService } from '../services/OccExchangeService';
+import { CADGeometryRegistry } from '../services/CADGeometryRegistry';
 
 // D13 — capture the body a datum is derived from (first ref pointing to a solid),
 // so a later move of that body can rigidly recompute the datum. Datum-sourced
@@ -404,6 +411,9 @@ interface CADState {
   pickedAssemblyReference: AssemblyReference | null;
   assemblyConstraintDraft: AssemblyConstraintDraft | null;
   selectedAssemblyConstraint: { assemblyId: string; constraintId: string } | null;
+  assemblyInterferenceReport: AssemblyInterferenceReport | null;
+  assemblyInterferenceProgress: number | null;
+  assemblyBom: { assemblyId: string; entries: AssemblyBomEntry[] } | null;
 
   // ─── Advanced Loft: guide-curve authoring ───────────────────────────────
   /** Profile wire node ids the guide(s) bridge (exactly 2 when ready). */
@@ -497,6 +507,19 @@ interface CADState {
   ) => void;
   deleteAssemblyConstraint: (assemblyId: string, constraintId: string) => void;
   solveAssemblyConstraints: (assemblyId: string) => AssemblySolverResult | null;
+  setAssemblyExplodedEnabled: (assemblyId: string, enabled: boolean) => void;
+  setAssemblyExplosionFactor: (assemblyId: string, factor: number) => void;
+  generateAssemblyExplosion: (assemblyId: string, distance?: number) => void;
+  setAssemblyComponentExplodedOffset: (
+    componentId: string, offset: [number, number, number],
+  ) => void;
+  resetAssemblyExplosion: (assemblyId: string) => void;
+  generateAssemblyBom: (assemblyId: string) => AssemblyBomEntry[];
+  exportAssemblyBom: (assemblyId: string, format: 'csv' | 'json') => void;
+  runAssemblyInterferenceCheck: (assemblyId: string, selectedOnly?: boolean) => Promise<AssemblyInterferenceReport | null>;
+  clearAssemblyInterference: () => void;
+  createAssemblyCompound: (assemblyId: string) => string | null;
+  exportAssemblySTEP: (assemblyId: string) => void;
   /** Apply a loaded scene and migrate it to the dual-tree shape (wrap stray
    *  features into a component, un-nest adopted sketches). Used by project load. */
   loadScene:          (nodes: Record<string, CADNode>, rootIds: string[]) => void;
@@ -1104,6 +1127,9 @@ export const useCADStore = create<CADState>((set, get) => ({
   pickedAssemblyReference: null,
   assemblyConstraintDraft: null,
   selectedAssemblyConstraint: null,
+  assemblyInterferenceReport: null,
+  assemblyInterferenceProgress: null,
+  assemblyBom: null,
   guideProfiles:   [],
   guideDraft:      null,
   guideSnap:       null,
@@ -1511,6 +1537,287 @@ export const useCADStore = create<CADState>((set, get) => ({
   },
 
   // ─── Advanced Loft guide-curve actions ──────────────────────────────────
+  setAssemblyExplodedEnabled: (assemblyId, enabled) => {
+    const { nodes, rootIds, past } = get();
+    const assembly = nodes[assemblyId];
+    const data = assembly?.params?.assembly;
+    if (!assembly || !isAssemblyDocumentData(data) || data.exploded.enabled === enabled) return;
+    const updated = {
+      ...nodes,
+      [assemblyId]: {
+        ...assembly,
+        params: { ...assembly.params, assembly: { ...data, exploded: { ...data.exploded, enabled } } },
+      },
+    };
+    set({
+      nodes: updated,
+      past: pushPast(past, makeAction(
+        'ASSEMBLY', enabled ? 'Enable exploded view' : 'Disable exploded view',
+        Object.values(nodes), Object.values(updated), rootIds, rootIds,
+      )),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  setAssemblyExplosionFactor: (assemblyId, factor) => {
+    const { nodes, rootIds, past } = get();
+    const assembly = nodes[assemblyId];
+    const data = assembly?.params?.assembly;
+    if (!assembly || !isAssemblyDocumentData(data)) return;
+    const normalized = Math.max(0, Math.min(1, Number.isFinite(factor) ? factor : 0));
+    if (Math.abs(data.exploded.factor - normalized) < 1e-6) return;
+    const updated = {
+      ...nodes,
+      [assemblyId]: {
+        ...assembly,
+        params: {
+          ...assembly.params,
+          assembly: { ...data, exploded: { ...data.exploded, enabled: normalized > 0, factor: normalized } },
+        },
+      },
+    };
+    set({
+      nodes: updated,
+      past: pushPast(past, makeAction(
+        'ASSEMBLY', 'Change exploded-view factor',
+        Object.values(nodes), Object.values(updated), rootIds, rootIds,
+      )),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  generateAssemblyExplosion: (assemblyId, distance = 40) => {
+    const { nodes, rootIds, past } = get();
+    const assembly = nodes[assemblyId];
+    const data = assembly?.params?.assembly;
+    if (!assembly || !isAssemblyDocumentData(data)) return;
+    const ids = data.componentIds.filter((id) => {
+      const value = nodes[id]?.params?.assemblyComponent;
+      return nodes[id]?.visible && isAssemblyComponentData(value) && !value.suppressed;
+    });
+    if (!ids.length) return;
+    const center = ids.reduce<[number, number, number]>((sum, id) => {
+      const p = nodes[id].transform.position;
+      return [sum[0] + p[0], sum[1] + p[1], sum[2] + p[2]];
+    }, [0, 0, 0]).map((value) => value / ids.length) as [number, number, number];
+    const magnitude = Math.max(0, distance);
+    const transforms = Object.fromEntries(ids.map((id, index) => {
+      const p = nodes[id].transform.position;
+      let dx = p[0] - center[0], dy = p[1] - center[1], dz = p[2] - center[2];
+      let length = Math.hypot(dx, dy, dz);
+      if (length < 1e-6) {
+        const angle = (index / Math.max(1, ids.length)) * Math.PI * 2;
+        dx = Math.cos(angle); dy = Math.sin(angle); dz = index % 2 ? 0.35 : -0.35;
+        length = Math.hypot(dx, dy, dz);
+      }
+      return [id, {
+        componentId: id,
+        offset: [dx / length * magnitude, dy / length * magnitude, dz / length * magnitude],
+      }];
+    }));
+    const updated = {
+      ...nodes,
+      [assemblyId]: {
+        ...assembly,
+        params: {
+          ...assembly.params,
+          assembly: { ...data, exploded: { enabled: true, factor: 1, transforms } },
+        },
+      },
+    };
+    set({
+      nodes: updated,
+      past: pushPast(past, makeAction(
+        'ASSEMBLY', 'Generate automatic exploded view',
+        Object.values(nodes), Object.values(updated), rootIds, rootIds,
+      )),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  setAssemblyComponentExplodedOffset: (componentId, offset) => {
+    const { nodes, rootIds, past } = get();
+    const componentData = nodes[componentId]?.params?.assemblyComponent;
+    if (!isAssemblyComponentData(componentData)) return;
+    const assembly = nodes[componentData.assemblyId];
+    const data = assembly?.params?.assembly;
+    if (!assembly || !isAssemblyDocumentData(data)) return;
+    const transforms = {
+      ...data.exploded.transforms,
+      [componentId]: { componentId, offset: [...offset] as [number, number, number] },
+    };
+    const updated = {
+      ...nodes,
+      [assembly.id]: {
+        ...assembly,
+        params: {
+          ...assembly.params,
+          assembly: { ...data, exploded: { ...data.exploded, enabled: true, transforms } },
+        },
+      },
+    };
+    set({
+      nodes: updated,
+      past: pushPast(past, makeAction(
+        'ASSEMBLY', `Set exploded offset for ${nodes[componentId].name}`,
+        Object.values(nodes), Object.values(updated), rootIds, rootIds,
+      )),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  resetAssemblyExplosion: (assemblyId) => {
+    const { nodes, rootIds, past } = get();
+    const assembly = nodes[assemblyId];
+    const data = assembly?.params?.assembly;
+    if (!assembly || !isAssemblyDocumentData(data)) return;
+    const updated = {
+      ...nodes,
+      [assemblyId]: {
+        ...assembly,
+        params: {
+          ...assembly.params,
+          assembly: { ...data, exploded: { enabled: false, factor: 0, transforms: {} } },
+        },
+      },
+    };
+    set({
+      nodes: updated,
+      past: pushPast(past, makeAction(
+        'ASSEMBLY', 'Reset exploded view',
+        Object.values(nodes), Object.values(updated), rootIds, rootIds,
+      )),
+      future: [],
+    });
+    dispatchCAD('cad-assembly-sync');
+  },
+
+  generateAssemblyBom: (assemblyId) => {
+    try {
+      const entries = AssemblyBomService.generate(get().nodes, assemblyId, (window as any).oc);
+      set({ assemblyBom: { assemblyId, entries } });
+      get().log(`BOM generated: ${entries.length} unique part(s).`, 'success');
+      return entries;
+    } catch (error) {
+      get().log(error instanceof Error ? error.message : String(error), 'error');
+      return [];
+    }
+  },
+
+  exportAssemblyBom: (assemblyId, format) => {
+    const assembly = get().nodes[assemblyId];
+    const cached = get().assemblyBom;
+    const entries = cached?.assemblyId === assemblyId ? cached.entries : get().generateAssemblyBom(assemblyId);
+    if (!assembly || !entries.length) {
+      get().log('The assembly BOM is empty.', 'warn');
+      return;
+    }
+    AssemblyBomService.download(entries, assembly.name, format);
+    get().log(`BOM exported as ${format.toUpperCase()}.`, 'success');
+  },
+
+  runAssemblyInterferenceCheck: async (assemblyId, selectedOnly = false) => {
+    const oc = (window as any).oc;
+    if (!oc) {
+      get().log('OCC kernel is not initialized.', 'error');
+      return null;
+    }
+    set({ assemblyInterferenceReport: null, assemblyInterferenceProgress: 0 });
+    const selected = selectedOnly
+      ? get().selectedIds.filter((id) => get().nodes[id]?.type === 'assembly_component')
+      : [];
+    if (selectedOnly && selected.length < 2) {
+      set({ assemblyInterferenceProgress: null });
+      get().log('Select at least two assembly components to check.', 'warn');
+      return null;
+    }
+    try {
+      const report = await AssemblyInterferenceService.check(
+        oc, get().nodes, assemblyId, selected,
+        (completed, total) => set({ assemblyInterferenceProgress: total ? completed / total : 1 }),
+      );
+      set({ assemblyInterferenceReport: report, assemblyInterferenceProgress: null });
+      const collisionIds = [...new Set(report.pairs
+        .filter((pair) => pair.kind === 'interference')
+        .flatMap((pair) => [pair.componentAId, pair.componentBId]))];
+      dispatchCAD('cad-assembly-interference-highlight', { componentIds: collisionIds });
+      get().log(
+        report.pairs.length
+          ? `Interference check found ${report.pairs.length} contact pair(s).`
+          : 'Interference check completed with no contacts.',
+        report.pairs.some((pair) => pair.kind === 'interference') ? 'warn' : 'success',
+      );
+      return report;
+    } catch (error) {
+      set({ assemblyInterferenceProgress: null });
+      get().log(error instanceof Error ? error.message : String(error), 'error');
+      return null;
+    }
+  },
+
+  clearAssemblyInterference: () => {
+    set({ assemblyInterferenceReport: null, assemblyInterferenceProgress: null });
+    dispatchCAD('cad-assembly-interference-highlight', { componentIds: [] });
+  },
+
+  createAssemblyCompound: (assemblyId) => {
+    const oc = (window as any).oc;
+    if (!oc) {
+      get().log('OCC kernel is not initialized.', 'error');
+      return null;
+    }
+    try {
+      const assembly = get().nodes[assemblyId];
+      if (!assembly) return null;
+      const id = crypto.randomUUID();
+      const shape = AssemblyBRepService.buildAssemblyCompound(oc, get().nodes, assemblyId);
+      CADGeometryRegistry.getInstance().registerShape(id, shape);
+      get().addNode({
+        id, name: `${assembly.name} Compound`, type: 'compound', visible: true, locked: false,
+        parentId: null, notes: `Generated from assembly ${assemblyId}`,
+        transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] },
+        material: { ...DEFAULT_MATERIAL, color: NODE_TYPE_COLORS.compound },
+        params: { sourceAssemblyId: assemblyId, generatedAssemblyCompound: true },
+      });
+      dispatchCAD('cad-add-mesh', { id });
+      get().log(`Created compound from "${assembly.name}".`, 'success');
+      return id;
+    } catch (error) {
+      get().log(error instanceof Error ? error.message : String(error), 'error');
+      return null;
+    }
+  },
+
+  exportAssemblySTEP: (assemblyId) => {
+    const oc = (window as any).oc;
+    if (!oc) {
+      get().log('OCC kernel is not initialized.', 'error');
+      return;
+    }
+    let shape: any;
+    try {
+      const assembly = get().nodes[assemblyId];
+      if (!assembly) return;
+      shape = AssemblyBRepService.buildAssemblyCompound(oc, get().nodes, assemblyId);
+      const bytes = OccExchangeService.exportSTEP(oc, shape);
+      const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/step' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${assembly.name.replace(/[^\w.-]+/g, '_')}.stp`;
+      link.click();
+      URL.revokeObjectURL(url);
+      get().log(`Exported assembly "${assembly.name}" to STEP.`, 'success');
+    } catch (error) {
+      get().log(error instanceof Error ? error.message : String(error), 'error');
+    } finally {
+      shape?.delete?.();
+    }
+  },
+
   startGuideProfilePick: () => set({
     interactionMode: 'GUIDE_PROFILE_PICK',
     guideProfiles: [], guideDraft: null, guideSnap: null, selectedGuideId: null,
@@ -2260,6 +2567,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       nodes: normalized, rootIds: [...rootIds], selectedIds: [], activeComponentId: null, past: [], future: [],
       assemblyReferencePickType: null, pickedAssemblyReference: null,
       assemblyConstraintDraft: null, selectedAssemblyConstraint: null,
+      assemblyInterferenceReport: null, assemblyInterferenceProgress: null, assemblyBom: null,
     });
     get().migrateToComponentTree();
     dispatchCAD('cad-assembly-sync');
@@ -2273,6 +2581,7 @@ export const useCADStore = create<CADState>((set, get) => ({
       nodes: {}, rootIds: [], selectedIds: [], activeComponentId: null, past: [], future: [],
       assemblyReferencePickType: null, pickedAssemblyReference: null,
       assemblyConstraintDraft: null, selectedAssemblyConstraint: null,
+      assemblyInterferenceReport: null, assemblyInterferenceProgress: null, assemblyBom: null,
     });
     get().log('New project.', 'info');
   },
