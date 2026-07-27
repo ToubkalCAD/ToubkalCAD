@@ -4,6 +4,8 @@ ToubkalCAD is a browser-based 3D parametric CAD application. It combines
 OpenCascade compiled to WebAssembly for solid modeling with Three.js for
 rendering and React for the user interface.
 
+**[Launch the live ToubkalCAD app](https://toubkal-cad.vercel.app)**
+
 > **Project status:** ToubkalCAD is under active development. File formats,
 > feature behavior, and APIs may change before a stable release.
 
@@ -39,7 +41,7 @@ not initialize.
 ## Getting started
 
 ```bash
-git clone https://github.com/JNaruto-mar/ToubkalCAD.git
+git clone https://github.com/ToubkalCAD/ToubkalCAD.git
 cd ToubkalCAD
 npm ci
 npm run dev
@@ -90,9 +92,11 @@ security reports, as described in [SECURITY.md](SECURITY.md).
 
 ## Deployment
 
-`netlify.toml` builds the project with Node 20, publishes `dist/`, configures SPA
-routing, and supplies the required cross-origin isolation headers. Generated
-`dist/` files are not committed.
+The production app is deployed at
+[toubkal-cad.vercel.app](https://toubkal-cad.vercel.app). `vercel.json` builds
+the project, publishes `dist/`, configures SPA routing, and supplies the required
+cross-origin isolation and WASM caching headers. Generated `dist/` files are not
+committed.
 
 ## License
 
