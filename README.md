@@ -6,6 +6,8 @@ rendering and React for the user interface.
 
 **[Launch the live ToubkalCAD app](https://toubkal-cad.vercel.app)**
 
+[![ToubkalCAD workspace showing a parametric mechanical assembly and live shape analysis](assets/screenshots/toubkalcad-workspace.png)](https://toubkal-cad.vercel.app)
+
 > **Project status:** ToubkalCAD is under active development. File formats,
 > feature behavior, and APIs may change before a stable release.
 
