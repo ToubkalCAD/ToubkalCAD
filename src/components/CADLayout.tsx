@@ -281,13 +281,18 @@ export const CADLayout: React.FC = () => {
             borderRight: '1px solid var(--border-soft)',
             flexShrink: 0,
           }}>
-            <span style={{
-              display: 'inline-flex', width: 16, height: 16, borderRadius: 4,
-              background: 'linear-gradient(135deg, var(--accent), var(--accent-hover))',
-              alignItems: 'center', justifyContent: 'center', color: '#fff', flexShrink: 0,
-            }}>
-              <Icon name="box" size={11} stroke={2} color="#fff" />
-            </span>
+            <img
+              src="/toubkalcad-app-logo.png"
+              alt=""
+              aria-hidden="true"
+              style={{
+                display: 'block',
+                width: 20,
+                height: 20,
+                objectFit: 'contain',
+                flexShrink: 0,
+              }}
+            />
             <span style={{ fontSize: '12px', fontWeight: 800, color: 'var(--accent)', letterSpacing: '1.2px' }}>
               TOUBKAL<span style={{ color: 'var(--text-primary)', fontWeight: 400 }}>CAD</span>
             </span>

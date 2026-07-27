@@ -165,6 +165,8 @@ export default defineConfig({
         // Static favicon — HtmlRspackPlugin only consumes public/index.html as a
         // template, so other public/ assets must be copied explicitly to reach dist/.
         { from: 'public/favicon.svg', to: 'favicon.svg', noErrorOnMissing: true },
+        { from: 'public/favicon.png', to: 'favicon.png' },
+        { from: 'public/toubkalcad-app-logo.png', to: 'toubkalcad-app-logo.png' },
       ],
     }),
   ],
