@@ -21,6 +21,22 @@ rendering and React for the user interface.
 
 The implementation roadmap is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
+## Built with
+
+ToubkalCAD is made possible by open-source projects including:
+
+- [OpenCascade.js](https://github.com/donalffons/opencascade.js) — solid
+  modeling compiled to WebAssembly
+- [PlaneGCS](https://github.com/Salusoft89/planegcs) — geometric constraint
+  solving
+- [Three.js](https://threejs.org/) — 3D rendering
+- [React](https://react.dev/) — user interface
+- [Zustand](https://github.com/pmndrs/zustand) — application state management
+- [Dockview](https://dockview.dev/) — dockable interface panels
+
+See [Third-party notices](THIRD_PARTY_NOTICES.md) for dependency and licensing
+information.
+
 ## Requirements
 
 - Node.js 20.19 or newer
