@@ -11,6 +11,12 @@ rendering and React for the user interface.
 > **Project status:** ToubkalCAD is under active development. File formats,
 > feature behavior, and APIs may change before a stable release.
 
+## Documentation
+
+The documentation source lives in [`docs/`](docs/index.md) and covers getting
+started, modeling workflows, reference material, troubleshooting, contributing,
+and the application architecture.
+
 ## Features
 
 - Browser-based solid and surface modeling
