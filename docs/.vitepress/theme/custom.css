@@ -28,20 +28,17 @@
   height: 28px;
 }
 
-.VPHomeHero .image-container {
-  width: min(100%, 590px);
-  height: auto;
-  transform: none;
-}
-
 .VPHomeHero .image-src {
-  position: static;
-  width: 100%;
-  max-width: 590px;
-  max-height: none;
   border: 1px solid rgba(90, 214, 255, 0.22);
   border-radius: 14px;
   box-shadow: 0 28px 80px rgba(0, 21, 44, 0.38);
+}
+
+@media (min-width: 960px) {
+  .VPHomeHero .image-src {
+    max-width: min(42vw, 520px);
+    max-height: 340px;
+  }
 }
 
 .VPHomeFeatures .VPFeature {
