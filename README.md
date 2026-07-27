@@ -6,6 +6,8 @@ rendering and React for the user interface.
 
 **[Launch the live ToubkalCAD app](https://toubkal-cad.vercel.app)**
 
+**[Read the ToubkalCAD documentation](https://toubkal-docs.vercel.app)**
+
 [![ToubkalCAD workspace showing a parametric mechanical assembly and live shape analysis](assets/screenshots/toubkalcad-workspace.png)](https://toubkal-cad.vercel.app)
 
 > **Project status:** ToubkalCAD is under active development. File formats,
@@ -13,9 +15,10 @@ rendering and React for the user interface.
 
 ## Documentation
 
-The documentation source lives in [`docs/`](docs/index.md) and covers getting
-started, modeling workflows, reference material, troubleshooting, contributing,
-and the application architecture.
+Visit the **[ToubkalCAD documentation site](https://toubkal-docs.vercel.app)**
+for getting started, modeling workflows, reference material, troubleshooting,
+contributing, and application architecture. Its source lives in
+[`docs/`](docs/index.md).
 
 ## Features
 
