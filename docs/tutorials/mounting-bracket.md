@@ -1,59 +1,65 @@
-# Model a Mounting Bracket
+# Creating a Mechanical Bracket
 
-In this tutorial you will sketch a rectangular plate, extrude it, add a hole,
-and soften selected edges.
+Build an L-shaped mounting bracket from two controlled extrusions, add a hole,
+and finish selected edges.
 
-## Before you begin
+| | |
+| --- | --- |
+| **Difficulty level** | Intermediate |
+| **Estimated completion time** | 35 minutes |
+| **Required tools** | ToubkalCAD; sketch, Extrude, Pocket, and Fillet tools |
 
-Complete [Create Your First Model](/getting-started/first-model). Save the
-project after each major feature so you can recover from an invalid operation.
+## Learning objectives
 
-## 1. Sketch the base
+- Build features on a datum plane and a planar face.
+- Add material with **Pad** and remove it with **Pocket**.
+- Apply a conservative finishing feature after the main geometry.
 
-1. Start a blank document.
-2. Open the **Sketch** tab and choose **Create Sketch**.
-3. Select the XY plane.
-4. Draw a rectangle centered near the sketch origin.
-5. Add horizontal and vertical dimensions for the plate size.
-6. Constrain the rectangle so it no longer moves unexpectedly.
-7. Finish the sketch.
+## Final expected result
 
-## 2. Extrude the plate
+An L-bracket with a `70 × 50 × 8 mm` base, a `50 × 40 × 8 mm` upright, and a
+`10 mm` diameter mounting hole.
 
-1. Select the completed sketch in the model tree.
-2. Open **Model** and choose **Extrude**.
-3. Enter the plate thickness.
-4. Confirm the feature.
+## Steps
 
-## 3. Add a mounting hole
+1. Create an XY-plane sketch and draw a `70 × 50 mm` rectangle.
+2. Quit the sketch, select it, and extrude `8 mm` with **Result → New**.
+3. Rename the feature `Bracket Base`.
+4. Choose **Sketch → Sketch Plane → On Face**, then select a narrow side face of
+   the base.
+5. Draw a `50 × 40 mm` rectangle positioned so its lower edge meets the base.
+6. Quit the sketch and extrude it `8 mm` with **Result → Pad**.
+7. Use **Pick target** in the Extrude panel and select `Bracket Base`, then apply.
+8. Start another sketch on the upright's broad face.
+9. Draw a circle, enter `10 mm` in the live diameter field, and position its
+   center with dimensions.
+10. Quit the sketch and extrude the circle with **Result → Pocket**.
+11. Pick the bracket as the target and use a length that passes fully through the
+    upright, reversing direction if the preview points outward.
+12. Select the final bracket, choose **Modify → Fillet**, select only the inside
+    joining edge, start with a `2 mm` radius, and apply.
+13. Inspect all sides, save the project, and export the final result to STEP.
 
-1. Create a new sketch on the plate's top face.
-2. Draw a circle.
-3. Dimension its diameter and its position relative to the plate edges.
-4. Finish the sketch.
-5. Extrude the circular profile through the plate using a subtractive operation.
+## Tips
 
-If the cut fails, confirm the profile is closed and that its extrusion crosses
-the complete plate.
+- Create structural features before fillets and chamfers.
+- Use **Pad** and **Pocket** to preserve the explicit target relationship.
+- If face-based references become unstable during redesign, rebuild the upright
+  from a stable datum plane.
 
-## 4. Finish the edges
+## Common mistakes
 
-1. Select one or more outer edges.
-2. Choose **Modify → Fillet** or **Chamfer**.
-3. Enter a conservative radius or distance.
-4. Confirm the feature.
+- **Pad or Pocket has no target:** activate **Pick target** and select the solid.
+- **Hole does not pass through:** increase the blind length or reverse it.
+- **Fillet fails:** reduce the radius or select fewer edges.
 
-Large values can make a feature geometrically impossible. Reduce the value if
-the operation fails.
+## Related documentation
 
-## 5. Inspect and save
+- [Part modeling guide](/user-guide/part-modeling/)
+- [Working with multiple sketches](./multiple-sketches)
+- [Editing an existing feature](./edit-feature)
 
-Fit the model in view, rotate it to inspect the underside, and use the Measure
-properties to check important dimensions. Save the project.
+## Summary
 
-## What you learned
-
-- Sketches define editable profiles.
-- Dimensions and constraints capture design intent.
-- Later features depend on earlier geometry.
-- Modeling order and valid parameter ranges affect recomputation.
+You created a production-style bracket by adding and removing material in a
+deliberate feature order, then added a final edge treatment.

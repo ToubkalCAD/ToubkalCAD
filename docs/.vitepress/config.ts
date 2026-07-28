@@ -59,9 +59,119 @@ export default defineConfig({
           text: "Tutorials",
           items: [
             { text: "Overview", link: "/tutorials/" },
+          ],
+        },
+        {
+          text: "Beginner",
+          collapsed: false,
+          items: [
             {
-              text: "Model a Mounting Bracket",
+              text: "Interface Tour",
+              link: "/tutorials/interface-tour",
+            },
+            {
+              text: "Viewport Navigation",
+              link: "/tutorials/viewport-navigation",
+            },
+            {
+              text: "New Project",
+              link: "/tutorials/new-project",
+            },
+            {
+              text: "Basic 2D Sketch",
+              link: "/tutorials/basic-2d-sketch",
+            },
+            {
+              text: "Exact Rectangle",
+              link: "/tutorials/exact-rectangle",
+            },
+            {
+              text: "Dimensioned Circle",
+              link: "/tutorials/dimensioned-circle",
+            },
+            {
+              text: "Sketch to 3D Part",
+              link: "/tutorials/sketch-to-part",
+            },
+            {
+              text: "Edit a Feature",
+              link: "/tutorials/edit-feature",
+            },
+            {
+              text: "Save and Export",
+              link: "/tutorials/save-and-export",
+            },
+          ],
+        },
+        {
+          text: "Intermediate",
+          collapsed: false,
+          items: [
+            {
+              text: "Mechanical Bracket",
               link: "/tutorials/mounting-bracket",
+            },
+            {
+              text: "Plate with Holes",
+              link: "/tutorials/plate-with-holes",
+            },
+            {
+              text: "Hollow Enclosure",
+              link: "/tutorials/hollow-enclosure",
+            },
+            {
+              text: "Boolean Operations",
+              link: "/tutorials/boolean-operations",
+            },
+            {
+              text: "Repeated Features",
+              link: "/tutorials/repeated-features",
+            },
+            {
+              text: "Import and Modify",
+              link: "/tutorials/import-and-modify",
+            },
+            {
+              text: "Model Tree Organization",
+              link: "/tutorials/model-tree-organization",
+            },
+            {
+              text: "Multiple Sketches",
+              link: "/tutorials/multiple-sketches",
+            },
+          ],
+        },
+        {
+          text: "Advanced",
+          collapsed: true,
+          items: [
+            {
+              text: "Parametric Modeling",
+              link: "/tutorials/parametric-modeling",
+            },
+            {
+              text: "Constraint-Driven Sketch",
+              link: "/tutorials/constraint-driven-sketch",
+            },
+            {
+              text: "Multi-Body Modeling",
+              link: "/tutorials/multi-body-modeling",
+            },
+            {
+              text: "Complex Booleans",
+              link: "/tutorials/complex-booleans",
+            },
+            {
+              text: "Lofted Transition",
+              link: "/tutorials/advanced-occ-operations",
+            },
+            {
+              text: "Large-Model Performance",
+              link: "/tutorials/performance-large-models",
+            },
+            {
+              text: "STEP for Manufacturing",
+              link: "/tutorials/step-manufacturing",
             },
           ],
         },
