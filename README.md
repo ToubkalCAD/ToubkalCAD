@@ -8,6 +8,8 @@ rendering and React for the user interface.
 
 **[Read the ToubkalCAD documentation](https://toubkal-docs.vercel.app)**
 
+**[Join the ToubkalCAD community discussions](https://github.com/ToubkalCAD/ToubkalCAD/discussions)**
+
 **[Support ToubkalCAD on Ko-fi](https://ko-fi.com/toubkalcad)**
 
 [![ToubkalCAD workspace showing a parametric mechanical assembly and live shape analysis](assets/screenshots/toubkalcad-workspace.png)](https://toubkal-cad.vercel.app)
