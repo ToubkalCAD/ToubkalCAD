@@ -231,7 +231,7 @@ export const CADLayout: React.FC = () => {
     event.api.addPanel({ id: 'console',    component: 'consoleView',   title: 'Console',
       position: { referencePanel: 'viewport', direction: 'below' }, initialHeight: 130 });
     event.api.addPanel({ id: 'projects',   component: 'projectsView',  title: 'Projects',
-      position: { referencePanel: 'console',  direction: 'right' },  initialWidth: 260 });
+      position: { referencePanel: 'properties', direction: 'within' } });
     // Advanced (guided) Loft authoring is now a floating dialog over the viewport
     // (see AdvancedLoftPanel below), not a docked sidebar tab.
     event.api.onDidLayoutChange(() => resizeFnRef.current?.());
