@@ -256,6 +256,10 @@ export default defineConfig({
               text: "Status and Roadmap",
               link: "/project/status-and-roadmap",
             },
+            {
+              text: "Assembly Tools Roadmap",
+              link: "/project/assembly-roadmap",
+            },
           ],
         },
       ],

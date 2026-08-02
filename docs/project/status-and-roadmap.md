@@ -9,6 +9,7 @@ interoperability, appearance, analysis, and reliability.
 - [GitHub repository](https://github.com/ToubkalCAD/ToubkalCAD)
 - [Issues](https://github.com/ToubkalCAD/ToubkalCAD/issues)
 - [Roadmap design notes](https://github.com/ToubkalCAD/ToubkalCAD/blob/main/docs/ROADMAP.md)
+- [Assembly Tools Roadmap](./assembly-roadmap)
 
 The design notes are useful technical context, but they are not a release
 promise. The repository history and working application are the authoritative

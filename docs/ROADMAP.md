@@ -169,8 +169,11 @@ depends on **P1**.
 ### Track P — Parametric feature tree (deepest)
 - **P1** Feature DAG + downstream recompute with persistent naming
   (`.Generated()`/`.Modified()`) so child features survive parent edits.
-- **P2** 3D assembly constraints (Mate/Align/Concentric) — **still-pending Prompt-4**;
-  separate subsystem (constrains solid transforms via OCC face/axis geometry).
+- **P2** ✅ Assembly baseline — reusable part instances, persistent geometric
+  references, six guided constraint types, iterative solving, exploded views,
+  interference checking, BOM, compounds, STEP export, persistence, and dedicated
+  test suites are implemented. The dependency-ordered enhancement plan is in
+  **[project/assembly-roadmap.md](./project/assembly-roadmap.md)**.
 
 ---
 
